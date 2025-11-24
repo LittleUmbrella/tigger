@@ -1,0 +1,43 @@
+{
+  "harvesters": [
+    {
+      "name": "main_harvester",
+      "channel": "your_telegram_channel",
+      "apiId": 12345678,
+      "accessHash": "optional_access_hash_for_private_channels",
+      "pollInterval": 5000
+    }
+  ],
+  "parsers": [
+    {
+      "name": "main_parser",
+      "channel": "your_telegram_channel"
+    }
+  ],
+  "initiators": [
+    {
+      "type": "bybit",
+      "testnet": false,
+      "riskPercentage": 3
+    }
+  ],
+  "monitors": [
+    {
+      "type": "bybit",
+      "pollInterval": 10000,
+      "entryTimeoutDays": 2
+    }
+  ],
+  "channels": [
+    {
+      "channel": "your_telegram_channel",
+      "harvester": "main_harvester",
+      "parser": "main_parser",
+      "initiator": "bybit",
+      "monitor": "bybit"
+    }
+  ],
+  "database": {
+    "path": "data/trading_bot.db"
+  }
+}

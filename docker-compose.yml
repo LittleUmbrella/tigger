@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  tigger-bot:
+    build: .
+    container_name: tigger-bot
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+    environment:
+      - CONFIG_PATH=/app/config.json
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    env_file:
+      - .env
+    networks:
+      - tigger-network
+
+networks:
+  tigger-network:
+    driver: bridge
+
