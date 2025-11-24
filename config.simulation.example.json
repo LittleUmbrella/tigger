@@ -1,0 +1,51 @@
+{
+  "harvesters": [
+    {
+      "name": "csv_harvester",
+      "channel": "simulated_channel",
+      "apiId": 0,
+      "pollInterval": 5000
+    }
+  ],
+  "parsers": [
+    {
+      "name": "sim_parser",
+      "channel": "simulated_channel"
+    }
+  ],
+  "initiators": [
+    {
+      "type": "bybit",
+      "testnet": false,
+      "riskPercentage": 3
+    }
+  ],
+  "monitors": [
+    {
+      "type": "bybit",
+      "pollInterval": 10000,
+      "entryTimeoutDays": 2
+    }
+  ],
+  "channels": [
+    {
+      "channel": "simulated_channel",
+      "harvester": "csv_harvester",
+      "parser": "sim_parser",
+      "initiator": "bybit",
+      "monitor": "bybit"
+    }
+  ],
+  "simulation": {
+    "enabled": true,
+    "messagesFile": "data/messages.csv",
+    "startDate": "2024-09-15T00:00:00Z",
+    "speedMultiplier": 10.0,
+    "maxTradeDurationDays": 7
+  },
+  "database": {
+    "path": "data/simulation.db"
+  }
+}
+
+

@@ -1,0 +1,35 @@
+{
+  "name": "tigger",
+  "version": "1.0.0",
+  "description": "Crypto trading bot with Telegram signal harvesting",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": ["crypto", "trading", "bot", "telegram", "bybit"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "commander": "^14.0.2",
+    "csv-writer": "^1.6.0",
+    "dayjs": "^1.11.19",
+    "dotenv": "^17.2.3",
+    "fs-extra": "^11.3.2",
+    "input": "^1.0.1",
+    "telegram": "^2.26.22",
+    "bybit-api": "^2.0.0",
+    "better-sqlite3": "^11.0.0",
+    "winston": "^3.15.0",
+    "csv-parse": "^5.5.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/better-sqlite3": "^7.6.12",
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0"
+  }
+}
