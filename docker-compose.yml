@@ -16,6 +16,32 @@ services:
       - .env
     networks:
       - tigger-network
+    depends_on:
+      - ollama  # Optional: only needed if using containerized ollama
+
+  # Ollama service for LLM fallback parser (optional)
+  # Comment out if you're running ollama on the host machine
+  ollama:
+    image: ollama/ollama:latest
+    container_name: tigger-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "11434:11434"
+    networks:
+      - tigger-network
+    # Uncomment to use GPU (requires nvidia-docker)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  ollama-data:
 
 networks:
   tigger-network:

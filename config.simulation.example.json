@@ -15,7 +15,7 @@
   ],
   "initiators": [
     {
-      "type": "bybit",
+      "name": "bybit",
       "testnet": false,
       "riskPercentage": 3
     }
@@ -23,6 +23,7 @@
   "monitors": [
     {
       "type": "bybit",
+      "testnet": false,
       "pollInterval": 10000,
       "entryTimeoutDays": 2
     }
@@ -40,7 +41,7 @@
     "enabled": true,
     "messagesFile": "data/messages.csv",
     "startDate": "2024-09-15T00:00:00Z",
-    "speedMultiplier": 10.0,
+    "speedMultiplier": 0,
     "maxTradeDurationDays": 7
   },
   "database": {

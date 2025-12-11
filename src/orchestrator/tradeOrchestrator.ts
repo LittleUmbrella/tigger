@@ -1,4 +1,4 @@
-import { BotConfig } from '../types/config.js';
+import { BotConfig, AccountConfig } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { startSignalHarvester } from '../harvesters/signalHarvester.js';
 import { startCSVHarvester } from '../harvesters/csvHarvester.js';
@@ -9,7 +9,13 @@ import { logger } from '../utils/logger.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { registerParser } from '../parsers/parserRegistry.js';
 import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
+import '../initiators/index.js'; // Register built-in initiators
+import '../managers/index.js'; // Register built-in managers
+import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
+import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
+// @ts-ignore - bybit-api types may not be complete
+import { RESTClient } from 'bybit-api';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -19,6 +25,7 @@ interface OrchestratorState {
   stopMonitors: (() => Promise<void>)[];
   parserInterval?: NodeJS.Timeout;
   initiatorInterval?: NodeJS.Timeout;
+  managerInterval?: NodeJS.Timeout;
   running: boolean;
 }
 
@@ -28,12 +35,72 @@ export const startTradeOrchestrator = async (
   const isSimulation = config.simulation?.enabled || false;
   logger.info('Starting trade orchestrator', { simulation: isSimulation });
   
-  const db = new DatabaseManager(config.database?.path);
+  const db = new DatabaseManager({
+    type: config.database?.type,
+    path: config.database?.path,
+    url: config.database?.url
+  });
+  await db.initialize();
   const state: OrchestratorState = {
     stopHarvesters: [],
     stopMonitors: [],
     running: true
   };
+
+  // Create account map for easy lookup
+  const accountMap = new Map<string, AccountConfig>();
+  if (config.accounts) {
+    for (const account of config.accounts) {
+      accountMap.set(account.name, account);
+    }
+  }
+
+  // Create Bybit client map for managers (keyed by account name)
+  const bybitClientMap = new Map<string, RESTClient>();
+  const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RESTClient | undefined => {
+    const key = accountName || 'default';
+    
+    if (bybitClientMap.has(key)) {
+      return bybitClientMap.get(key);
+    }
+
+    if (isSimulation) {
+      return undefined; // No real client needed in simulation
+    }
+
+    // Get account config if account name is provided
+    let apiKey: string | undefined;
+    let apiSecret: string | undefined;
+    let useTestnet = testnet;
+
+    if (accountName && accountMap.has(accountName)) {
+      const account = accountMap.get(accountName)!;
+      apiKey = account.apiKey || (account.envVars?.apiKey ? process.env[account.envVars.apiKey] : process.env.BYBIT_API_KEY);
+      apiSecret = account.apiSecret || (account.envVars?.apiSecret ? process.env[account.envVars.apiSecret] : process.env.BYBIT_API_SECRET);
+      useTestnet = account.testnet || false;
+    } else {
+      // Fallback to environment variables
+      apiKey = process.env.BYBIT_API_KEY;
+      apiSecret = process.env.BYBIT_API_SECRET;
+    }
+
+    if (!apiKey || !apiSecret) {
+      return undefined;
+    }
+
+    const client = new RESTClient({
+      key: apiKey,
+      secret: apiSecret,
+      testnet: useTestnet,
+    });
+
+    bybitClientMap.set(key, client);
+    return client;
+  };
+
+  // Check if we're in maximum speed mode (no delays) - calculate early for use in monitor
+  const speedMultiplier = config.simulation?.speedMultiplier || 1.0;
+  const isMaxSpeed = speedMultiplier === 0 || speedMultiplier === Infinity || !isFinite(speedMultiplier);
 
   // Initialize historical price provider if in simulation mode
   let priceProvider: HistoricalPriceProvider | undefined;
@@ -57,7 +124,7 @@ export const startTradeOrchestrator = async (
   // Create lookup maps for harvesters, parsers, initiators, and monitors
   const harvesterMap = new Map(config.harvesters.map(h => [h.name, h]));
   const parserMap = new Map(config.parsers.map(p => [p.name, p]));
-  const initiatorMap = new Map(config.initiators.map(i => [i.type, i]));
+  const initiatorMap = new Map(config.initiators.map(i => [i.name || i.type || '', i]));
   const monitorMap = new Map(config.monitors.map(m => [m.type, m]));
 
   // Start all channel sets
@@ -83,12 +150,12 @@ export const startTradeOrchestrator = async (
         continue;
       }
 
-      // Resolve initiator
+      // Resolve initiator by name
       const initiator = initiatorMap.get(channelConfig.initiator);
       if (!initiator) {
         logger.error('Initiator not found', {
           channel: channelConfig.channel,
-          initiatorType: channelConfig.initiator
+          initiatorName: channelConfig.initiator
         });
         continue;
       }
@@ -115,14 +182,22 @@ export const startTradeOrchestrator = async (
       state.stopHarvesters.push(stopHarvester);
 
       // Start monitor for this channel
-      const stopMonitor = await startTradeMonitor(monitor, channelConfig.channel, db, isSimulation, priceProvider);
+      const stopMonitor = await startTradeMonitor(
+        monitor, 
+        channelConfig.channel, 
+        db, 
+        isSimulation, 
+        priceProvider, 
+        speedMultiplier,
+        (accountName?: string) => createBybitClient(accountName)
+      );
       state.stopMonitors.push(stopMonitor);
 
       logger.info('Started channel set', {
         channel: channelConfig.channel,
         harvester: harvester.name,
         parser: parser.name,
-        initiator: initiator.type,
+        initiator: initiator.name || initiator.type || channelConfig.initiator,
         monitor: monitor.type
       });
     } catch (error) {
@@ -133,6 +208,219 @@ export const startTradeOrchestrator = async (
     }
   }
 
+
+  // Process edited messages (both trade signals and management commands)
+  const processEditedMessages = async (
+    channel: string,
+    monitorType: string,
+    parserName: string
+  ): Promise<void> => {
+    const messages = await db.getUnparsedMessages(channel);
+    const editedMessages = messages.filter(m => m.old_content !== undefined && m.old_content !== null);
+    
+    if (editedMessages.length === 0) {
+      return;
+    }
+
+    // Get parser config for LLM fallback if configured
+    const channelConfig = config.channels.find(c => c.channel === channel);
+    const parserConfig = channelConfig ? parserMap.get(channelConfig.parser) : undefined;
+    const ollamaConfig = parserConfig?.ollama ? {
+      ...parserConfig.ollama,
+      channel: channel
+    } : undefined;
+
+    for (const message of editedMessages) {
+      try {
+        // First, check if the edited message is a management command
+        const command = await parseManagementCommand(message.content, ollamaConfig, message, db);
+        if (command) {
+          // This is an edited management command - execute the new command
+          // (We don't need to undo the old command, just execute the new one)
+            const manager = getManager(command.type);
+            if (manager) {
+            const managerContext: ManagerContext = {
+              channel,
+              message,
+              command,
+              db,
+              isSimulation,
+              priceProvider,
+              getBybitClient: (accountName?: string) => createBybitClient(accountName)
+            };
+
+            await manager(managerContext);
+            await db.markMessageParsed(message.id);
+            logger.info('Edited management command processed', {
+              channel,
+              commandType: command.type,
+              messageId: message.message_id,
+              oldContent: message.old_content?.substring(0, 50),
+              newContent: message.content.substring(0, 50)
+            });
+            continue; // Skip trade signal processing
+          } else {
+            logger.warn('Manager not found for edited command type', {
+              channel,
+              commandType: command.type,
+              messageId: message.message_id
+            });
+            await db.markMessageParsed(message.id);
+            continue;
+          }
+        }
+
+        // Not a management command, check if it's a trade signal
+        const newParsed = parseMessage(message.content, parserName);
+        if (!newParsed) {
+          // Not a trade signal either, mark as parsed and skip
+          await db.markMessageParsed(message.id);
+          continue;
+        }
+
+        // Check if there are existing trades for this message
+        const existingTrades = await db.getTradesByMessageId(message.message_id, channel);
+        if (existingTrades.length === 0) {
+          // No existing trades, this is a new signal (shouldn't happen if message was edited)
+          // But handle it anyway - will be processed by normal flow
+          await db.markMessageParsed(message.id);
+          continue;
+        }
+
+        // For each existing trade, check what changed
+        for (const trade of existingTrades) {
+          const diff = diffOrderWithTrade(newParsed, trade);
+          
+          // Route to appropriate update managers
+          if (diff.entryPriceChanged) {
+            const updateEntryManager = getManager('update_entry');
+            if (updateEntryManager) {
+              await updateEntryManager({
+                channel,
+                message,
+                command: { type: 'update_entry', newOrder: newParsed, trade },
+                db,
+                isSimulation,
+                priceProvider,
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+              } as ManagerContext);
+            }
+          }
+
+          if (diff.stopLossChanged) {
+            const updateStopLossManager = getManager('update_stop_loss');
+            if (updateStopLossManager) {
+              await updateStopLossManager({
+                channel,
+                message,
+                command: { type: 'update_stop_loss', newOrder: newParsed, trade },
+                db,
+                isSimulation,
+                priceProvider,
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+              } as ManagerContext);
+            }
+          }
+
+          if (diff.takeProfitsChanged) {
+            const updateTakeProfitsManager = getManager('update_take_profits');
+            if (updateTakeProfitsManager) {
+              await updateTakeProfitsManager({
+                channel,
+                message,
+                command: { type: 'update_take_profits', newOrder: newParsed, trade },
+                db,
+                isSimulation,
+                priceProvider,
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+              } as ManagerContext);
+            }
+          }
+
+          if (!diff.entryPriceChanged && !diff.stopLossChanged && !diff.takeProfitsChanged) {
+            logger.info('Edited message parsed but no trade parameters changed', {
+              channel,
+              messageId: message.message_id,
+              tradeId: trade.id
+            });
+          }
+        }
+
+        // Mark message as parsed after processing edits
+        await db.markMessageParsed(message.id);
+        logger.info('Edited trade message processed', {
+          channel,
+          messageId: message.message_id,
+          tradesUpdated: existingTrades.length
+        });
+      } catch (error) {
+        logger.error('Error processing edited message', {
+          channel,
+          messageId: message.message_id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Don't mark as parsed on error - allow retry
+      }
+    }
+  };
+
+  // Process management messages
+  const processManagementMessages = async (channel: string, monitorType: string): Promise<void> => {
+    const messages = await db.getUnparsedMessages(channel);
+    
+    // Get parser config for this channel to check for LLM fallback
+    const channelConfig = config.channels.find(c => c.channel === channel);
+    const parserConfig = channelConfig ? parserMap.get(channelConfig.parser) : undefined;
+    const ollamaConfig = parserConfig?.ollama ? {
+      ...parserConfig.ollama,
+      channel: channel
+    } : undefined;
+    
+    for (const message of messages) {
+      try {
+        // Check if message is a management command (with LLM fallback if configured)
+        // Pass message and db to enable reply chain context extraction
+        const command = await parseManagementCommand(message.content, ollamaConfig, message, db);
+        if (command) {
+          const manager = getManager(command.type);
+          if (manager) {
+            const managerContext: ManagerContext = {
+              channel,
+              message,
+              command,
+              db,
+              isSimulation,
+              priceProvider,
+              getBybitClient: (accountName?: string) => createBybitClient(accountName)
+            };
+
+            await manager(managerContext);
+            await db.markMessageParsed(message.id);
+            logger.info('Management command processed', {
+              channel,
+              commandType: command.type,
+              messageId: message.message_id
+            });
+          } else {
+            logger.warn('Manager not found for command type', {
+              channel,
+              commandType: command.type,
+              messageId: message.message_id
+            });
+            await db.markMessageParsed(message.id); // Mark as parsed to avoid reprocessing
+          }
+        }
+      } catch (error) {
+        logger.error('Error processing management message', {
+          channel,
+          messageId: message.message_id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Don't mark as parsed on error - allow retry
+      }
+    }
+  };
+
   // In simulation mode, process messages chronologically
   if (isSimulation && priceProvider) {
     // Process messages in chronological order based on their timestamps
@@ -142,7 +430,7 @@ export const startTradeOrchestrator = async (
         if (!parser) continue;
 
         // Get unparsed messages ordered by date
-        const messages = db.getUnparsedMessages(parser.channel);
+        const messages = await db.getUnparsedMessages(parser.channel);
         const sortedMessages = [...messages].sort((a, b) => {
           const dateA = new Date(a.date).getTime();
           const dateB = new Date(b.date).getTime();
@@ -156,31 +444,198 @@ export const startTradeOrchestrator = async (
           // Set simulation time to message time
           priceProvider.setCurrentTime(messageTime);
           
-            try {
-              // Parse the message using the configured parser
-              const parsed = parseMessage(message.content, parser.name);
-              if (parsed) {
-                db.markMessageParsed(message.id);
-                logger.info('Parsed message in simulation', {
+          try {
+            // Check if this is an edited message - process it specially
+            if (message.old_content) {
+              // First check if edited message is a management command
+              const parser = parserMap.get(channelConfig.parser);
+              const ollamaConfig = parser?.ollama ? {
+                ...parser.ollama,
+                channel: channelConfig.channel
+              } : undefined;
+              const command = await parseManagementCommand(message.content, ollamaConfig, message, db);
+              
+              if (command) {
+                // Edited management command - execute the new command
+                const manager = getManager(command.type);
+                if (manager) {
+                  const managerContext: ManagerContext = {
+                    channel: channelConfig.channel,
+                    message,
+                    command,
+                    db,
+                    isSimulation,
+                    priceProvider,
+                    getBybitClient: (accountName?: string) => createBybitClient(accountName)
+                  };
+
+                  await manager(managerContext);
+                  await db.markMessageParsed(message.id);
+                  logger.info('Edited management command processed in simulation', {
+                    channel: channelConfig.channel,
+                    commandType: command.type,
+                    messageId: message.message_id,
+                    messageTime: messageTime.toISOString()
+                  });
+                  continue; // Skip signal parsing for management messages
+                }
+              } else {
+                // Not a management command, check if it's an edited trade signal
+                if (!parser) {
+                  logger.warn('Parser not found for edited message', {
+                    channel: channelConfig.channel,
+                    parserName: channelConfig.parser
+                  });
+                  await db.markMessageParsed(message.id);
+                  continue;
+                }
+                const newParsed = parseMessage(message.content, parser.name);
+                if (newParsed) {
+                  const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
+                  if (existingTrades.length > 0) {
+                    // Process trade parameter updates
+                    for (const trade of existingTrades) {
+                      const diff = diffOrderWithTrade(newParsed, trade);
+                      
+                      if (diff.entryPriceChanged) {
+                        const updateEntryManager = getManager('update_entry');
+                        if (updateEntryManager) {
+                          await updateEntryManager({
+                            channel: channelConfig.channel,
+                            message,
+                            command: { type: 'update_entry', newOrder: newParsed, trade },
+                            db,
+                            isSimulation,
+                            priceProvider,
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                          } as ManagerContext);
+                        }
+                      }
+
+                      if (diff.stopLossChanged) {
+                        const updateStopLossManager = getManager('update_stop_loss');
+                        if (updateStopLossManager) {
+                          await updateStopLossManager({
+                            channel: channelConfig.channel,
+                            message,
+                            command: { type: 'update_stop_loss', newOrder: newParsed, trade },
+                            db,
+                            isSimulation,
+                            priceProvider,
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                          } as ManagerContext);
+                        }
+                      }
+
+                      if (diff.takeProfitsChanged) {
+                        const updateTakeProfitsManager = getManager('update_take_profits');
+                        if (updateTakeProfitsManager) {
+                          await updateTakeProfitsManager({
+                            channel: channelConfig.channel,
+                            message,
+                            command: { type: 'update_take_profits', newOrder: newParsed, trade },
+                            db,
+                            isSimulation,
+                            priceProvider,
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                          } as ManagerContext);
+                        }
+                      }
+                    }
+
+                    await db.markMessageParsed(message.id);
+                    logger.info('Edited trade message processed in simulation', {
+                      channel: channelConfig.channel,
+                      messageId: message.message_id,
+                      tradesUpdated: existingTrades.length
+                    });
+                    continue; // Skip normal parsing
+                  }
+                }
+              }
+            }
+
+            // Normal processing for non-edited messages
+            // First check if it's a management command (with LLM fallback if configured)
+            const parser = parserMap.get(channelConfig.parser);
+            const ollamaConfig = parser?.ollama ? {
+              ...parser.ollama,
+              channel: channelConfig.channel
+            } : undefined;
+            // Pass message and db to enable reply chain context extraction
+            const command = await parseManagementCommand(message.content, ollamaConfig, message, db);
+            if (command) {
+              const manager = getManager(command.type);
+              if (manager) {
+                const managerContext: ManagerContext = {
                   channel: channelConfig.channel,
-                  parserName: parser.name,
+                  message,
+                  command,
+                  db,
+                  isSimulation,
+                  priceProvider,
+                  getBybitClient: (accountName?: string) => createBybitClient(accountName)
+                };
+
+                await manager(managerContext);
+                await db.markMessageParsed(message.id);
+                logger.info('Management command processed in simulation', {
+                  channel: channelConfig.channel,
+                  commandType: command.type,
                   messageId: message.message_id,
-                  tradingPair: parsed.tradingPair,
                   messageTime: messageTime.toISOString()
                 });
-              } else {
-                db.markMessageParsed(message.id);
+                continue; // Skip signal parsing for management messages
               }
+            }
+
+            // Parse the message using the configured parser
+            if (!parser) {
+              logger.warn('Parser not found for channel', {
+                channel: channelConfig.channel,
+                parserName: channelConfig.parser
+              });
+              await db.markMessageParsed(message.id);
+              continue;
+            }
+
+            const parsed = parseMessage(message.content, parser.name);
+            if (parsed) {
+              // Check if trade already exists for this message (shouldn't happen, but safety check)
+              const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
+              if (existingTrades.length > 0) {
+                logger.warn('Trade already exists for message, skipping duplicate', {
+                  channel: channelConfig.channel,
+                  messageId: message.message_id,
+                  tradeId: existingTrades[0].id
+                });
+                await db.markMessageParsed(message.id);
+                continue;
+              }
+
+              await db.markMessageParsed(message.id);
+              logger.info('Parsed message in simulation', {
+                channel: channelConfig.channel,
+                parserName: parser.name,
+                messageId: message.message_id,
+                tradingPair: parsed.tradingPair,
+                messageTime: messageTime.toISOString()
+              });
+            } else {
+              await db.markMessageParsed(message.id);
+            }
             
-            // Small delay to allow processing
-            await new Promise(resolve => setTimeout(resolve, 10));
+            // Only add delay if not in maximum speed mode
+            if (!isMaxSpeed) {
+              await new Promise(resolve => setTimeout(resolve, 10));
+            }
           } catch (error) {
             logger.error('Error processing simulation message', {
               channel: channelConfig.channel,
               messageId: message.message_id,
               error: error instanceof Error ? error.message : String(error)
             });
-            db.markMessageParsed(message.id); // Mark as parsed to avoid infinite retry
+            await db.markMessageParsed(message.id); // Mark as parsed to avoid infinite retry
           }
         }
       }
@@ -200,6 +655,27 @@ export const startTradeOrchestrator = async (
       for (const channelConfig of config.channels) {
         const parser = parserMap.get(channelConfig.parser);
         if (parser) {
+          // First check for management messages
+          processManagementMessages(channelConfig.channel, channelConfig.monitor).catch(error => {
+            logger.error('Manager error', {
+              channel: channelConfig.channel,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+
+          // Then process edited messages (both management commands and trade signals)
+          processEditedMessages(
+            channelConfig.channel,
+            channelConfig.monitor,
+            parser.name
+          ).catch(error => {
+            logger.error('Edited message processing error', {
+              channel: channelConfig.channel,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+
+          // Then parse signal messages
           parseUnparsedMessages(parser, db).catch(error => {
             logger.error('Parser error', {
               channel: channelConfig.channel,
@@ -213,8 +689,9 @@ export const startTradeOrchestrator = async (
   }
 
   // In simulation mode, advance time for monitoring
+  // Skip time advancement in maximum speed mode (time is set directly per message/trade)
   let simulationTimeInterval: NodeJS.Timeout | undefined;
-  if (isSimulation && priceProvider) {
+  if (isSimulation && priceProvider && !isMaxSpeed) {
     const pollInterval = config.monitors[0]?.pollInterval || 10000;
     simulationTimeInterval = setInterval(() => {
       if (!state.running) return;
@@ -238,7 +715,7 @@ export const startTradeOrchestrator = async (
         if (!initiator) {
           logger.error('Initiator not found for channel', {
             channel: channelConfig.channel,
-            initiatorType: channelConfig.initiator
+            initiatorName: channelConfig.initiator
           });
           continue;
         }
@@ -253,19 +730,28 @@ export const startTradeOrchestrator = async (
           db,
           isSimulation,
           priceProvider,
-          channelConfig.parser // Pass parser name to initiator
+          channelConfig.parser, // Pass parser name to initiator
+          config.accounts // Pass accounts config
         );
       }
     };
 
-    // Process trades after a short delay to allow messages to be loaded
-    setTimeout(() => {
+    // Process trades immediately in max speed mode, otherwise wait for messages to load
+    if (isMaxSpeed) {
       processSimulationTrades().catch(error => {
         logger.error('Error processing simulation trades', {
           error: error instanceof Error ? error.message : String(error)
         });
       });
-    }, 2000);
+    } else {
+      setTimeout(() => {
+        processSimulationTrades().catch(error => {
+          logger.error('Error processing simulation trades', {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+      }, 2000);
+    }
   } else {
     // Live mode: Start initiator loop (runs periodically to initiate trades from parsed messages)
     state.initiatorInterval = setInterval(() => {
@@ -278,7 +764,7 @@ export const startTradeOrchestrator = async (
         if (!initiator) {
           logger.error('Initiator not found for channel', {
             channel: channelConfig.channel,
-            initiatorType: channelConfig.initiator
+            initiatorName: channelConfig.initiator
           });
           continue;
         }
@@ -292,11 +778,12 @@ export const startTradeOrchestrator = async (
           db,
           isSimulation,
           priceProvider,
-          channelConfig.parser // Pass parser name to initiator
+          channelConfig.parser, // Pass parser name to initiator
+          config.accounts // Pass accounts config
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,
-            initiatorType: initiator.type,
+            initiatorName: initiator.name || initiator.type || channelConfig.initiator,
             error: error instanceof Error ? error.message : String(error)
           });
         });
@@ -322,6 +809,9 @@ export const startTradeOrchestrator = async (
     }
     if (state.initiatorInterval) {
       clearInterval(state.initiatorInterval);
+    }
+    if (state.managerInterval) {
+      clearInterval(state.managerInterval);
     }
     if (simulationTimeInterval) {
       clearInterval(simulationTimeInterval);
@@ -349,7 +839,7 @@ export const startTradeOrchestrator = async (
       }
     }
 
-    db.close();
+    await db.close();
     logger.info('Trade orchestrator stopped');
   };
 };

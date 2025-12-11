@@ -1,0 +1,47 @@
+{
+  "harvesters": [
+    {
+      "name": "main_harvester",
+      "channel": "your_telegram_channel",
+      "apiId": 12345678,
+      "accessHash": "optional_access_hash_for_private_channels",
+      "pollInterval": 5000
+    }
+  ],
+  "parsers": [
+    {
+      "name": "main_parser",
+      "channel": "your_telegram_channel"
+    }
+  ],
+  "initiators": [
+    {
+      "name": "bybit",
+      "testnet": false,
+      "riskPercentage": 3
+    }
+  ],
+  "monitors": [
+    {
+      "type": "bybit",
+      "testnet": false,
+      "pollInterval": 10000,
+      "entryTimeoutDays": 2
+    }
+  ],
+  "channels": [
+    {
+      "channel": "your_telegram_channel",
+      "harvester": "main_harvester",
+      "parser": "main_parser",
+      "initiator": "bybit",
+      "monitor": "bybit"
+    }
+  ],
+  "database": {
+    "type": "postgresql",
+    "url": "postgresql://user:password@host:5432/dbname"
+  }
+}
+
+
