@@ -65,7 +65,7 @@ const checkEntryFilled = async (
     if (isSimulation) {
       // In simulation, check if current price has reached entry price
       if (priceProvider) {
-        const currentPrice = priceProvider.getCurrentPrice(trade.trading_pair);
+        const currentPrice = await priceProvider.getCurrentPrice(trade.trading_pair);
         if (currentPrice !== null) {
           const isLong = currentPrice >= trade.entry_price;
           // Consider filled if price has moved past entry (with small tolerance)
@@ -132,7 +132,7 @@ const checkPositionClosed = async (
   try {
     if (isSimulation && priceProvider && trade.entry_filled_at) {
       // In simulation, check if price has hit stop loss or take profit
-      const currentPrice = priceProvider.getCurrentPrice(trade.trading_pair);
+      const currentPrice = await priceProvider.getCurrentPrice(trade.trading_pair);
       if (currentPrice === null) {
         return { closed: false };
       }
@@ -339,7 +339,7 @@ const monitorTrade = async (
   try {
     // In simulation mode, use price provider's current time; otherwise use real time
     const currentSimTime = isSimulation && priceProvider 
-      ? priceProvider.getCurrentTime() 
+      ? await priceProvider.getCurrentTime() 
       : dayjs();
     
     // Check if trade has expired (entry not filled in time)
@@ -351,7 +351,7 @@ const monitorTrade = async (
         expiresAt: trade.expires_at
       });
       await cancelOrder(trade, bybitClient);
-      db.updateTrade(trade.id, { status: 'cancelled' });
+      await db.updateTrade(trade.id, { status: 'cancelled' });
       return;
     }
 
@@ -388,7 +388,7 @@ const monitorTrade = async (
           hitTP: hitTPBeforeEntry
         });
         await cancelOrder(trade, bybitClient);
-        db.updateTrade(trade.id, { status: 'cancelled' });
+        await db.updateTrade(trade.id, { status: 'cancelled' });
         return;
       }
 
@@ -399,7 +399,7 @@ const monitorTrade = async (
           tradeId: trade.id,
           positionId: entryResult.positionId
         });
-        db.updateTrade(trade.id, {
+        await db.updateTrade(trade.id, {
           status: 'active',
           entry_filled_at: dayjs().toISOString(),
           position_id: entryResult.positionId
@@ -435,7 +435,7 @@ const monitorTrade = async (
             : -priceChangePercent * trade.leverage;
         }
         
-        db.updateTrade(trade.id, {
+        await db.updateTrade(trade.id, {
           status: 'closed',
           exit_price: positionResult.exitPrice,
           exit_filled_at: dayjs().toISOString(),
@@ -463,7 +463,7 @@ const monitorTrade = async (
         });
         
         await updateStopLoss(trade, trade.entry_price, bybitClient);
-        db.updateTrade(trade.id, {
+        await db.updateTrade(trade.id, {
           stop_loss: trade.entry_price,
           stop_loss_breakeven: true
         });
@@ -492,7 +492,7 @@ const monitorTrade = async (
               ? priceChangePercent * trade.leverage
               : -priceChangePercent * trade.leverage;
           }
-          db.updateTrade(trade.id, {
+          await db.updateTrade(trade.id, {
             status: 'stopped',
             exit_price: stopLossResult.exitPrice,
             exit_filled_at: dayjs().toISOString(),
@@ -500,7 +500,7 @@ const monitorTrade = async (
             pnl_percentage: pnlPercentage
           });
         } else {
-          db.updateTrade(trade.id, { status: 'stopped' });
+          await db.updateTrade(trade.id, { status: 'stopped' });
         }
       }
     }
@@ -517,16 +517,19 @@ export const startTradeMonitor = async (
   channel: string,
   db: DatabaseManager,
   isSimulation: boolean = false,
-  priceProvider?: HistoricalPriceProvider
+  priceProvider?: HistoricalPriceProvider,
+  speedMultiplier?: number,
+  getBybitClient?: (accountName?: string) => RESTClient | undefined
 ): Promise<() => Promise<void>> => {
   logger.info('Starting trade monitor', { type: monitorConfig.type, channel });
-  
+
+  // Legacy support: create a single client if getBybitClient not provided
   let bybitClient: RESTClient | undefined;
-  if (monitorConfig.type === 'bybit') {
+  if (!getBybitClient && monitorConfig.type === 'bybit') {
     // Read Bybit API credentials from environment variables
     const apiKey = process.env.BYBIT_API_KEY;
     const apiSecret = process.env.BYBIT_API_SECRET;
-    
+
     if (!apiKey || !apiSecret) {
       logger.error('Bybit API credentials not found in environment variables', {
         channel,
@@ -538,7 +541,12 @@ export const startTradeMonitor = async (
     bybitClient = new RESTClient({
       key: apiKey,
       secret: apiSecret,
-      testnet: false, // Monitor always uses mainnet
+      testnet: monitorConfig.testnet || false,
+    });
+    logger.info('Bybit monitor client initialized', { 
+      channel,
+      type: monitorConfig.type,
+      testnet: monitorConfig.testnet || false
     });
   }
 
@@ -547,21 +555,36 @@ export const startTradeMonitor = async (
   const entryTimeoutDays = monitorConfig.entryTimeoutDays || 2;
 
   const monitorLoop = async (): Promise<void> => {
+    // Check if we're in maximum speed mode (no delays)
+    const isMaxSpeed = speedMultiplier !== undefined && (speedMultiplier === 0 || speedMultiplier === Infinity || !isFinite(speedMultiplier));
+    
     while (running) {
       try {
-        const trades = db.getActiveTrades().filter(t => t.channel === channel);
+        const trades = (await db.getActiveTrades()).filter(t => t.channel === channel);
         
         for (const trade of trades) {
-          await monitorTrade(channel, monitorConfig.type, entryTimeoutDays, trade, db, bybitClient, isSimulation, priceProvider);
+          // Get account-specific client for this trade
+          const accountClient = getBybitClient 
+            ? getBybitClient(trade.account_name)
+            : bybitClient; // Fallback to legacy client
+          await monitorTrade(channel, monitorConfig.type, entryTimeoutDays, trade, db, accountClient, isSimulation, priceProvider);
         }
 
-        await sleep(pollInterval);
+        // Skip sleep in maximum speed mode
+        if (!isMaxSpeed) {
+          await sleep(pollInterval);
+        } else {
+          // In max speed, just yield to event loop but don't delay
+          await new Promise(resolve => setImmediate(resolve));
+        }
       } catch (error) {
         logger.error('Error in monitor loop', {
           channel,
           error: error instanceof Error ? error.message : String(error)
         });
-        await sleep(pollInterval * 2);
+        if (!isMaxSpeed) {
+          await sleep(pollInterval * 2);
+        }
       }
     }
   };

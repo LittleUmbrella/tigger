@@ -150,13 +150,25 @@ const fetchNewMessages = async (
         msgDate = new Date();
       }
 
+      // Extract reply_to information
+      let replyToMessageId: number | undefined;
+      if ('replyTo' in msg && msg.replyTo) {
+        const replyTo = msg.replyTo as any;
+        if ('replyToMsgId' in replyTo && replyTo.replyToMsgId) {
+          replyToMessageId = Number(replyTo.replyToMsgId);
+        } else if ('replyToMsgId' in replyTo && typeof replyTo.replyToMsgId === 'bigint') {
+          replyToMessageId = Number(replyTo.replyToMsgId);
+        }
+      }
+
       try {
-        db.insertMessage({
+        await db.insertMessage({
           message_id: msgId,
           channel: config.channel,
           content: String(msg.message).replace(/\s+/g, ' ').trim(),
           sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
-          date: msgDate.toISOString()
+          date: msgDate.toISOString(),
+          reply_to_message_id: replyToMessageId
         });
         newMessagesCount++;
         newLastMessageId = Math.max(newLastMessageId, msgId);
@@ -224,6 +236,76 @@ export const startSignalHarvester = async (
     name: config.name,
     channel: config.channel,
     title: (entity as any).title || (entity as any).username || config.channel
+  });
+
+  // Set up event handler for message edits
+  client.addEventHandler(async (update: any) => {
+    if (update instanceof Api.UpdateEditMessage) {
+      try {
+        // UpdateEditMessage has a 'message' property, not 'messageId'
+        const message = update.message;
+        if (!message || !('id' in message)) return;
+        
+        const messageId = Number(message.id);
+        if (Number.isNaN(messageId)) return;
+
+        // Get the updated message
+        const messages = await client.getMessages(entity!, { ids: [messageId] });
+        if (!messages || messages.length === 0) return;
+
+        const msg = messages[0];
+        if (!('message' in msg) || !msg.message) return;
+
+        // Get existing message from database
+        const existingMessage = await db.getMessageByMessageId(messageId, config.channel);
+        if (!existingMessage) {
+          logger.debug('Edited message not found in database', {
+            channel: config.channel,
+            messageId
+          });
+          return;
+        }
+
+        const newContent = String(msg.message).replace(/\s+/g, ' ').trim();
+        
+        // Only process if content actually changed
+        if (newContent === existingMessage.content) {
+          return;
+        }
+
+        // Store the previous version in message_versions table
+        try {
+          await db.insertMessageVersion(messageId, config.channel, existingMessage.content);
+        } catch (error) {
+          logger.warn('Failed to insert message version, continuing with update', {
+            channel: config.channel,
+            messageId,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+
+        // Update message in database with new content
+        // Keep old_content for backward compatibility, but versions table is the source of truth
+        await db.updateMessage(messageId, config.channel, {
+          content: newContent,
+          old_content: existingMessage.content, // Keep for backward compatibility
+          edited_at: new Date().toISOString(),
+          parsed: false // Mark as unparsed to trigger re-processing
+        });
+
+        logger.info('Message edit detected and stored', {
+          channel: config.channel,
+          messageId,
+          oldContentLength: existingMessage.content.length,
+          newContentLength: newContent.length
+        });
+      } catch (error) {
+        logger.error('Error handling message edit', {
+          channel: config.channel,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
   });
 
   const pollInterval = config.pollInterval || 5000;

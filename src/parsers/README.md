@@ -178,3 +178,61 @@ console.log(result);
 
 The default parser (`defaultParser`) handles common formats and is used as a fallback. You can reference it in `src/parsers/defaultParser.ts` to see how parsing is done.
 
+## LLM Fallback Parser
+
+For messages that cannot be parsed by strict parsers, you can enable an LLM-based fallback parser using Ollama. This uses a local LLM to interpret ambiguous Telegram messages.
+
+### Setup
+
+1. **Install and run Ollama**: Follow instructions at https://ollama.ai
+2. **Pull a model**: `ollama pull llama3.2:1b` (or another model of your choice)
+3. **Configure in config.json**: Add `ollama` configuration to your parser:
+
+```json
+{
+  "parsers": [
+    {
+      "name": "main_parser",
+      "channel": "your_channel",
+      "ollama": {
+        "baseUrl": "http://localhost:11434",
+        "model": "llama3.2:1b",
+        "timeout": 30000,
+        "maxRetries": 2,
+        "rateLimit": {
+          "perChannel": 10,
+          "perMinute": 30
+        }
+      }
+    }
+  ]
+}
+```
+
+### How It Works
+
+The LLM fallback is automatically triggered when:
+1. The configured parser fails to parse a message
+2. The default parser also fails
+3. The `ollama` configuration is present
+
+The LLM uses a carefully crafted system prompt to extract trading signals and convert them to the standard `ParsedOrder` format.
+
+### Features
+
+- **Automatic fallback**: No code changes needed, just configuration
+- **Rate limiting**: Prevents abuse and manages costs
+- **Retry logic**: Handles transient failures gracefully
+- **Timeout protection**: Prevents hanging on slow LLM responses
+- **Schema validation**: Uses Zod to validate LLM output before use
+- **Monitoring**: Tracks usage metrics and success rates
+
+### Limitations
+
+- **Latency**: LLM calls add 500ms-5s delay
+- **Cost**: Local models are free, but consume CPU/GPU resources
+- **Reliability**: LLMs can sometimes misinterpret messages
+- **Only OPEN actions**: Currently only supports parsing OPEN trade signals
+
+For more details, see `FALLBACK.md` in the project root.
+

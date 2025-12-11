@@ -8,28 +8,46 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx src/index.ts",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "evaluate": "tsx src/evaluation/index.ts",
+    "evaluate:build": "npm run build && node dist/evaluation/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
+    "test:coverage": "vitest run --coverage"
   },
-  "keywords": ["crypto", "trading", "bot", "telegram", "bybit"],
+  "keywords": [
+    "crypto",
+    "trading",
+    "bot",
+    "telegram",
+    "bybit"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "better-sqlite3": "^11.0.0",
+    "bybit-api": "^2.0.0",
     "commander": "^14.0.2",
+    "csv-parse": "^5.5.6",
     "csv-writer": "^1.6.0",
     "dayjs": "^1.11.19",
     "dotenv": "^17.2.3",
     "fs-extra": "^11.3.2",
     "input": "^1.0.1",
+    "pg": "^8.11.3",
     "telegram": "^2.26.22",
-    "bybit-api": "^2.0.0",
-    "better-sqlite3": "^11.0.0",
     "winston": "^3.15.0",
-    "csv-parse": "^5.5.6"
+    "zod": "^3.25.76"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
     "@types/better-sqlite3": "^7.6.12",
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.10.9",
+    "@vitest/coverage-v8": "^4.0.14",
+    "@vitest/ui": "^4.0.14",
+    "tsx": "^4.16.0",
     "typescript": "^5.5.0",
-    "tsx": "^4.16.0"
+    "vitest": "^4.0.14"
   }
 }

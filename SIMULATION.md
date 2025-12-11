@@ -48,7 +48,7 @@ Configuration options:
 - `enabled`: Enable/disable simulation mode
 - `messagesFile`: Path to CSV file with messages
 - `startDate`: ISO date string - when to start the simulation (optional, uses earliest message if not provided)
-- `speedMultiplier`: How fast to play back (1.0 = real-time, 10.0 = 10x speed)
+- `speedMultiplier`: How fast to play back (1.0 = real-time, 10.0 = 10x speed, 0 or Infinity = maximum speed with no delays)
 - `maxTradeDurationDays`: Maximum days to track a trade before closing (default: 7)
 
 ### 4. Run Simulation
@@ -120,6 +120,7 @@ ORDER BY exit_filled_at DESC;
 
 - Start with a small date range to test
 - Use higher `speedMultiplier` for faster backtests (but be mindful of API rate limits)
+- Set `speedMultiplier` to `0` or `Infinity` for maximum speed - trades will execute as quickly as possible with no artificial delays
 - The system automatically handles price fetching - no manual setup needed
 - Check logs for API errors or missing price data warnings
 - For very old data (1+ years), the backtest may take longer due to API rate limits

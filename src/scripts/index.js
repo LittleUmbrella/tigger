@@ -107,7 +107,7 @@ async function appendJsonLines(rows, path) {
 }
 
 // --- prepare output files & CSV writer safely (unless dry-run) ---
-await fs.ensureDir("./data");
+await fs.ensureDir("../../data");
 
 if (!dryRun && writeCsvFlag && !fs.existsSync(csvPath)) {
   await fs.writeFile(csvPath, "", "utf8");
@@ -191,7 +191,7 @@ async function resolveTargetEntity(t) {
   console.log(`Resolved target: ${entity.title || entity.username || target}`);
 
   // per-target last_id file
-  const lastIdFile = `../data/last_id_${sanitizeTargetForFile(target)}.txt`;
+  const lastIdFile = `../../data/last_id_${sanitizeTargetForFile(target)}.txt`;
   let offsetId = 0;
 
   if (!dryRun && fs.existsSync(lastIdFile)) {
@@ -219,7 +219,7 @@ async function resolveTargetEntity(t) {
     const history = await client.invoke(new Api.messages.GetHistory({
       peer: entity,
       offsetId,
-      limit: 100,
+      limit: 10,
       addOffset: 0,
       maxId: 0,
       minId: 0,
