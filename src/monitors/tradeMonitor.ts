@@ -1,5 +1,5 @@
 import { MonitorConfig } from '../types/config.js';
-import { DatabaseManager, Trade } from '../db/schema.js';
+import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 // @ts-ignore - bybit-api types may not be complete
@@ -326,6 +326,85 @@ const updateStopLoss = async (
   }
 };
 
+const checkOrderFilled = async (
+  order: Order,
+  trade: Trade,
+  bybitClient: RESTClient | undefined,
+  isSimulation: boolean,
+  priceProvider?: HistoricalPriceProvider
+): Promise<{ filled: boolean; filledPrice?: number }> => {
+  try {
+    if (isSimulation && priceProvider) {
+      // In simulation, check if current price has reached order price
+      const currentPrice = await priceProvider.getCurrentPrice(trade.trading_pair);
+      if (currentPrice === null) {
+        return { filled: false };
+      }
+
+      const isLong = currentPrice > trade.entry_price;
+      let filled = false;
+
+      if (order.order_type === 'stop_loss') {
+        filled = isLong
+          ? currentPrice <= order.price
+          : currentPrice >= order.price;
+      } else if (order.order_type === 'take_profit') {
+        filled = isLong
+          ? currentPrice >= order.price
+          : currentPrice <= order.price;
+      }
+
+      if (filled) {
+        return { filled: true, filledPrice: currentPrice };
+      }
+      return { filled: false };
+    } else if (trade.exchange === 'bybit' && bybitClient && order.order_id) {
+      const symbol = trade.trading_pair.replace('/', '');
+      
+      // Check if order is still open
+      const openOrders = await bybitClient.getOpenOrders({
+        category: 'linear',
+        symbol: symbol,
+        orderId: order.order_id
+      });
+
+      if (openOrders.retCode === 0) {
+        const foundOrder = openOrders.result?.list?.find((o: any) => o.orderId === order.order_id);
+        if (!foundOrder) {
+          // Order not in open orders, check history
+          const orderHistory = await bybitClient.getOrderHistory({
+            category: 'linear',
+            symbol: symbol,
+            orderId: order.order_id
+          });
+
+          if (orderHistory.retCode === 0 && orderHistory.result?.list) {
+            const filledOrder = orderHistory.result.list.find((o: any) => 
+              o.orderId === order.order_id && o.orderStatus === 'Filled'
+            );
+
+            if (filledOrder) {
+              const filledPrice = parseFloat(filledOrder.avgPrice || filledOrder.price || '0');
+              return { filled: true, filledPrice };
+            }
+          }
+        } else if (foundOrder.orderStatus === 'Filled') {
+          const filledPrice = parseFloat(foundOrder.avgPrice || foundOrder.price || '0');
+          return { filled: true, filledPrice };
+        }
+      }
+    }
+    return { filled: false };
+  } catch (error) {
+    logger.error('Error checking order filled', {
+      orderId: order.id,
+      tradeId: trade.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return { filled: false };
+  }
+};
+
 const monitorTrade = async (
   channel: string,
   monitorType: 'bybit' | 'dex',
@@ -412,6 +491,37 @@ const monitorTrade = async (
 
     // Monitor active trades
     if (trade.status === 'active' || trade.status === 'filled') {
+      // Check SL/TP orders for fills
+      const orders = await db.getOrdersByTradeId(trade.id);
+      const pendingOrders = orders.filter(o => o.status === 'pending');
+
+      for (const order of pendingOrders) {
+        const orderResult = await checkOrderFilled(order, trade, bybitClient, isSimulation, priceProvider);
+        if (orderResult.filled) {
+          logger.info('Order filled', {
+            tradeId: trade.id,
+            orderId: order.id,
+            orderType: order.order_type,
+            tpIndex: order.tp_index,
+            filledPrice: orderResult.filledPrice
+          });
+
+          await db.updateOrder(order.id, {
+            status: 'filled',
+            filled_at: dayjs().toISOString(),
+            filled_price: orderResult.filledPrice
+          });
+
+          // If stop loss was filled, mark trade as stopped
+          if (order.order_type === 'stop_loss') {
+            await db.updateTrade(trade.id, {
+              status: 'stopped',
+              exit_price: orderResult.filledPrice,
+              exit_filled_at: dayjs().toISOString()
+            });
+          }
+        }
+      }
       // First, check if position is closed
       const positionResult = await checkPositionClosed(trade, bybitClient, isSimulation, priceProvider);
       if (positionResult.closed) {

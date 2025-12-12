@@ -295,6 +295,8 @@ const executeTradeForAccount = async (
     }
 
     let orderId: string | null = null;
+    // Collect TP order IDs for storage
+    const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
 
     if (isSimulation) {
       // In simulation mode, generate a fake order ID
@@ -424,12 +426,23 @@ const executeTradeForAccount = async (
               request: batchOrders
             });
 
-            if (batchResponse.retCode === 0) {
+            if (batchResponse.retCode === 0 && batchResponse.result?.list) {
               batchSuccess = true;
+              // Collect order IDs from batch response
+              batchResponse.result.list.forEach((result: any, i: number) => {
+                if (result.orderId) {
+                  tpOrderIds.push({
+                    index: i,
+                    orderId: result.orderId,
+                    price: order.takeProfits[i],
+                    quantity: tpQuantities[i]
+                  });
+                }
+              });
               logger.info('Take profit orders placed via batch', {
                 symbol,
                 numTPs: order.takeProfits.length,
-                batchResult: batchResponse.result
+                orderIds: tpOrderIds.map(tp => tp.orderId)
               });
             } else {
               logger.warn('Batch TP order placement failed, falling back to individual orders', {
@@ -459,12 +472,21 @@ const executeTradeForAccount = async (
 
               if (tpOrderResponse.retCode === 0) {
                 tpSuccessCount++;
+                const tpOrderId = tpOrderResponse.result?.orderId;
+                if (tpOrderId) {
+                  tpOrderIds.push({
+                    index: i,
+                    orderId: tpOrderId,
+                    price: tpPrice,
+                    quantity: tpQty
+                  });
+                }
                 logger.info('Take profit order placed', {
                   symbol,
                   tpIndex: i + 1,
                   tpPrice,
                   tpQty,
-                  tpOrderId: tpOrderResponse.result?.orderId
+                  tpOrderId
                 });
               } else {
                 tpErrors.push({
@@ -554,7 +576,7 @@ const executeTradeForAccount = async (
 
     // Store trade in database with account name
     const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
-    await db.insertTrade({
+    const tradeId = await db.insertTrade({
       message_id: message.message_id,
       channel: channel,
       trading_pair: order.tradingPair,
@@ -570,6 +592,46 @@ const executeTradeForAccount = async (
       stop_loss_breakeven: false,
       expires_at: expiresAt
     });
+
+    // Store stop loss order (if not in simulation)
+    if (!isSimulation && order.stopLoss && order.stopLoss > 0) {
+      try {
+        await db.insertOrder({
+          trade_id: tradeId,
+          order_type: 'stop_loss',
+          price: order.stopLoss,
+          status: 'pending'
+        });
+      } catch (error) {
+        logger.warn('Failed to store stop loss order', {
+          tradeId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    // Store take profit orders (if not in simulation and we have order IDs)
+    if (!isSimulation && tpOrderIds.length > 0) {
+      for (const tpOrder of tpOrderIds) {
+        try {
+          await db.insertOrder({
+            trade_id: tradeId,
+            order_type: 'take_profit',
+            order_id: tpOrder.orderId,
+            price: tpOrder.price,
+            tp_index: tpOrder.index,
+            quantity: tpOrder.quantity,
+            status: 'pending'
+          });
+        } catch (error) {
+          logger.warn('Failed to store take profit order', {
+            tradeId,
+            tpIndex: tpOrder.index,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+    }
 
     // In simulation mode, pre-fetch price data for this trade
     if (isSimulation && priceProvider) {

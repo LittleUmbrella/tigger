@@ -14,6 +14,7 @@ export interface Message {
   reply_to_message_id?: number; // Telegram message ID this message is replying to (if any)
   old_content?: string; // Previous content if message was edited (deprecated - use message_versions table)
   edited_at?: string; // Timestamp when message was last edited (deprecated - use message_versions table)
+  image_paths?: string; // JSON array of image file paths (relative to data directory)
 }
 
 export interface MessageVersion {
@@ -54,6 +55,21 @@ export interface Trade {
 export interface TradeWithMessage extends Trade {
   source_message: Message; // The message that triggered this trade
   reply_chain?: Message[]; // Chain of messages if source message is a reply
+}
+
+export interface Order {
+  id: number;
+  trade_id: number; // Foreign key to trades.id
+  order_type: 'stop_loss' | 'take_profit';
+  order_id?: string; // Exchange order ID
+  price: number; // Order price (SL price or TP price)
+  tp_index?: number; // Index in take_profits array (0-based, only for TP orders)
+  quantity?: number; // Order quantity (for TP orders)
+  status: 'pending' | 'filled' | 'cancelled';
+  filled_at?: string; // When the order was filled
+  filled_price?: number; // Actual fill price
+  created_at: string;
+  updated_at: string;
 }
 
 export interface EvaluationResultRecord {
@@ -107,6 +123,10 @@ interface DatabaseAdapter {
   insertSignalFormat(format: Omit<SignalFormatRecord, 'id' | 'created_at'>): Promise<number>;
   getSignalFormats(channel?: string, formatHash?: string): Promise<SignalFormatRecord[]>;
   updateSignalFormat(id: number, updates: Partial<SignalFormatRecord>): Promise<void>;
+  insertOrder(order: Omit<Order, 'id' | 'created_at' | 'updated_at'>): Promise<number>;
+  getOrdersByTradeId(tradeId: number): Promise<Order[]>;
+  getOrdersByStatus(status: Order['status']): Promise<Order[]>;
+  updateOrder(id: number, updates: Partial<Order>): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -169,6 +189,13 @@ class SQLiteAdapter implements DatabaseAdapter {
     } catch (error) {
       // Column already exists, ignore
     }
+    
+    // Add image_paths column if it doesn't exist (migration)
+    try {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN image_paths TEXT`);
+    } catch (error) {
+      // Column already exists, ignore
+    }
 
     // Trades table
     this.db.exec(`
@@ -205,6 +232,25 @@ class SQLiteAdapter implements DatabaseAdapter {
     } catch (error) {
       // Column already exists, ignore
     }
+
+    // Orders table - tracks SL/TP orders for trades
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS orders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trade_id INTEGER NOT NULL,
+        order_type TEXT NOT NULL,
+        order_id TEXT,
+        price REAL NOT NULL,
+        tp_index INTEGER,
+        quantity REAL,
+        status TEXT NOT NULL DEFAULT 'pending',
+        filled_at TEXT,
+        filled_price REAL,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
+      )
+    `);
 
     // Evaluation results table
     this.db.exec(`
@@ -246,6 +292,9 @@ class SQLiteAdapter implements DatabaseAdapter {
       CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
       CREATE INDEX IF NOT EXISTS idx_trades_channel ON trades(channel);
       CREATE INDEX IF NOT EXISTS idx_trades_message_id ON trades(message_id, channel);
+      CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders(trade_id);
+      CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+      CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
       CREATE INDEX IF NOT EXISTS idx_evaluation_results_channel ON evaluation_results(channel);
       CREATE INDEX IF NOT EXISTS idx_evaluation_results_prop_firm ON evaluation_results(prop_firm_name);
       CREATE INDEX IF NOT EXISTS idx_signal_formats_channel ON signal_formats(channel);
@@ -256,8 +305,8 @@ class SQLiteAdapter implements DatabaseAdapter {
 
   async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number> {
     const stmt = this.db.prepare(`
-      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id)
-      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, ?)
+      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id, image_paths)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, ?, ?)
     `);
     const result = stmt.run(
       message.message_id,
@@ -265,7 +314,8 @@ class SQLiteAdapter implements DatabaseAdapter {
       message.content,
       message.sender || null,
       message.date,
-      message.reply_to_message_id || null
+      message.reply_to_message_id || null,
+      message.image_paths || null
     );
     return result.lastInsertRowid as number;
   }
@@ -559,6 +609,84 @@ class SQLiteAdapter implements DatabaseAdapter {
     stmt.run(...values);
   }
 
+  async insertOrder(order: Omit<Order, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+    const stmt = this.db.prepare(`
+      INSERT INTO orders (
+        trade_id, order_type, order_id, price, tp_index, quantity, status,
+        filled_at, filled_price, created_at, updated_at
+      )
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `);
+    const result = stmt.run(
+      order.trade_id,
+      order.order_type,
+      order.order_id || null,
+      order.price,
+      order.tp_index !== undefined ? order.tp_index : null,
+      order.quantity !== undefined ? order.quantity : null,
+      order.status,
+      order.filled_at || null,
+      order.filled_price !== undefined ? order.filled_price : null
+    );
+    return result.lastInsertRowid as number;
+  }
+
+  async getOrdersByTradeId(tradeId: number): Promise<Order[]> {
+    const stmt = this.db.prepare('SELECT * FROM orders WHERE trade_id = ? ORDER BY tp_index ASC, created_at ASC');
+    const rows = stmt.all(tradeId) as any[];
+    return rows.map(row => ({
+      ...row,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+      filled_at: row.filled_at instanceof Date ? row.filled_at.toISOString() : row.filled_at || undefined
+    })) as Order[];
+  }
+
+  async getOrdersByStatus(status: Order['status']): Promise<Order[]> {
+    const stmt = this.db.prepare('SELECT * FROM orders WHERE status = ? ORDER BY created_at ASC');
+    const rows = stmt.all(status) as any[];
+    return rows.map(row => ({
+      ...row,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+      filled_at: row.filled_at instanceof Date ? row.filled_at.toISOString() : row.filled_at || undefined
+    })) as Order[];
+  }
+
+  async updateOrder(id: number, updates: Partial<Order>): Promise<void> {
+    const fields: string[] = [];
+    const values: any[] = [];
+
+    if (updates.status !== undefined) {
+      fields.push('status = ?');
+      values.push(updates.status);
+    }
+    if (updates.order_id !== undefined) {
+      fields.push('order_id = ?');
+      values.push(updates.order_id);
+    }
+    if (updates.filled_at !== undefined) {
+      fields.push('filled_at = ?');
+      values.push(updates.filled_at);
+    }
+    if (updates.filled_price !== undefined) {
+      fields.push('filled_price = ?');
+      values.push(updates.filled_price);
+    }
+    if (updates.quantity !== undefined) {
+      fields.push('quantity = ?');
+      values.push(updates.quantity);
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(id);
+
+    const stmt = this.db.prepare(`UPDATE orders SET ${fields.join(', ')} WHERE id = ?`);
+    stmt.run(...values);
+  }
+
   async insertEvaluationResult(result: Omit<EvaluationResultRecord, 'id' | 'created_at'>): Promise<number> {
     const stmt = this.db.prepare(`
       INSERT INTO evaluation_results (
@@ -736,6 +864,15 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           throw error;
         }
       }
+      
+      // Add image_paths column if it doesn't exist (migration)
+      try {
+        await client.query(`ALTER TABLE messages ADD COLUMN image_paths TEXT`);
+      } catch (error: any) {
+        if (!error.message?.includes('already exists')) {
+          throw error;
+        }
+      }
 
       // Message versions table - stores full edit history
       await client.query(`
@@ -790,6 +927,25 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         }
       }
 
+      // Orders table - tracks SL/TP orders for trades
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS orders (
+          id SERIAL PRIMARY KEY,
+          trade_id INTEGER NOT NULL,
+          order_type TEXT NOT NULL,
+          order_id TEXT,
+          price REAL NOT NULL,
+          tp_index INTEGER,
+          quantity REAL,
+          status TEXT NOT NULL DEFAULT 'pending',
+          filled_at TIMESTAMP,
+          filled_price REAL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
+        )
+      `);
+
       // Evaluation results table
       await client.query(`
         CREATE TABLE IF NOT EXISTS evaluation_results (
@@ -830,6 +986,9 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
         CREATE INDEX IF NOT EXISTS idx_trades_channel ON trades(channel);
         CREATE INDEX IF NOT EXISTS idx_trades_message_id ON trades(message_id, channel);
+        CREATE INDEX IF NOT EXISTS idx_orders_trade_id ON orders(trade_id);
+        CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status);
+        CREATE INDEX IF NOT EXISTS idx_orders_order_id ON orders(order_id);
         CREATE INDEX IF NOT EXISTS idx_evaluation_results_channel ON evaluation_results(channel);
         CREATE INDEX IF NOT EXISTS idx_evaluation_results_prop_firm ON evaluation_results(prop_firm_name);
         CREATE INDEX IF NOT EXISTS idx_signal_formats_channel ON signal_formats(channel);
@@ -843,8 +1002,8 @@ class PostgreSQLAdapter implements DatabaseAdapter {
 
   async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number> {
     const result = await this.pool.query(`
-      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id)
-      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, FALSE, $6)
+      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id, image_paths)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, FALSE, $6, $7)
       RETURNING id
     `, [
       message.message_id,
@@ -852,7 +1011,8 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       message.content,
       message.sender || null,
       message.date,
-      message.reply_to_message_id || null
+      message.reply_to_message_id || null,
+      message.image_paths || null
     ]);
     return result.rows[0].id;
   }
@@ -1178,6 +1338,91 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     );
   }
 
+  async insertOrder(order: Omit<Order, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+    const result = await this.pool.query(`
+      INSERT INTO orders (
+        trade_id, order_type, order_id, price, tp_index, quantity, status,
+        filled_at, filled_price, created_at, updated_at
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      RETURNING id
+    `, [
+      order.trade_id,
+      order.order_type,
+      order.order_id || null,
+      order.price,
+      order.tp_index !== undefined ? order.tp_index : null,
+      order.quantity !== undefined ? order.quantity : null,
+      order.status,
+      order.filled_at || null,
+      order.filled_price !== undefined ? order.filled_price : null
+    ]);
+    return result.rows[0].id;
+  }
+
+  async getOrdersByTradeId(tradeId: number): Promise<Order[]> {
+    const result = await this.pool.query(
+      'SELECT * FROM orders WHERE trade_id = $1 ORDER BY tp_index ASC, created_at ASC',
+      [tradeId]
+    );
+    return result.rows.map(row => ({
+      ...row,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+      filled_at: row.filled_at instanceof Date ? row.filled_at.toISOString() : row.filled_at || undefined
+    })) as Order[];
+  }
+
+  async getOrdersByStatus(status: Order['status']): Promise<Order[]> {
+    const result = await this.pool.query(
+      'SELECT * FROM orders WHERE status = $1 ORDER BY created_at ASC',
+      [status]
+    );
+    return result.rows.map(row => ({
+      ...row,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      updated_at: row.updated_at instanceof Date ? row.updated_at.toISOString() : row.updated_at,
+      filled_at: row.filled_at instanceof Date ? row.filled_at.toISOString() : row.filled_at || undefined
+    })) as Order[];
+  }
+
+  async updateOrder(id: number, updates: Partial<Order>): Promise<void> {
+    const fields: string[] = [];
+    const values: any[] = [];
+    let paramIndex = 1;
+
+    if (updates.status !== undefined) {
+      fields.push(`status = $${paramIndex++}`);
+      values.push(updates.status);
+    }
+    if (updates.order_id !== undefined) {
+      fields.push(`order_id = $${paramIndex++}`);
+      values.push(updates.order_id);
+    }
+    if (updates.filled_at !== undefined) {
+      fields.push(`filled_at = $${paramIndex++}`);
+      values.push(updates.filled_at);
+    }
+    if (updates.filled_price !== undefined) {
+      fields.push(`filled_price = $${paramIndex++}`);
+      values.push(updates.filled_price);
+    }
+    if (updates.quantity !== undefined) {
+      fields.push(`quantity = $${paramIndex++}`);
+      values.push(updates.quantity);
+    }
+
+    if (fields.length === 0) return;
+
+    fields.push('updated_at = CURRENT_TIMESTAMP');
+    values.push(id);
+
+    await this.pool.query(
+      `UPDATE orders SET ${fields.join(', ')} WHERE id = $${paramIndex}`,
+      values
+    );
+  }
+
   private normalizeTrades(rows: any[]): Trade[] {
     return rows.map(row => ({
       ...row,
@@ -1408,6 +1653,22 @@ export class DatabaseManager {
 
   updateTrade(id: number, updates: Partial<Trade>): Promise<void> {
     return this.adapter.updateTrade(id, updates);
+  }
+
+  insertOrder(order: Omit<Order, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+    return this.adapter.insertOrder(order);
+  }
+
+  getOrdersByTradeId(tradeId: number): Promise<Order[]> {
+    return this.adapter.getOrdersByTradeId(tradeId);
+  }
+
+  getOrdersByStatus(status: Order['status']): Promise<Order[]> {
+    return this.adapter.getOrdersByStatus(status);
+  }
+
+  updateOrder(id: number, updates: Partial<Order>): Promise<void> {
+    return this.adapter.updateOrder(id, updates);
   }
 
   insertEvaluationResult(result: Omit<EvaluationResultRecord, 'id' | 'created_at'>): Promise<number> {

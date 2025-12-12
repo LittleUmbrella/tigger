@@ -2,7 +2,7 @@ import { ParserConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
-import { getParserSync, registerParser } from './parserRegistry.js';
+import { getParser, getParserSync, registerParser } from './parserRegistry.js';
 import { defaultParser } from './defaultParser.js';
 import { parseWithLLMFallback, LLMParserResult } from './llmFallbackParser.js';
 import { parseManagementCommand } from '../managers/managementParser.js';
@@ -31,7 +31,7 @@ export const parseMessageWithFallback = async (
   config: ParserConfig
 ): Promise<ParsedOrder | null> => {
   // Try configured parser first
-  const parser = getParser(config.name);
+  const parser = await getParser(config.name);
   if (parser) {
     const result = parser(content);
     if (result) {
@@ -56,8 +56,8 @@ export const parseMessageWithFallback = async (
         ...config.ollama,
         channel: config.channel,
       });
-      if (llmResult) {
-        return llmResult;
+      if (llmResult && llmResult.type === 'order') {
+        return llmResult.order;
       }
     } catch (error) {
       logger.warn('LLM fallback parser error', {
