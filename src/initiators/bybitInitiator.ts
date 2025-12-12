@@ -585,6 +585,7 @@ const executeTradeForAccount = async (
       stop_loss: order.stopLoss,
       take_profits: JSON.stringify(order.takeProfits),
       risk_percentage: riskPercentage,
+      quantity: qty,
       exchange: 'bybit',
       account_name: accountName || undefined,
       order_id: orderId,
