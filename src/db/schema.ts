@@ -36,6 +36,7 @@ export interface Trade {
   stop_loss: number;
   take_profits: string; // JSON array of numbers
   risk_percentage: number;
+  quantity?: number; // Calculated position quantity based on risk percentage
   exchange: string;
   account_name?: string; // Account name that executed this trade (from accounts config)
   order_id?: string;
@@ -209,6 +210,7 @@ class SQLiteAdapter implements DatabaseAdapter {
         stop_loss REAL NOT NULL,
         take_profits TEXT NOT NULL,
         risk_percentage REAL NOT NULL,
+        quantity REAL,
         exchange TEXT NOT NULL,
         account_name TEXT,
         order_id TEXT,
@@ -229,6 +231,13 @@ class SQLiteAdapter implements DatabaseAdapter {
     // Add account_name column if it doesn't exist (migration)
     try {
       this.db.exec(`ALTER TABLE trades ADD COLUMN account_name TEXT`);
+    } catch (error) {
+      // Column already exists, ignore
+    }
+
+    // Add quantity column if it doesn't exist (migration)
+    try {
+      this.db.exec(`ALTER TABLE trades ADD COLUMN quantity REAL`);
     } catch (error) {
       // Column already exists, ignore
     }
@@ -417,11 +426,11 @@ class SQLiteAdapter implements DatabaseAdapter {
     const stmt = this.db.prepare(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
-        take_profits, risk_percentage, exchange, account_name, order_id, position_id, status,
+        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, status,
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `);
     const result = stmt.run(
       trade.message_id,
@@ -432,6 +441,7 @@ class SQLiteAdapter implements DatabaseAdapter {
       trade.stop_loss,
       trade.take_profits,
       trade.risk_percentage,
+      trade.quantity || null,
       trade.exchange,
       trade.account_name || null,
       trade.order_id || null,
@@ -900,6 +910,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           stop_loss REAL NOT NULL,
           take_profits TEXT NOT NULL,
           risk_percentage REAL NOT NULL,
+          quantity REAL,
           exchange TEXT NOT NULL,
           account_name TEXT,
           order_id TEXT,
@@ -920,6 +931,16 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       // Add account_name column if it doesn't exist (migration)
       try {
         await client.query(`ALTER TABLE trades ADD COLUMN account_name TEXT`);
+      } catch (error: any) {
+        // Column already exists, ignore
+        if (!error.message?.includes('already exists')) {
+          throw error;
+        }
+      }
+
+      // Add quantity column if it doesn't exist (migration)
+      try {
+        await client.query(`ALTER TABLE trades ADD COLUMN quantity REAL`);
       } catch (error: any) {
         // Column already exists, ignore
         if (!error.message?.includes('already exists')) {
@@ -1218,11 +1239,11 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     const result = await this.pool.query(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
-        take_profits, risk_percentage, exchange, account_name, order_id, position_id, status,
+        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, status,
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
       RETURNING id
     `, [
       trade.message_id,
@@ -1233,6 +1254,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       trade.stop_loss,
       trade.take_profits,
       trade.risk_percentage,
+      trade.quantity || null,
       trade.exchange,
       trade.account_name || null,
       trade.order_id || null,
