@@ -120,5 +120,8 @@ export const LLMOutputSchema = z.discriminatedUnion('action', [
 export type LLMOutput = z.infer<typeof LLMOutputSchema>;
 export type LLMOpenAction = z.infer<typeof LLMOpenActionSchema>;
 export type LLMCloseAllAction = z.infer<typeof LLMCloseAllActionSchema>;
+export type LLMSetTPAction = z.infer<typeof LLMSetTPActionSchema>;
+export type LLMSetSLAction = z.infer<typeof LLMSetSLActionSchema>;
+export type LLMAdjustEntryAction = z.infer<typeof LLMAdjustEntryActionSchema>;
 export type LLMNoneAction = z.infer<typeof LLMNoneActionSchema>;
 

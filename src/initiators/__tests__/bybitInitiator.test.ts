@@ -5,8 +5,6 @@ import { DatabaseManager } from '../../db/schema.js';
 import { mockMessage, mockParsedOrder, mockBybitResponses } from './fixtures.js';
 import { createMockDatabase, createMockPriceProvider, createMockBybitClient } from './mocks.js';
 import { HistoricalPriceProvider } from '../../utils/historicalPriceProvider.js';
-import { RESTClient } from 'bybit-api';
-
 // Mock the bybit-api module
 vi.mock('bybit-api', () => ({
   RESTClient: vi.fn(),

@@ -6,6 +6,7 @@ export interface HarvesterConfig {
   password?: string;
   accessHash?: string;
   pollInterval?: number; // milliseconds
+  downloadImages?: boolean; // Whether to download and store images from messages (default: false)
 }
 
 export interface OllamaConfig {

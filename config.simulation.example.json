@@ -4,7 +4,8 @@
       "name": "csv_harvester",
       "channel": "simulated_channel",
       "apiId": 0,
-      "pollInterval": 5000
+      "pollInterval": 5000,
+      "downloadImages": false
     }
   ],
   "parsers": [

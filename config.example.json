@@ -5,7 +5,8 @@
       "channel": "your_telegram_channel",
       "apiId": 12345678,
       "accessHash": "optional_access_hash_for_private_channels",
-      "pollInterval": 5000
+      "pollInterval": 5000,
+      "downloadImages": false
     }
   ],
   "parsers": [
