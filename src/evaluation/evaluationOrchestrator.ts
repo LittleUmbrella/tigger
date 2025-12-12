@@ -40,7 +40,7 @@ export async function runEvaluation(
 ): Promise<EvaluationRunResult> {
   logger.info('Starting evaluation', {
     channel,
-    propFirms: config.propFirms.map(f => f.name || f).join(', ')
+    propFirms: config.propFirms.map(f => typeof f === 'string' ? f : f.name).join(', ')
   });
 
   // Initialize historical price provider

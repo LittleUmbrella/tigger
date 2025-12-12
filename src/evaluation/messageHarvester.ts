@@ -109,7 +109,7 @@ export async function harvestMessages(
         const history = await client.invoke(new Api.messages.GetHistory({
           peer: entity,
           offsetId: BigInt(offsetId || 0) as any,
-          limit: 100,
+          limit: 20,
           addOffset: 0,
           maxId: 0,
           minId: 0,
