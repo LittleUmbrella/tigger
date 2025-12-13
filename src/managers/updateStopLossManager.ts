@@ -1,7 +1,6 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
 
 /**
@@ -48,7 +47,7 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
           category: 'linear',
           symbol: symbol,
           stopLoss: newOrder.stopLoss.toString(),
-          positionIdx: parseInt(trade.position_id)
+          positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
         });
       }
 

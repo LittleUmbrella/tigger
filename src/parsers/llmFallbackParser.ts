@@ -11,7 +11,7 @@
 import { ParsedOrder } from '../types/order.js';
 import { ParsedManagementCommand } from '../managers/managerRegistry.js';
 import { logger } from '../utils/logger.js';
-import { OllamaClient, OllamaConfig } from '../utils/llmClient.js';
+import { createOllamaClient, OllamaClient, OllamaConfig } from '../utils/llmClient.js';
 import { extractAndParseJSON } from '../utils/jsonExtractor.js';
 import { LLMOutputSchema, LLMOutput, LLMOpenAction, LLMNoneAction, LLMCloseAllAction, LLMSetTPAction, LLMSetSLAction, LLMAdjustEntryAction } from './llmSchemas.js';
 
@@ -98,292 +98,289 @@ export function getLLMParserMetrics(): LLMParserMetrics {
   return { ...metrics };
 }
 
-/**
- * LLM Fallback Parser
- */
-export class LLMFallbackParser {
-  private client: OllamaClient;
-  private channel: string;
-  private enabled: boolean = true;
+interface LLMFallbackParserState {
+  client: OllamaClient;
+  channel: string;
+  enabled: boolean;
+}
 
-  constructor(config: OllamaConfig & { channel?: string } = {}) {
-    this.client = new OllamaClient(config);
-    this.channel = config.channel || 'default';
-  }
+export interface LLMFallbackParser {
+  parse: (content: string) => Promise<LLMParserResult>;
+  disable: () => void;
+  enable: () => void;
+}
 
-  /**
-   * Parse a message using LLM fallback
-   * Returns either a ParsedOrder (for OPEN actions) or ParsedManagementCommand (for management actions)
-   */
-  async parse(content: string): Promise<LLMParserResult> {
-    if (!this.enabled) {
-      logger.debug('LLM fallback parser is disabled');
+function convertToParsedOrder(llmOutput: LLMOpenAction): ParsedOrder | null {
+  try {
+    // Additional logical validation
+    if (llmOutput.quantity <= 0) {
+      logger.warn('Invalid quantity in LLM output', { quantity: llmOutput.quantity });
       return null;
     }
 
-    const startTime = Date.now();
-    metrics.totalCalls++;
-
-    try {
-      // Check if LLM service is available
-      const isHealthy = await this.client.healthCheck();
-      if (!isHealthy) {
-        logger.warn('Ollama service unavailable, skipping LLM fallback', {
-          channel: this.channel,
-        });
-        metrics.llmErrors++;
-        return null;
-      }
-
-      // Build the prompt
-      const prompt = `${SYSTEM_PROMPT}\n\n**User Message:**\n${content}\n\n**Output JSON:**`;
-
-      // Call LLM
-      const llmOutput = await this.client.generate(prompt, this.channel);
-
-      // Extract and parse JSON
-      const parsed = extractAndParseJSON<LLMOutput>(llmOutput);
-      if (!parsed) {
-        logger.warn('Failed to extract JSON from LLM output', {
-          channel: this.channel,
-          output: llmOutput.substring(0, 200), // Log first 200 chars
-        });
-        metrics.validationFailures++;
-        return null;
-      }
-
-      // Validate with Zod schema
-      const validationResult = LLMOutputSchema.safeParse(parsed);
-      if (!validationResult.success) {
-        logger.warn('LLM output failed schema validation', {
-          channel: this.channel,
-          errors: validationResult.error.errors,
-          output: parsed,
-        });
-        metrics.validationFailures++;
-        return null;
-      }
-
-      const validated = validationResult.data;
-
-      // Handle NONE action
-      if (validated.action === 'NONE') {
-        logger.debug('LLM determined message is not a signal', {
-          channel: this.channel,
-          reason: validated.reason,
-        });
-        return null;
-      }
-
-      // Handle different action types
-      if (validated.action === 'OPEN') {
-        const order = this.convertToParsedOrder(validated);
-        if (order) {
-          const responseTime = Date.now() - startTime;
-          metrics.successfulParses++;
-          metrics.averageResponseTime =
-            (metrics.averageResponseTime * (metrics.successfulParses - 1) + responseTime) /
-            metrics.successfulParses;
-
-          logger.info('LLM fallback parser succeeded (OPEN)', {
-            channel: this.channel,
-            action: validated.action,
-            symbol: validated.symbol,
-            side: validated.side,
-            confidence: validated.confidence,
-            responseTime,
-          });
-
-          return { type: 'order', order };
-        }
-      } else if (validated.action === 'CLOSE_ALL') {
-        const command = this.convertToCloseAllCommand(validated);
-        if (command) {
-          const responseTime = Date.now() - startTime;
-          metrics.successfulParses++;
-          metrics.averageResponseTime =
-            (metrics.averageResponseTime * (metrics.successfulParses - 1) + responseTime) /
-            metrics.successfulParses;
-
-          logger.info('LLM fallback parser succeeded (CLOSE_ALL)', {
-            channel: this.channel,
-            action: validated.action,
-            symbol: validated.symbol,
-            side: validated.side,
-            confidence: validated.confidence,
-            responseTime,
-          });
-
-          return { type: 'management', command };
-        }
-      } else if (validated.action === 'SET_TP' || validated.action === 'SET_SL' || validated.action === 'ADJUST_ENTRY') {
-        // These actions are not yet fully supported by the manager system
-        // but we can log them for future implementation
-        logger.warn('LLM returned management action not yet fully supported', {
-          channel: this.channel,
-          action: validated.action,
-          symbol: validated.symbol,
-        });
-        metrics.validationFailures++;
-        return null;
-      }
-
-      logger.warn('LLM returned unsupported action type', {
-        channel: this.channel,
-        action: validated.action,
-      });
-      metrics.validationFailures++;
-      return null;
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      metrics.lastError = errorMessage;
-
-      if (errorMessage.includes('timeout')) {
-        metrics.timeouts++;
-        logger.error('LLM request timeout', {
-          channel: this.channel,
-          error: errorMessage,
-        });
-      } else if (errorMessage.includes('Rate limit')) {
-        metrics.rateLimitHits++;
-        logger.warn('LLM rate limit exceeded', {
-          channel: this.channel,
-        });
-      } else {
-        metrics.llmErrors++;
-        logger.error('LLM fallback parser error', {
-          channel: this.channel,
-          error: errorMessage,
-        });
-      }
-
+    // Validate price
+    const entryPrice =
+      llmOutput.price === 'MARKET' ? 0 : llmOutput.price; // 0 indicates market order
+    if (entryPrice < 0) {
+      logger.warn('Invalid entry price in LLM output', { price: llmOutput.price });
       return null;
     }
+
+    // Validate stop loss
+    if (llmOutput.sl <= 0) {
+      logger.warn('Invalid stop loss in LLM output', { sl: llmOutput.sl });
+      return null;
+    }
+
+    // Validate take profits
+    if (llmOutput.tps.length === 0) {
+      logger.warn('No take profits in LLM output');
+      return null;
+    }
+
+    // Validate symbol format (should be like BTCUSDT, ETHUSDT, etc.)
+    if (!/^[A-Z0-9]+USDT?$/.test(llmOutput.symbol)) {
+      logger.warn('Invalid symbol format in LLM output', { symbol: llmOutput.symbol });
+      return null;
+    }
+
+    // Sort take profits based on side
+    const sortedTPs =
+      llmOutput.side === 'LONG'
+        ? [...llmOutput.tps].sort((a, b) => a - b)
+        : [...llmOutput.tps].sort((a, b) => b - a);
+
+    return {
+      tradingPair: llmOutput.symbol,
+      leverage: llmOutput.leverage || 1,
+      entryPrice,
+      stopLoss: llmOutput.sl,
+      takeProfits: sortedTPs,
+      signalType: llmOutput.side.toLowerCase() as 'long' | 'short',
+    };
+  } catch (error) {
+    logger.error('Error converting LLM output to ParsedOrder', {
+      error: error instanceof Error ? error.message : String(error),
+      llmOutput,
+    });
+    return null;
   }
+}
 
-  /**
-   * Convert LLM OPEN action to ParsedOrder
-   */
-  private convertToParsedOrder(llmOutput: LLMOpenAction): ParsedOrder | null {
-    try {
-      // Additional logical validation
-      if (llmOutput.quantity <= 0) {
-        logger.warn('Invalid quantity in LLM output', { quantity: llmOutput.quantity });
-        return null;
-      }
+function convertToCloseAllCommand(llmOutput: LLMCloseAllAction): ParsedManagementCommand | null {
+  try {
+    // Validate symbol format
+    if (!/^[A-Z0-9]+USDT?$/.test(llmOutput.symbol)) {
+      logger.warn('Invalid symbol format in LLM output', { symbol: llmOutput.symbol });
+      return null;
+    }
 
-      // Validate price
-      const entryPrice =
-        llmOutput.price === 'MARKET' ? 0 : llmOutput.price; // 0 indicates market order
-      if (entryPrice < 0) {
-        logger.warn('Invalid entry price in LLM output', { price: llmOutput.price });
-        return null;
-      }
-
-      // Validate stop loss
-      if (llmOutput.sl <= 0) {
-        logger.warn('Invalid stop loss in LLM output', { sl: llmOutput.sl });
-        return null;
-      }
-
-      // Validate take profits
-      if (llmOutput.tps.length === 0) {
-        logger.warn('No take profits in LLM output');
-        return null;
-      }
-
-      // Validate symbol format (should be like BTCUSDT, ETHUSDT, etc.)
-      if (!/^[A-Z0-9]+USDT?$/.test(llmOutput.symbol)) {
-        logger.warn('Invalid symbol format in LLM output', { symbol: llmOutput.symbol });
-        return null;
-      }
-
-      // Sort take profits based on side
-      const sortedTPs =
-        llmOutput.side === 'LONG'
-          ? [...llmOutput.tps].sort((a, b) => a - b)
-          : [...llmOutput.tps].sort((a, b) => b - a);
-
+    // Convert side to management command type
+    if (llmOutput.side === 'LONG') {
       return {
+        type: 'close_all_longs',
         tradingPair: llmOutput.symbol,
-        leverage: llmOutput.leverage || 1,
-        entryPrice,
-        stopLoss: llmOutput.sl,
-        takeProfits: sortedTPs,
-        signalType: llmOutput.side.toLowerCase() as 'long' | 'short',
       };
-    } catch (error) {
-      logger.error('Error converting LLM output to ParsedOrder', {
-        error: error instanceof Error ? error.message : String(error),
-        llmOutput,
-      });
-      return null;
+    } else if (llmOutput.side === 'SHORT') {
+      return {
+        type: 'close_all_shorts',
+        tradingPair: llmOutput.symbol,
+      };
+    } else {
+      // If side is not specified or invalid, close all trades
+      return {
+        type: 'close_all_trades',
+        tradingPair: llmOutput.symbol,
+      };
     }
+  } catch (error) {
+    logger.error('Error converting LLM output to management command', {
+      error: error instanceof Error ? error.message : String(error),
+      llmOutput,
+    });
+    return null;
   }
+}
 
-  /**
-   * Convert LLM CLOSE_ALL action to ParsedManagementCommand
-   */
-  private convertToCloseAllCommand(llmOutput: LLMCloseAllAction): ParsedManagementCommand | null {
-    try {
-      // Validate symbol format
-      if (!/^[A-Z0-9]+USDT?$/.test(llmOutput.symbol)) {
-        logger.warn('Invalid symbol format in LLM output', { symbol: llmOutput.symbol });
+/**
+ * Create LLM Fallback Parser
+ */
+export function createLLMFallbackParser(
+  config: OllamaConfig & { channel?: string } = {}
+): LLMFallbackParser {
+  const state: LLMFallbackParserState = {
+    client: createOllamaClient(config),
+    channel: config.channel || 'default',
+    enabled: true,
+  };
+
+  return {
+    parse: async (content: string): Promise<LLMParserResult> => {
+      if (!state.enabled) {
+        logger.debug('LLM fallback parser is disabled');
         return null;
       }
 
-      // Convert side to management command type
-      if (llmOutput.side === 'LONG') {
-        return {
-          type: 'close_all_longs',
-          tradingPair: llmOutput.symbol,
-        };
-      } else if (llmOutput.side === 'SHORT') {
-        return {
-          type: 'close_all_shorts',
-          tradingPair: llmOutput.symbol,
-        };
-      } else {
-        // If side is not specified or invalid, close all trades
-        return {
-          type: 'close_all_trades',
-          tradingPair: llmOutput.symbol,
-        };
+      const startTime = Date.now();
+      metrics.totalCalls++;
+
+      try {
+        // Check if LLM service is available
+        const isHealthy = await state.client.healthCheck();
+        if (!isHealthy) {
+          logger.warn('Ollama service unavailable, skipping LLM fallback', {
+            channel: state.channel,
+          });
+          metrics.llmErrors++;
+          return null;
+        }
+
+        // Build the prompt
+        const prompt = `${SYSTEM_PROMPT}\n\n**User Message:**\n${content}\n\n**Output JSON:**`;
+
+        // Call LLM
+        const llmOutput = await state.client.generate(prompt, state.channel);
+
+        // Extract and parse JSON
+        const parsed = extractAndParseJSON<LLMOutput>(llmOutput);
+        if (!parsed) {
+          logger.warn('Failed to extract JSON from LLM output', {
+            channel: state.channel,
+            output: llmOutput.substring(0, 200), // Log first 200 chars
+          });
+          metrics.validationFailures++;
+          return null;
+        }
+
+        // Validate with Zod schema
+        const validationResult = LLMOutputSchema.safeParse(parsed);
+        if (!validationResult.success) {
+          logger.warn('LLM output failed schema validation', {
+            channel: state.channel,
+            errors: validationResult.error.errors,
+            output: parsed,
+          });
+          metrics.validationFailures++;
+          return null;
+        }
+
+        const validated = validationResult.data;
+
+        // Handle NONE action
+        if (validated.action === 'NONE') {
+          logger.debug('LLM determined message is not a signal', {
+            channel: state.channel,
+            reason: validated.reason,
+          });
+          return null;
+        }
+
+        // Handle different action types
+        if (validated.action === 'OPEN') {
+          const order = convertToParsedOrder(validated);
+          if (order) {
+            const responseTime = Date.now() - startTime;
+            metrics.successfulParses++;
+            metrics.averageResponseTime =
+              (metrics.averageResponseTime * (metrics.successfulParses - 1) + responseTime) /
+              metrics.successfulParses;
+
+            logger.info('LLM fallback parser succeeded (OPEN)', {
+              channel: state.channel,
+              action: validated.action,
+              symbol: validated.symbol,
+              side: validated.side,
+              confidence: validated.confidence,
+              responseTime,
+            });
+
+            return { type: 'order', order };
+          }
+        } else if (validated.action === 'CLOSE_ALL') {
+          const command = convertToCloseAllCommand(validated);
+          if (command) {
+            const responseTime = Date.now() - startTime;
+            metrics.successfulParses++;
+            metrics.averageResponseTime =
+              (metrics.averageResponseTime * (metrics.successfulParses - 1) + responseTime) /
+              metrics.successfulParses;
+
+            logger.info('LLM fallback parser succeeded (CLOSE_ALL)', {
+              channel: state.channel,
+              action: validated.action,
+              symbol: validated.symbol,
+              side: validated.side,
+              confidence: validated.confidence,
+              responseTime,
+            });
+
+            return { type: 'management', command };
+          }
+        } else if (validated.action === 'SET_TP' || validated.action === 'SET_SL' || validated.action === 'ADJUST_ENTRY') {
+          // These actions are not yet fully supported by the manager system
+          // but we can log them for future implementation
+          logger.warn('LLM returned management action not yet fully supported', {
+            channel: state.channel,
+            action: validated.action,
+            symbol: validated.symbol,
+          });
+          metrics.validationFailures++;
+          return null;
+        }
+
+        logger.warn('LLM returned unsupported action type', {
+          channel: state.channel,
+          action: validated.action,
+        });
+        metrics.validationFailures++;
+        return null;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        metrics.lastError = errorMessage;
+
+        if (errorMessage.includes('timeout')) {
+          metrics.timeouts++;
+          logger.error('LLM request timeout', {
+            channel: state.channel,
+            error: errorMessage,
+          });
+        } else if (errorMessage.includes('Rate limit')) {
+          metrics.rateLimitHits++;
+          logger.warn('LLM rate limit exceeded', {
+            channel: state.channel,
+          });
+        } else {
+          metrics.llmErrors++;
+          logger.error('LLM fallback parser error', {
+            channel: state.channel,
+            error: errorMessage,
+          });
+        }
+
+        return null;
       }
-    } catch (error) {
-      logger.error('Error converting LLM output to management command', {
-        error: error instanceof Error ? error.message : String(error),
-        llmOutput,
-      });
-      return null;
-    }
-  }
+    },
 
-  /**
-   * Disable the parser (e.g., if service is down)
-   */
-  disable(): void {
-    this.enabled = false;
-    logger.warn('LLM fallback parser disabled', { channel: this.channel });
-  }
+    disable: () => {
+      state.enabled = false;
+      logger.warn('LLM fallback parser disabled', { channel: state.channel });
+    },
 
-  /**
-   * Enable the parser
-   */
-  enable(): void {
-    this.enabled = true;
-    logger.info('LLM fallback parser enabled', { channel: this.channel });
-  }
+    enable: () => {
+      state.enabled = true;
+      logger.info('LLM fallback parser enabled', { channel: state.channel });
+    },
+  };
 }
 
 /**
  * Create a parser function compatible with the parser registry
  * This is a wrapper that creates an LLMFallbackParser instance
  */
-export function createLLMFallbackParser(
+export function createLLMFallbackParserSync(
   config: OllamaConfig & { channel?: string } = {}
 ): (content: string) => ParsedOrder | null {
-  const parser = new LLMFallbackParser(config);
+  const parser = createLLMFallbackParser(config);
 
   // Return a synchronous function that returns null
   // The actual parsing is async, so this is a limitation
@@ -403,7 +400,6 @@ export async function parseWithLLMFallback(
   content: string,
   config: OllamaConfig & { channel?: string } = {}
 ): Promise<LLMParserResult> {
-  const parser = new LLMFallbackParser(config);
+  const parser = createLLMFallbackParser(config);
   return parser.parse(content);
 }
-

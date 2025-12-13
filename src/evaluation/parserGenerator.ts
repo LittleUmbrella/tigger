@@ -9,7 +9,7 @@ import fs from 'fs-extra';
 import path from 'path';
 import { DatabaseManager, SignalFormatRecord } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
-import { OllamaClient } from '../utils/llmClient.js';
+import { createOllamaClient, OllamaClient } from '../utils/llmClient.js';
 
 /**
  * Generate a parser for a channel based on its signal formats
@@ -48,7 +48,7 @@ export async function generateParserForChannel(
   });
 
   // Use Ollama to generate parser code if available
-  const ollamaClient = new OllamaClient(ollamaConfig || {
+  const ollamaClient = createOllamaClient(ollamaConfig || {
     baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: process.env.OLLAMA_MODEL || 'llama3.2:1b',
     timeout: 60000, // Longer timeout for code generation

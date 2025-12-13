@@ -26,7 +26,7 @@
   "license": "ISC",
   "dependencies": {
     "better-sqlite3": "^11.0.0",
-    "bybit-api": "^2.0.0",
+    "bybit-api": "^4.4.2",
     "commander": "^14.0.2",
     "csv-parse": "^5.5.6",
     "csv-writer": "^1.6.0",

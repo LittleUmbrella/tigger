@@ -23,3 +23,5 @@ This block should be enclosed in an XML tag or Markdown section like so:
 Always structure your response as:
 1. <PLANNING> ... </PLANNING>
 2. The actual code changes / diffs.
+
+"Use functional and declarative programming patterns; avoid classes in Node.js. Prefer iteration and modularization over code duplication. Use descriptive variable names."

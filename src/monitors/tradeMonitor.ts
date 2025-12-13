@@ -2,8 +2,7 @@ import { MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -25,7 +24,7 @@ const sleep = (ms: number): Promise<void> => {
 const getCurrentPrice = async (
   tradingPair: string,
   exchange: string,
-  bybitClient: RESTClient | undefined,
+  bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
 ): Promise<number | null> => {
@@ -40,7 +39,7 @@ const getCurrentPrice = async (
     } else if (exchange === 'bybit' && bybitClient) {
       const symbol = tradingPair.replace('/', '');
       const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
-      if (ticker.retCode === 0 && ticker.result?.list?.[0]?.lastPrice) {
+      if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0 && ticker.result.list[0]?.lastPrice) {
         return parseFloat(ticker.result.list[0].lastPrice);
       }
     }
@@ -57,7 +56,7 @@ const getCurrentPrice = async (
 
 const checkEntryFilled = async (
   trade: Trade,
-  bybitClient: RESTClient | undefined,
+  bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
 ): Promise<{ filled: boolean; positionId?: string }> => {
@@ -81,36 +80,28 @@ const checkEntryFilled = async (
       return { filled: false };
     } else if (trade.exchange === 'bybit' && bybitClient && trade.order_id) {
       const symbol = trade.trading_pair.replace('/', '');
-      const orderInfo = await bybitClient.getOpenOrders({
+      const orderInfo = await bybitClient.getActiveOrders({
         category: 'linear',
         symbol: symbol,
         orderId: trade.order_id
       });
       
-      if (orderInfo.retCode === 0) {
-            const order = orderInfo.result?.list?.find((o: any) => o.orderId === trade.order_id);
+      if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list) {
+            const order = orderInfo.result.list.find((o: any) => o.orderId === trade.order_id);
         if (!order) {
-          // Check if order was filled
-          const filledOrders = await bybitClient.getOrderHistory({
-            category: 'linear',
-            symbol: symbol,
-            orderId: trade.order_id
-          });
-            const filled = filledOrders.result?.list?.find((o: any) => o.orderId === trade.order_id);
-          if (filled?.orderStatus === 'Filled') {
-            // Get position ID from open positions
-            const positions = await bybitClient.getPositionInfo({
-              category: 'linear',
-              symbol: symbol
-            });
-        const position = positions.result?.list?.find((p: any) => 
+          // Order not found in active orders, likely filled
+          // Get position ID from open positions
+          const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+        const position = positions.retCode === 0 && positions.result && positions.result.list 
+          ? positions.result.list.find((p: any) => 
           p.symbol === symbol && parseFloat(p.size || '0') !== 0
-        );
-            return { filled: true, positionId: position?.positionIdx?.toString() };
-          }
+        ) : null;
+            if (position) {
+              return { filled: true, positionId: position.positionIdx?.toString() };
+            }
           return { filled: false };
         }
-        return { filled: order.orderStatus === 'Filled' };
+        return { filled: (order as any).orderStatus === 'Filled' };
       }
     }
     return { filled: false };
@@ -125,7 +116,7 @@ const checkEntryFilled = async (
 
 const checkPositionClosed = async (
   trade: Trade,
-  bybitClient: RESTClient | undefined,
+  bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
 ): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
@@ -178,12 +169,9 @@ const checkPositionClosed = async (
       const symbol = trade.trading_pair.replace('/', '');
       
       // Check current positions
-      const positions = await bybitClient.getPositionInfo({
-        category: 'linear',
-        symbol: symbol
-      });
+      const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
       
-      if (positions.retCode === 0 && positions.result?.list) {
+      if (positions.retCode === 0 && positions.result && positions.result.list) {
         const position = positions.result.list.find((p: any) => 
           p.symbol === symbol && p.positionIdx?.toString() === trade.position_id
         );
@@ -197,7 +185,7 @@ const checkPositionClosed = async (
             limit: 10
           });
           
-          if (positionHistory.retCode === 0 && positionHistory.result?.list) {
+          if (positionHistory.retCode === 0 && positionHistory.result && positionHistory.result.list) {
             // Find the most recent closed position for this symbol
             const closedPosition = positionHistory.result.list.find((p: any) => 
               p.symbol === symbol
@@ -217,7 +205,7 @@ const checkPositionClosed = async (
             limit: 50
           });
           
-          if (tradeHistory.retCode === 0 && tradeHistory.result?.list) {
+          if (tradeHistory.retCode === 0 && tradeHistory.result && tradeHistory.result.list) {
             // Find trades that closed the position (opposite side trades)
             // For a long position, we look for sell trades
             // For a short position, we look for buy trades
@@ -244,7 +232,7 @@ const checkPositionClosed = async (
                 limit: 20
               });
               
-              if (detailedHistory.retCode === 0 && detailedHistory.result?.list) {
+              if (detailedHistory.retCode === 0 && detailedHistory.result && detailedHistory.result.list) {
             const recentClosed = detailedHistory.result.list.find((p: any) => 
               p.symbol === symbol && parseFloat(p.closedPnl || '0') !== 0
             );
@@ -279,7 +267,7 @@ const checkPositionClosed = async (
 
 const cancelOrder = async (
   trade: Trade,
-  bybitClient?: RESTClient
+  bybitClient?: RestClientV5
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient && trade.order_id) {
@@ -302,7 +290,7 @@ const cancelOrder = async (
 const updateStopLoss = async (
   trade: Trade,
   newStopLoss: number,
-  bybitClient?: RESTClient
+  bybitClient?: RestClientV5
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient) {
@@ -329,7 +317,7 @@ const updateStopLoss = async (
 const checkOrderFilled = async (
   order: Order,
   trade: Trade,
-  bybitClient: RESTClient | undefined,
+  bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
 ): Promise<{ filled: boolean; filledPrice?: number }> => {
@@ -362,32 +350,17 @@ const checkOrderFilled = async (
       const symbol = trade.trading_pair.replace('/', '');
       
       // Check if order is still open
-      const openOrders = await bybitClient.getOpenOrders({
+      const openOrders = await bybitClient.getActiveOrders({
         category: 'linear',
         symbol: symbol,
         orderId: order.order_id
       });
 
-      if (openOrders.retCode === 0) {
-        const foundOrder = openOrders.result?.list?.find((o: any) => o.orderId === order.order_id);
+      if (openOrders.retCode === 0 && openOrders.result && openOrders.result.list) {
+        const foundOrder = openOrders.result.list.find((o: any) => o.orderId === order.order_id);
         if (!foundOrder) {
-          // Order not in open orders, check history
-          const orderHistory = await bybitClient.getOrderHistory({
-            category: 'linear',
-            symbol: symbol,
-            orderId: order.order_id
-          });
-
-          if (orderHistory.retCode === 0 && orderHistory.result?.list) {
-            const filledOrder = orderHistory.result.list.find((o: any) => 
-              o.orderId === order.order_id && o.orderStatus === 'Filled'
-            );
-
-            if (filledOrder) {
-              const filledPrice = parseFloat(filledOrder.avgPrice || filledOrder.price || '0');
-              return { filled: true, filledPrice };
-            }
-          }
+          // Order not in open orders, likely filled
+          return { filled: true, filledPrice: order.price };
         } else if (foundOrder.orderStatus === 'Filled') {
           const filledPrice = parseFloat(foundOrder.avgPrice || foundOrder.price || '0');
           return { filled: true, filledPrice };
@@ -411,7 +384,7 @@ const monitorTrade = async (
   entryTimeoutDays: number,
   trade: Trade,
   db: DatabaseManager,
-  bybitClient: RESTClient | undefined,
+  bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
 ): Promise<void> => {
@@ -629,12 +602,12 @@ export const startTradeMonitor = async (
   isSimulation: boolean = false,
   priceProvider?: HistoricalPriceProvider,
   speedMultiplier?: number,
-  getBybitClient?: (accountName?: string) => RESTClient | undefined
+  getBybitClient?: (accountName?: string) => RestClientV5 | undefined
 ): Promise<() => Promise<void>> => {
   logger.info('Starting trade monitor', { type: monitorConfig.type, channel });
 
   // Legacy support: create a single client if getBybitClient not provided
-  let bybitClient: RESTClient | undefined;
+  let bybitClient: RestClientV5 | undefined;
   if (!getBybitClient && monitorConfig.type === 'bybit') {
     // Read Bybit API credentials from environment variables
     const apiKey = process.env.BYBIT_API_KEY;
@@ -648,11 +621,7 @@ export const startTradeMonitor = async (
       throw new Error('Bybit API credentials required for bybit monitor');
     }
     
-    bybitClient = new RESTClient({
-      key: apiKey,
-      secret: apiSecret,
-      testnet: monitorConfig.testnet || false,
-    });
+    bybitClient = new RestClientV5({ key: apiKey, secret: apiSecret, testnet: monitorConfig.testnet || false });
     logger.info('Bybit monitor client initialized', { 
       channel,
       type: monitorConfig.type,
