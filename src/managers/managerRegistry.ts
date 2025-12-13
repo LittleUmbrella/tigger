@@ -1,7 +1,6 @@
 import { DatabaseManager, Message, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 
 /**
@@ -27,8 +26,8 @@ export interface ManagerContext {
   db: DatabaseManager;
   isSimulation: boolean;
   priceProvider?: HistoricalPriceProvider;
-  bybitClient?: RESTClient; // Deprecated: use getBybitClient instead
-  getBybitClient?: (accountName?: string) => RESTClient | undefined; // Function to get client by account name
+  bybitClient?: RestClientV5; // Deprecated: use getBybitClient instead
+  getBybitClient?: (accountName?: string) => RestClientV5 | undefined; // Function to get client by account name
 }
 
 /**

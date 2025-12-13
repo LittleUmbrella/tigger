@@ -41,12 +41,9 @@ export const closeAllLongsManager: ManagerFunction = async (context: ManagerCont
       for (const trade of tradesToClose) {
         try {
           const symbol = trade.trading_pair.replace('/', '');
-          const positions = await bybitClient.getPositionInfo({
-            category: 'linear',
-            symbol: symbol
-          });
+          const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
           
-          if (positions.retCode === 0 && positions.result?.list) {
+          if (positions.retCode === 0 && positions.result && positions.result.list) {
             const position = positions.result.list.find((p: any) => 
               p.symbol === symbol && 
               p.positionIdx?.toString() === trade.position_id &&

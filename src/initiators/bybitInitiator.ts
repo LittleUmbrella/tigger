@@ -1,5 +1,4 @@
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
@@ -88,24 +87,22 @@ const getDecimalPrecision = (price: number): number => {
  * Get symbol information from Bybit to determine precision
  */
 const getSymbolInfo = async (
-  bybitClient: RESTClient,
+  bybitClient: RestClientV5,
   symbol: string
 ): Promise<{ qtyPrecision?: number; pricePrecision?: number } | null> => {
   try {
     // Try to get instrument info
-    const instruments = await bybitClient.getInstrumentsInfo({
-      category: 'linear',
-      symbol: symbol
-    });
+    const instruments = await bybitClient.getInstrumentsInfo({ category: 'linear', symbol });
     
-    if (instruments.retCode === 0 && instruments.result?.list?.[0]) {
-      const instrument = instruments.result.list[0];
+    if (instruments.retCode === 0 && instruments.result && instruments.result.list) {
+      const instrument = instruments.result.list.find((s: any) => s.symbol === symbol);
+      if (!instrument) return null;
       return {
-        qtyPrecision: instrument.lotSizeFilter?.qtyPrecision 
-          ? parseInt(instrument.lotSizeFilter.qtyPrecision) 
+        qtyPrecision: (instrument as any).lot_size_filter?.qty_precision 
+          ? parseInt((instrument as any).lot_size_filter.qty_precision) 
           : undefined,
-        pricePrecision: instrument.priceFilter?.tickSize
-          ? getDecimalPrecision(parseFloat(instrument.priceFilter.tickSize))
+        pricePrecision: (instrument as any).price_filter?.tick_size
+          ? getDecimalPrecision(parseFloat((instrument as any).price_filter.tick_size))
           : undefined
       };
     }
@@ -176,13 +173,9 @@ const executeTradeForAccount = async (
       return;
     }
 
-    let bybitClient: RESTClient | undefined;
+    let bybitClient: RestClientV5 | undefined;
     if (!isSimulation && apiKey && apiSecret) {
-      bybitClient = new RESTClient({
-        key: apiKey,
-        secret: apiSecret,
-        testnet: testnet,
-      });
+      bybitClient = new RestClientV5({ key: apiKey, secret: apiSecret, testnet: testnet });
       logger.info('Bybit client initialized', { 
         channel,
         accountName: accountName || 'default',
@@ -194,8 +187,10 @@ const executeTradeForAccount = async (
     
     if (!isSimulation && bybitClient) {
       // Get account balance to calculate position size
-      const accountInfo = await bybitClient.getWalletBalance({ coin: 'USDT' });
-      balance = parseFloat(accountInfo.result?.USDT?.availableBalance || '0');
+      const accountInfo = await bybitClient.getWalletBalance({ accountType: 'UNIFIED', coin: 'USDT' });
+      const account = accountInfo.result?.list?.[0];
+      const usdtCoin = account?.coin?.find((c: any) => c.coin === 'USDT');
+      balance = parseFloat(usdtCoin?.walletBalance || usdtCoin?.availableToWithdraw || '0');
       
       if (balance === 0) {
         logger.warn('Zero balance available', { channel });
@@ -217,7 +212,7 @@ const executeTradeForAccount = async (
       if (!isSimulation && bybitClient) {
         try {
           const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
-          if (ticker.retCode === 0 && ticker.result?.list?.[0]?.lastPrice) {
+          if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0 && ticker.result.list[0]?.lastPrice) {
             entryPrice = parseFloat(ticker.result.list[0].lastPrice);
             logger.info('Using market price for entry', { symbol, entryPrice });
           }
@@ -273,7 +268,7 @@ const executeTradeForAccount = async (
     // Using Bybit Futures API (linear perpetuals)
     // Create order at entry price (or market)
     const orderParams: any = {
-      category: 'linear', // Bybit Futures category
+      category: 'linear',
       symbol: symbol,
       side: side,
       orderType: orderType,
@@ -329,8 +324,8 @@ const executeTradeForAccount = async (
 
       // Place the entry order with stop loss (if supported in initial order)
       const orderResponse = await bybitClient.submitOrder(orderParams);
-      orderId = orderResponse.retCode === 0 
-        ? orderResponse.result?.orderId || 'unknown'
+      orderId = orderResponse.retCode === 0 && orderResponse.result
+        ? orderResponse.result.orderId || 'unknown'
         : null;
 
       if (!orderId) {
@@ -362,12 +357,12 @@ const executeTradeForAccount = async (
           // If stop loss fails and order is still pending, cancel it for safety
           // But only if it's still pending (not filled)
           try {
-            const orderStatus = await bybitClient.getOpenOrders({
+            const orderStatus = await bybitClient.getActiveOrders({
               category: 'linear',
               symbol: symbol,
               orderId: orderId
             });
-            if (orderStatus.retCode === 0 && orderStatus.result?.list?.length > 0) {
+            if (orderStatus.retCode === 0 && orderStatus.result && orderStatus.result.list && orderStatus.result.list.length > 0) {
               await bybitClient.cancelOrder({
                 category: 'linear',
                 symbol: symbol,
@@ -404,16 +399,16 @@ const executeTradeForAccount = async (
 
         // Prepare batch order requests
         const batchOrders = order.takeProfits.map((tpPrice, i) => ({
-          category: 'linear',
+          category: 'linear' as const,
           symbol: symbol,
-          side: tpSide,
-          orderType: 'Limit',
+          side: tpSide as 'Buy' | 'Sell',
+          orderType: 'Limit' as const,
           qty: tpQuantities[i].toString(),
           price: tpPrice.toString(),
-          timeInForce: 'GTC',
+          timeInForce: 'GTC' as const,
           reduceOnly: true, // TP orders should reduce position
           closeOnTrigger: false,
-          positionIdx: 0,
+          positionIdx: 0 as 0 | 1 | 2,
         }));
 
         // Try batch placement first (more atomic)
@@ -426,7 +421,7 @@ const executeTradeForAccount = async (
               request: batchOrders
             });
 
-            if (batchResponse.retCode === 0 && batchResponse.result?.list) {
+            if (batchResponse.retCode === 0 && batchResponse.result && batchResponse.result.list && Array.isArray(batchResponse.result.list)) {
               batchSuccess = true;
               // Collect order IDs from batch response
               batchResponse.result.list.forEach((result: any, i: number) => {
@@ -470,9 +465,9 @@ const executeTradeForAccount = async (
             try {
               const tpOrderResponse = await bybitClient.submitOrder(batchOrders[i]);
 
-              if (tpOrderResponse.retCode === 0) {
+              if (tpOrderResponse.retCode === 0 && tpOrderResponse.result) {
                 tpSuccessCount++;
-                const tpOrderId = tpOrderResponse.result?.orderId;
+                const tpOrderId = tpOrderResponse.result.orderId;
                 if (tpOrderId) {
                   tpOrderIds.push({
                     index: i,
@@ -525,12 +520,12 @@ const executeTradeForAccount = async (
             });
             // Try to cancel entry order if still pending
             try {
-              const orderStatus = await bybitClient.getOpenOrders({
+              const orderStatus = await bybitClient.getActiveOrders({
                 category: 'linear',
                 symbol: symbol,
                 orderId: orderId
               });
-              if (orderStatus.retCode === 0 && orderStatus.result?.list?.length > 0) {
+              if (orderStatus.retCode === 0 && orderStatus.result && orderStatus.result.list && orderStatus.result.list.length > 0) {
                 await bybitClient.cancelOrder({
                   category: 'linear',
                   symbol: symbol,

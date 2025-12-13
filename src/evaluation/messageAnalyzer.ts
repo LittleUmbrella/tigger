@@ -6,7 +6,7 @@
  */
 
 import { DatabaseManager, Message, SignalFormatRecord } from '../db/schema.js';
-import { OllamaClient } from '../utils/llmClient.js';
+import { createOllamaClient, OllamaClient } from '../utils/llmClient.js';
 import { logger } from '../utils/logger.js';
 
 export interface MessageClassification {
@@ -142,7 +142,7 @@ export async function analyzeChannelMessages(
 }> {
   logger.info('Starting message analysis', { channel });
 
-  const ollamaClient = new OllamaClient(ollamaConfig || {
+  const ollamaClient = createOllamaClient(ollamaConfig || {
     baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: process.env.OLLAMA_MODEL || 'llama3.2:1b',
     timeout: 30000,

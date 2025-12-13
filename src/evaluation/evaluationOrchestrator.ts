@@ -6,9 +6,9 @@
  */
 
 import { DatabaseManager, Trade, Message } from '../db/schema.js';
-import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
+import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { parseMessage } from '../parsers/signalParser.js';
-import { PropFirmEvaluator, EvaluationResult } from './propFirmEvaluator.js';
+import { createPropFirmEvaluator, PropFirmEvaluator, EvaluationResult } from './propFirmEvaluator.js';
 import { PropFirmRule, getPropFirmRule, createCustomPropFirmRule } from './propFirmRules.js';
 import { logger } from '../utils/logger.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
@@ -48,7 +48,7 @@ export async function runEvaluation(
   const apiKey = process.env.BYBIT_API_KEY;
   const apiSecret = process.env.BYBIT_API_SECRET;
 
-  const priceProvider = new HistoricalPriceProvider(
+  const priceProvider = createHistoricalPriceProvider(
     startDate,
     config.speedMultiplier || 0, // Use max speed by default
     apiKey,
@@ -219,7 +219,7 @@ export async function runEvaluation(
     }
 
     // Create evaluator
-    const evaluator = new PropFirmEvaluator(rule);
+    const evaluator = createPropFirmEvaluator(rule);
 
     // Add all trades to evaluator
     for (const trade of completedTrades) {

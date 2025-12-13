@@ -1,7 +1,6 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
 
 /**
@@ -79,7 +78,7 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
         positionIdx: 0
       });
 
-      if (orderResponse.retCode === 0 && orderResponse.result?.orderId) {
+      if (orderResponse.retCode === 0 && orderResponse.result) {
         await db.updateTrade(trade.id, {
           entry_price: newEntryPrice,
           order_id: orderResponse.result.orderId

@@ -1,8 +1,7 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
 import { closePosition } from './positionUtils.js';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 
 /**
@@ -43,12 +42,9 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
       for (const trade of tradesToClose) {
         try {
           const symbol = trade.trading_pair.replace('/', '');
-          const positions = await bybitClient.getPositionInfo({
-            category: 'linear',
-            symbol: symbol
-          });
+          const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
           
-          if (positions.retCode === 0 && positions.result?.list) {
+          if (positions.retCode === 0 && positions.result && positions.result.list) {
             const position = positions.result.list.find((p: any) => 
               p.symbol === symbol && 
               p.positionIdx?.toString() === trade.position_id &&

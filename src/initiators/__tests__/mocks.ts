@@ -90,7 +90,7 @@ export function createMockPriceProvider(priceData: Record<string, Record<string,
 }
 
 /**
- * Mock Bybit RESTClient
+ * Mock Bybit RestClientV5
  */
 export function createMockBybitClient(mockResponses: Record<string, any>) {
   return {

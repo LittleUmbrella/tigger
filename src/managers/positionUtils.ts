@@ -1,8 +1,7 @@
 import { DatabaseManager, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 
 /**
  * Helper function to close a position
@@ -11,7 +10,7 @@ export async function closePosition(
   trade: Trade,
   db: DatabaseManager,
   isSimulation: boolean,
-  bybitClient?: RESTClient
+  bybitClient?: RestClientV5
 ): Promise<void> {
   if (isSimulation) {
     // In simulation, just mark as closed
@@ -27,12 +26,9 @@ export async function closePosition(
     const symbol = trade.trading_pair.replace('/', '');
     
     // Get current position info
-    const positions = await bybitClient.getPositionInfo({
-      category: 'linear',
-      symbol: symbol
-    });
+    const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
 
-    if (positions.retCode === 0 && positions.result?.list) {
+    if (positions.retCode === 0 && positions.result && positions.result.list) {
       const position = positions.result.list.find((p: any) => 
         p.symbol === symbol && p.positionIdx?.toString() === trade.position_id
       );
@@ -40,23 +36,25 @@ export async function closePosition(
       if (position && parseFloat(position.size || '0') !== 0) {
         // Close the position by placing an opposite order
         const side = position.side === 'Buy' ? 'Sell' : 'Buy';
-        const qty = position.size;
+        const qty = parseFloat(position.size || '0');
 
         const closeOrder = await bybitClient.submitOrder({
           category: 'linear',
           symbol: symbol,
           side: side,
           orderType: 'Market',
-          qty: qty,
+          qty: qty.toString(),
+          timeInForce: 'IOC',
           reduceOnly: true,
-          positionIdx: parseInt(trade.position_id)
+          closeOnTrigger: false,
+          positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
         });
 
-        if (closeOrder.retCode === 0) {
+        if (closeOrder.retCode === 0 && closeOrder.result) {
           logger.info('Position closed on exchange', {
             tradeId: trade.id,
             tradingPair: trade.trading_pair,
-            orderId: closeOrder.result?.orderId
+            orderId: closeOrder.result.orderId
           });
 
           // Update trade status - the monitor will detect the closure and update with PNL

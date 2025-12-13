@@ -6,7 +6,7 @@ import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js'
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
 import { logger } from '../utils/logger.js';
-import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
+import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { registerParser } from '../parsers/parserRegistry.js';
 import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
 import '../initiators/index.js'; // Register built-in initiators
@@ -14,8 +14,7 @@ import '../managers/index.js'; // Register built-in managers
 import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -56,8 +55,8 @@ export const startTradeOrchestrator = async (
   }
 
   // Create Bybit client map for managers (keyed by account name)
-  const bybitClientMap = new Map<string, RESTClient>();
-  const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RESTClient | undefined => {
+  const bybitClientMap = new Map<string, RestClientV5>();
+  const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RestClientV5 | undefined => {
     const key = accountName || 'default';
     
     if (bybitClientMap.has(key)) {
@@ -88,11 +87,7 @@ export const startTradeOrchestrator = async (
       return undefined;
     }
 
-    const client = new RESTClient({
-      key: apiKey,
-      secret: apiSecret,
-      testnet: useTestnet,
-    });
+    const client = new RestClientV5({ key: apiKey, secret: apiSecret, testnet: useTestnet });
 
     bybitClientMap.set(key, client);
     return client;
@@ -109,7 +104,7 @@ export const startTradeOrchestrator = async (
     const apiKey = process.env.BYBIT_API_KEY;
     const apiSecret = process.env.BYBIT_API_SECRET;
     
-    priceProvider = new HistoricalPriceProvider(
+    priceProvider = createHistoricalPriceProvider(
       startDate,
       config.simulation?.speedMultiplier || 1.0,
       apiKey,

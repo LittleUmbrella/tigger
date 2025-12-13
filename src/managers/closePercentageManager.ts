@@ -1,8 +1,7 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
-// @ts-ignore - bybit-api types may not be complete
-import { RESTClient } from 'bybit-api';
+import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 
 /**
@@ -111,7 +110,7 @@ async function closePercentageOfPosition(
   moveStopLossToEntry: boolean,
   db: any,
   isSimulation: boolean,
-  bybitClient?: RESTClient
+  bybitClient?: RestClientV5
 ): Promise<void> {
   if (isSimulation) {
     // In simulation, we can't actually reduce position size, so we'll just log it
@@ -136,18 +135,15 @@ async function closePercentageOfPosition(
   } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
     const symbol = trade.trading_pair.replace('/', '');
     
-    const positions = await bybitClient.getPositionInfo({
-      category: 'linear',
-      symbol: symbol
-    });
+    const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
 
-    if (positions.retCode === 0 && positions.result?.list) {
+    if (positions.retCode === 0 && positions.result && positions.result.list) {
       const position = positions.result.list.find((p: any) => 
-        p.symbol === symbol && p.positionIdx?.toString() === trade.position_id
+        p.symbol === symbol && String(p.positionIdx || '0') === String(trade.position_id || '0')
       );
 
-      if (position && parseFloat(position.size || '0') !== 0) {
-        const currentSize = parseFloat(position.size);
+      if (position && parseFloat(String(position.size || '0')) !== 0) {
+        const currentSize = parseFloat(String(position.size || '0'));
         const closeQty = (currentSize * percentage) / 100;
         const side = position.side === 'Buy' ? 'Sell' : 'Buy';
 
@@ -155,19 +151,21 @@ async function closePercentageOfPosition(
         const closeOrder = await bybitClient.submitOrder({
           category: 'linear',
           symbol: symbol,
-          side: side,
+          side: side as 'Buy' | 'Sell',
           orderType: 'Market',
           qty: closeQty.toString(),
+          timeInForce: 'IOC',
           reduceOnly: true,
-          positionIdx: parseInt(trade.position_id)
+          closeOnTrigger: false,
+          positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
         });
 
-        if (closeOrder.retCode === 0) {
+        if (closeOrder.retCode === 0 && closeOrder.result) {
           logger.info('Partial position closed on exchange', {
             tradeId: trade.id,
             tradingPair: trade.trading_pair,
             percentage,
-            orderId: closeOrder.result?.orderId
+            orderId: closeOrder.result.orderId
           });
 
           // If moving stop loss to entry, update it
@@ -177,7 +175,7 @@ async function closePercentageOfPosition(
                 category: 'linear',
                 symbol: symbol,
                 stopLoss: trade.entry_price.toString(),
-                positionIdx: parseInt(trade.position_id)
+                positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
               });
 
               await db.updateTrade(trade.id, {

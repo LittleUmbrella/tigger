@@ -7,7 +7,7 @@ import { createMockDatabase, createMockPriceProvider, createMockBybitClient } fr
 import { HistoricalPriceProvider } from '../../utils/historicalPriceProvider.js';
 // Mock the bybit-api module
 vi.mock('bybit-api', () => ({
-  RESTClient: vi.fn(),
+  RestClientV5: vi.fn(),
 }));
 
 describe('Bybit Initiator', () => {
