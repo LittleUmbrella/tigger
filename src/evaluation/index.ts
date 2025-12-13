@@ -31,6 +31,7 @@ program
   .option('-k, --keywords <keywords>', 'Comma-separated keywords to filter messages')
   .option('-l, --limit <n>', 'Maximum messages to harvest (0 = unlimited)', '0')
   .option('-d, --delay <ms>', 'Delay between batches in ms, or "auto"', 'auto')
+  .option('--download-images', 'Download and store images from messages', false)
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -50,6 +51,7 @@ program
         keywords: options.keywords ? options.keywords.split(',').map((k: string) => k.trim()) : undefined,
         limit: parseInt(options.limit, 10) || 0,
         delay: options.delay === 'auto' ? 'auto' : parseInt(options.delay, 10) || 0,
+        downloadImages: options.downloadImages || false,
       };
 
       const result = await harvestMessages(db, harvestOptions);

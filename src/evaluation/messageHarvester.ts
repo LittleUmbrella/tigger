@@ -9,6 +9,7 @@ import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
+import { downloadMessageImages } from '../utils/imageDownloader.js';
 import dayjs from 'dayjs';
 
 export interface HarvestOptions {
@@ -19,6 +20,7 @@ export interface HarvestOptions {
   keywords?: string[]; // Optional keywords to filter messages
   limit?: number; // Maximum messages to harvest (0 = unlimited)
   delay?: number | 'auto'; // Delay between batches in ms, or 'auto' for random delays
+  downloadImages?: boolean; // Whether to download and store images from messages (default: false)
 }
 
 export interface HarvestResult {
@@ -181,6 +183,25 @@ export async function harvestMessages(
             }
           }
 
+          // Download images if enabled
+          let imagePaths: string[] = [];
+          if (options.downloadImages && msg instanceof Api.Message) {
+            try {
+              imagePaths = await downloadMessageImages(
+                { channel: options.channel, downloadImages: options.downloadImages },
+                client,
+                msg
+              );
+            } catch (error) {
+              logger.warn('Failed to download images for message', {
+                channel: options.channel,
+                messageId: msgId,
+                error: error instanceof Error ? error.message : String(error)
+              });
+              // Continue with message insertion even if image download fails
+            }
+          }
+
           // Insert message into database
           try {
             await db.insertMessage({
@@ -190,6 +211,7 @@ export async function harvestMessages(
               sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
               date: msgDate.toISOString(),
               reply_to_message_id: replyToMessageId,
+              image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
             });
             batchNewMessages++;
             result.newMessages++;
