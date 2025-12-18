@@ -16,12 +16,14 @@ The evaluation subsystem replaces the simulation subsystem with a more focused p
 
 ## Quick Start
 
+**Note**: When using `npm run evaluate`, you must include `--` before any command-line flags to ensure npm passes them to the script. For example: `npm run evaluate harvest -- --channel "channel_name"`.
+
 ### 1. Harvest Messages from a Channel
 
 Pull historical messages from a Telegram channel:
 
 ```bash
-npm run evaluate harvest \
+npm run evaluate harvest -- \
   --channel "your_channel_username" \
   --start-date "2024-01-01" \
   --end-date "2024-12-31" \
@@ -36,6 +38,7 @@ Options:
 - `-k, --keywords`: Comma-separated keywords to filter messages
 - `-l, --limit`: Maximum messages to harvest (0 = unlimited)
 - `-d, --delay`: Delay between batches in ms, or "auto" (default: auto)
+- `--download-images`: Download and store images from messages (boolean flag, use without a value)
 - `--db-path`: Database path (default: data/evaluation.db)
 - `--db-type`: Database type: sqlite or postgresql (default: sqlite)
 
@@ -44,7 +47,7 @@ Options:
 Analyze harvested messages to identify signal and management message formats:
 
 ```bash
-npm run evaluate analyze \
+npm run evaluate analyze -- \
   --channel "your_channel_username" \
   --ollama-url "http://localhost:11434" \
   --ollama-model "llama3.2:1b"
@@ -70,7 +73,7 @@ This command:
 Automatically generate a parser for a channel based on analyzed signal formats:
 
 ```bash
-npm run evaluate generate-parser \
+npm run evaluate generate-parser -- \
   --channel "your_channel_username" \
   --name "myCustomParser" \
   --ollama-url "http://localhost:11434" \
@@ -100,7 +103,7 @@ This command:
 Evaluate the harvested messages against prop firm rules:
 
 ```bash
-npm run evaluate evaluate \
+npm run evaluate evaluate -- \
   --channel "your_channel_username" \
   --parser "emoji_heavy" \
   --prop-firms "crypto-fund-trader,hyrotrader,mubite" \
@@ -140,7 +143,7 @@ Options:
 List signal and management formats that have been identified for channels:
 
 ```bash
-npm run evaluate formats \
+npm run evaluate formats -- \
   --channel "your_channel_username" \
   --classification "signal"
 ```
@@ -203,7 +206,7 @@ You can also use a configuration file for more complex setups:
 Then run:
 
 ```bash
-npm run evaluate evaluate --config config.evaluation.json
+npm run evaluate evaluate -- --config config.evaluation.json
 ```
 
 ## Supported Prop Firms

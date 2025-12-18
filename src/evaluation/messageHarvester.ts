@@ -96,10 +96,22 @@ export async function harvestMessages(
       lastMessageId: 0,
     };
 
+    // offsetId is used for API pagination (messages older than this ID)
+    // lastProcessedId tracks the highest message ID we've successfully processed
     let offsetId = lastMessageId;
+    let lastProcessedId = lastMessageId;
     let batchCount = 0;
+    let consecutiveDuplicateBatches = 0;
+    const MAX_CONSECUTIVE_DUPLICATE_BATCHES = 3;
+    let shouldStop = false; // Flag to stop harvesting when we hit duplicates
 
     while (true) {
+      if (shouldStop) {
+        logger.info('Stopping harvest: reached already-processed messages', {
+          channel: options.channel
+        });
+        break;
+      }
       batchCount++;
       
       // Calculate delay
@@ -108,9 +120,12 @@ export async function harvestMessages(
         : (options.delay || 0);
 
       try {
+        // Pass offsetId directly - the Telegram library handles conversion
+        // offsetId means "get messages older than this ID"
+        // 0 means start from most recent messages
         const history = await client.invoke(new Api.messages.GetHistory({
           peer: entity,
-          offsetId: BigInt(offsetId || 0) as any,
+          offsetId: offsetId || 0,
           limit: 20,
           addOffset: 0,
           maxId: 0,
@@ -124,19 +139,39 @@ export async function harvestMessages(
           break;
         }
 
-        // Process messages (oldest to newest)
+        // Telegram API returns messages newest-first, reverse to process oldest-first
         const ordered = [...messages].reverse();
         let batchNewMessages = 0;
         let batchSkipped = 0;
 
         for (const msg of ordered) {
-          if (!('message' in msg) || !msg.message) continue;
-
-          const msgId = Number(msg.id);
-          if (Number.isNaN(msgId) || msgId <= offsetId) {
+          if (!('message' in msg) || !msg.message) {
             batchSkipped++;
+            logger.debug('Skipping message: no message content', {
+              channel: options.channel,
+              messageId: msg.id
+            });
             continue;
           }
+
+          // Handle BigInt message IDs properly
+          const msgIdBigInt = typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id);
+          const msgId = Number(msgIdBigInt);
+          if (Number.isNaN(msgId)) {
+            batchSkipped++;
+            logger.debug('Skipping message: invalid ID', {
+              channel: options.channel,
+              messageId: msgId
+            });
+            continue;
+          }
+
+          // Note: We don't skip based on lastProcessedId here because:
+          // 1. Telegram returns messages newest-first, we reverse to process oldest-first
+          // 2. After reversing, we process messages in order: oldest (lowest ID) to newest (highest ID)
+          // 3. If we skip based on lastProcessedId, we'd incorrectly skip older messages that come after newer ones
+          // 4. The database UNIQUE constraint on (message_id, channel) will handle duplicates
+          // 5. We track lastProcessedId to know the highest ID we've processed in this batch
 
           // Parse date
           let msgDate: Date;
@@ -155,10 +190,22 @@ export async function harvestMessages(
           // Apply date filters
           if (startDate && dayjs(msgDate).isBefore(startDate)) {
             batchSkipped++;
+            logger.debug('Skipping message: before start date', {
+              channel: options.channel,
+              messageId: msgId,
+              messageDate: msgDate.toISOString(),
+              startDate: startDate.toISOString()
+            });
             continue;
           }
           if (endDate && dayjs(msgDate).isAfter(endDate)) {
             batchSkipped++;
+            logger.debug('Skipping message: after end date', {
+              channel: options.channel,
+              messageId: msgId,
+              messageDate: msgDate.toISOString(),
+              endDate: endDate.toISOString()
+            });
             continue;
           }
 
@@ -168,6 +215,11 @@ export async function harvestMessages(
             const hasKeyword = options.keywords.some(k => messageText.includes(k.toLowerCase()));
             if (!hasKeyword) {
               batchSkipped++;
+              logger.debug('Skipping message: no keyword match', {
+                channel: options.channel,
+                messageId: msgId,
+                keywords: options.keywords
+              });
               continue;
             }
           }
@@ -215,19 +267,29 @@ export async function harvestMessages(
             });
             batchNewMessages++;
             result.newMessages++;
-            offsetId = Math.max(offsetId, msgId);
+            // Update lastProcessedId to track the highest ID we've successfully processed
+            lastProcessedId = Math.max(lastProcessedId, msgId);
             result.lastMessageId = Math.max(result.lastMessageId, msgId);
           } catch (error) {
-            if (error instanceof Error && !error.message.includes('UNIQUE constraint')) {
+            if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+              // Duplicate message - we've reached messages we've already processed
+              // In evaluation mode, this means we can stop harvesting (we've caught up)
+              logger.info('Reached already-processed messages, stopping harvest', {
+                channel: options.channel,
+                messageId: msgId,
+                lastProcessedId
+              });
+              // Set flag to stop harvesting after processing current batch
+              shouldStop = true;
+              // Break out of the message loop
+              break;
+            } else {
               logger.warn('Failed to insert message', {
                 channel: options.channel,
                 messageId: msgId,
-                error: error.message
+                error: error instanceof Error ? error.message : String(error)
               });
               result.errors++;
-            } else {
-              // Duplicate message, skip
-              batchSkipped++;
             }
           }
 
@@ -245,6 +307,8 @@ export async function harvestMessages(
         result.skippedMessages += batchSkipped;
 
         if (batchNewMessages > 0) {
+          // Reset counter when we find new messages
+          consecutiveDuplicateBatches = 0;
           logger.info('Harvested batch', {
             channel: options.channel,
             batch: batchCount,
@@ -252,6 +316,29 @@ export async function harvestMessages(
             skipped: batchSkipped,
             totalNew: result.newMessages
           });
+        } else if (batchSkipped > 0) {
+          // Log when all messages in a batch were skipped
+          consecutiveDuplicateBatches++;
+          logger.info('Batch skipped entirely', {
+            channel: options.channel,
+            batch: batchCount,
+            totalMessages: messages.length,
+            skipped: batchSkipped,
+            consecutiveDuplicateBatches,
+            reason: 'all_messages_filtered_or_duplicate'
+          });
+
+          // Stop if we've encountered multiple consecutive batches with all duplicates
+          // This indicates we've reached the point where everything is already harvested
+          if (consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES) {
+            logger.info('Stopping harvest: multiple consecutive batches were all duplicates', {
+              channel: options.channel,
+              consecutiveDuplicateBatches,
+              lastProcessedId,
+              reason: 'reached_already_harvested_messages'
+            });
+            break;
+          }
         }
 
         // Check if we should stop
@@ -259,13 +346,37 @@ export async function harvestMessages(
           break;
         }
 
-        // Prepare next offset
-        const minId = Math.min(...messages.map(m => Number(m.id)).filter(Number.isFinite));
-        if (!Number.isFinite(minId) || minId <= 1 || offsetId <= minId) {
+        // Prepare next offset - handle BigInt message IDs
+        const messageIds = messages.map(m => {
+          const id = typeof m.id === 'bigint' ? m.id : BigInt(m.id);
+          return Number(id);
+        }).filter(Number.isFinite);
+        
+        if (messageIds.length === 0) {
+          logger.info('No valid message IDs found', { channel: options.channel });
+          break;
+        }
+        
+        const minId = Math.min(...messageIds);
+        if (!Number.isFinite(minId) || minId <= 1) {
           logger.info('Reached earliest messages', { channel: options.channel });
           break;
         }
-        offsetId = minId - 1;
+        
+        // For next batch, set offsetId to the minimum ID we saw minus 1
+        // This tells the API to get messages older than this
+        // But only if we haven't already processed all messages in this range
+        const nextOffsetId = Math.max(1, minId - 1);
+        if (nextOffsetId >= offsetId) {
+          // We're not making progress, stop
+          logger.info('Reached earliest messages (no progress)', { 
+            channel: options.channel,
+            currentOffset: offsetId,
+            nextOffset: nextOffsetId
+          });
+          break;
+        }
+        offsetId = nextOffsetId;
 
         // Delay between batches
         if (delayMs > 0) {

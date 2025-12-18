@@ -114,7 +114,12 @@ export const parseManagementCommand = async (
         }
       }
       
-      const llmResult = await parseWithLLMFallback(enhancedContent, ollamaConfig);
+      // parseWithLLMFallback will automatically include the full reply chain if message is provided
+      const llmResult = await parseWithLLMFallback(
+        enhancedContent, 
+        { ...ollamaConfig, db },
+        message
+      );
       if (llmResult && llmResult.type === 'management') {
         // If LLM didn't provide tradingPair but we have context, add it
         if (!llmResult.command.tradingPair && message && db) {

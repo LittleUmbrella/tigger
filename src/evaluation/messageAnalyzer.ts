@@ -8,9 +8,10 @@
 import { DatabaseManager, Message, SignalFormatRecord } from '../db/schema.js';
 import { createOllamaClient, OllamaClient } from '../utils/llmClient.js';
 import { logger } from '../utils/logger.js';
+import { extractAndParseJSON } from '../utils/jsonExtractor.js';
 
 export interface MessageClassification {
-  type: 'signal' | 'management' | 'other';
+  type: 'signal' | 'management' | 'trade_progress_update' | 'other';
   confidence: number;
   reasoning?: string;
 }
@@ -20,7 +21,7 @@ export interface SignalFormat {
   channel: string;
   format_pattern: string; // Example message content
   format_hash: string; // Hash of the format for deduplication
-  classification: 'signal' | 'management';
+  classification: 'signal' | 'management' | 'trade_progress_update';
   example_count: number; // Number of messages with this format
   first_seen: string;
   last_seen: string;
@@ -29,54 +30,118 @@ export interface SignalFormat {
 }
 
 /**
+ * Format reply chain messages with sequence indicators
+ */
+function formatReplyChain(replyChain: Message[]): string {
+  if (replyChain.length === 0) {
+    return '';
+  }
+
+  const formatted = replyChain.map((msg, index) => {
+    const sequence = index + 1;
+    const timestamp = new Date(msg.date).toISOString();
+    return `[Message ${sequence} - ${timestamp}]\n${msg.content}`;
+  }).join('\n\n---\n\n');
+
+  return formatted;
+}
+
+/**
  * Analyze a single message to classify it
+ * If the message is a reply, includes the full reply chain for context
  */
 export async function classifyMessage(
-  message: string,
+  message: Message,
   ollamaClient: OllamaClient,
-  channel: string
+  channel: string,
+  db?: DatabaseManager
 ): Promise<MessageClassification> {
-  const prompt = `Analyze the following Telegram message from a crypto trading channel and classify it.
+  // Fetch reply chain if this is a reply
+  let replyChainText = '';
+  if (message.reply_to_message_id && db) {
+    try {
+      const replyChain = await db.getMessageReplyChain(message.message_id, channel);
+      if (replyChain.length > 0) {
+        replyChainText = `\n\n**Previous Messages in Reply Chain:**\n${formatReplyChain(replyChain)}\n\n---\n\n**Current Message:**`;
+      }
+    } catch (error) {
+      logger.warn('Failed to fetch reply chain', {
+        messageId: message.message_id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  }
 
-Message: "${message}"
+  const prompt = `Analyze the following Telegram message from a crypto trading channel and classify it.
+${replyChainText}
+Message: "${message.content}"
 
 Classify the message as one of:
-- "signal": A trading signal with entry price, stop loss, take profits, trading pair, etc.
-- "management": A management command like closing positions, adjusting stop loss, etc.
-- "other": Not a signal or management command (announcements, updates, etc.)
+- "signal": A new trading signal with entry price, stop loss, take profits, trading pair, etc. Examples: "Entry: 100-105, Targets: 110-120, Stop: 95", "#BTC/USDT Long Entry: 50000"
 
-Respond with ONLY a JSON object in this exact format:
+- "management": An actionable management command like closing positions, adjusting stop loss, moving stop loss to entry, etc. Examples: "Close all positions", "Move SL to entry", "Take profit now"
+
+- "trade_progress_update": An informational update about trade progress. These are NOT actionable commands. Examples:
+  * "Target 1 hit" or "First Target ✅" or "TP1 hit"
+  * "Second Target ✅" or "TP2 hit" or "Target 2 hit"
+  * "Third Target ✅" or "TP3 hit" or "Target 3 hit"
+  * "All Target ✅" or "All targets hit" or "All TP hit"
+  * "Profit: +$500" or "Current PNL: +10%"
+  * "Trade is in profit" or "Position is green"
+  * Any message that reports on the status/progress of an existing trade without being a new signal or management command
+
+- "other": Not a signal, management command, or trade update (announcements, general chat, market analysis without signals, etc.)
+
+IMPORTANT: Messages that report target hits, profit updates, or trade status should be classified as "trade_progress_update", not "signal" or "management".
+
+Respond with ONLY a valid JSON object in this exact format (no markdown, no code blocks, no extra text):
 {
-  "type": "signal" | "management" | "other",
-  "confidence": 0.0-1.0,
+  "type": "signal",
+  "confidence": 0.85,
   "reasoning": "brief explanation"
 }
 
-Do not include any other text, only the JSON object.`;
+The JSON must be valid and complete. Do not include any other text before or after the JSON object.`;
 
   try {
     const response = await ollamaClient.generate(prompt, channel);
     
-    // Try to extract JSON from response
-    const jsonMatch = response.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn('Failed to extract JSON from LLM response', { response });
+    // Use the robust JSON extractor utility
+    const classification = extractAndParseJSON<MessageClassification>(response);
+    
+    if (!classification) {
+      logger.warn('Failed to extract or parse JSON from LLM response', { 
+        response: response.substring(0, 200),
+        message: message.content.substring(0, 100)
+      });
+      return { type: 'other', confidence: 0 };
+    }
+    
+    // Validate classification
+    if (!['signal', 'management', 'trade_progress_update', 'other'].includes(classification.type)) {
+      logger.warn('Invalid classification type', { 
+        classification,
+        message: message.content.substring(0, 100)
+      });
       return { type: 'other', confidence: 0 };
     }
 
-    const classification = JSON.parse(jsonMatch[0]) as MessageClassification;
-    
-    // Validate classification
-    if (!['signal', 'management', 'other'].includes(classification.type)) {
-      logger.warn('Invalid classification type', { classification });
-      return { type: 'other', confidence: 0 };
+    // Ensure confidence is a valid number
+    if (typeof classification.confidence !== 'number' || 
+        classification.confidence < 0 || 
+        classification.confidence > 1) {
+      logger.warn('Invalid confidence value', { 
+        confidence: classification.confidence,
+        message: message.content.substring(0, 100)
+      });
+      classification.confidence = 0.5; // Default to medium confidence
     }
 
     return classification;
   } catch (error) {
     logger.error('Failed to classify message', {
       error: error instanceof Error ? error.message : String(error),
-      message: message.substring(0, 100)
+      message: message.content.substring(0, 100)
     });
     return { type: 'other', confidence: 0 };
   }
@@ -89,14 +154,33 @@ Do not include any other text, only the JSON object.`;
 export function extractFormatPattern(message: string): string {
   // Normalize the message to create a pattern
   let pattern = message
-    // Replace numbers with placeholders
+    // Replace time patterns first (e.g., "1 day 8 hrs 1 min" -> "{TIME}")
+    // Handle patterns with days first (most specific to least specific)
+    // Note: "day" and "days" are both matched with "days?" pattern
+    .replace(/\d+\s*days?\s*\d+\s*hrs?\s*\d+\s*min\s*\d+\s*sec/gi, '{TIME}') // days, hours, minutes, seconds
+    .replace(/\d+\s*days?\s*\d+\s*hrs?\s*\d+\s*mins?/gi, '{TIME}') // days, hours, minutes
+    .replace(/\d+\s*days?\s*\d+\s*hrs?/gi, '{TIME}') // days, hours
+    .replace(/\d+\s*days?\s*\d+\s*mins?/gi, '{TIME}') // days, minutes
+    // Handle patterns without days
+    .replace(/\d+\s*hr\s*\d+\s*min\s*\d+\s*sec/gi, '{TIME}') // hours, minutes, seconds
+    .replace(/\d+\s*hr\s*\d+\s*mins?/gi, '{TIME}') // hours, minutes
+    .replace(/\d+\s*hr\s*\d+\s*sec/gi, '{TIME}') // hours, seconds
+    .replace(/\d+\s*hrs?/gi, '{TIME}') // just hours
+    .replace(/\d+\s*mins?/gi, '{TIME}') // just minutes
+    // Replace percentages with placeholder (before numbers to avoid conflicts)
+    .replace(/\d+\.?\d*\s*%/g, '{PERCENT}')
+    // Replace trading pairs with placeholder (before general number replacement)
+    // Match pairs like #STG, BTC/USDT, etc. (minimum 2 chars to avoid matching single numbers)
+    .replace(/#?[A-Z0-9]{2,}\/?[A-Z0-9]*/gi, '{PAIR}')
+    // Replace emoji sequences FIRST (before numbers) to catch keycap emojis like 1️⃣2️⃣3️⃣
+    // Keycap emojis contain digits, so we need to match them before number replacement
+    // Match: base char + optional variation selector + combining keycap, or any emoji range
+    .replace(/[\u0023-\u0039]\uFE0F?\u20E3/gu, '{EMOJI}') // Keycap sequences (0-9, #)
+    .replace(/[\u{1F300}-\u{1F9FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1F1E0}-\u{1F1FF}]+/gu, '{EMOJI}') // Other emojis
+    // Collapse multiple consecutive {EMOJI} placeholders (with optional spaces) into one
+    .replace(/\{EMOJI\}(\s*\{EMOJI\})*/g, '{EMOJI}')
+    // Replace remaining numbers with placeholder (after emojis are handled)
     .replace(/\d+\.?\d*/g, '{NUMBER}')
-    // Replace trading pairs with placeholder
-    .replace(/#?[A-Z0-9]+\/?[A-Z0-9]*/gi, '{PAIR}')
-    // Replace percentages with placeholder
-    .replace(/\d+\.?\d*%/g, '{PERCENT}')
-    // Replace emojis with placeholder
-    .replace(/[\u{1F300}-\u{1F9FF}]/gu, '{EMOJI}')
     // Normalize whitespace
     .replace(/\s+/g, ' ')
     .trim();
@@ -138,13 +222,26 @@ export async function analyzeChannelMessages(
   totalMessages: number;
   signalsFound: number;
   managementFound: number;
+  tradeProgressUpdatesFound: number;
   uniqueFormats: number;
 }> {
   logger.info('Starting message analysis', { channel });
 
+  // Use a larger model for better classification accuracy
+  // llama3.2:1b is very small and may struggle with nuanced classification
+  // Recommended models (in order of preference):
+  //   - llama3.1:8b or llama3.2:11b (if available) - best for classification
+  //   - llama3.2:3b - good middle ground if resources are limited
+  //   - llama3.1:70b - largest but requires significant resources
+  const modelToUse = ollamaConfig?.model || process.env.OLLAMA_MODEL || 'llama3.1:8b';
+  
+  if (modelToUse === 'llama3.2:1b') {
+    logger.warn('Using llama3.2:1b model - this small model may struggle with nuanced classification. Consider using llama3.1:8b, llama3.2:11b, or llama3.2:3b for better trade_progress_update detection.');
+  }
+
   const ollamaClient = createOllamaClient(ollamaConfig || {
     baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
-    model: process.env.OLLAMA_MODEL || 'llama3.2:1b',
+    model: modelToUse,
     timeout: 30000,
     maxRetries: 2,
   });
@@ -165,6 +262,7 @@ export async function analyzeChannelMessages(
       totalMessages: 0,
       signalsFound: 0,
       managementFound: 0,
+      tradeProgressUpdatesFound: 0,
       uniqueFormats: 0,
     };
   }
@@ -180,6 +278,7 @@ export async function analyzeChannelMessages(
 
   let signalsFound = 0;
   let managementFound = 0;
+  let tradeProgressUpdatesFound = 0;
   let processed = 0;
 
   // Process messages in batches to avoid overwhelming the LLM
@@ -191,11 +290,27 @@ export async function analyzeChannelMessages(
       try {
         // Classify message
         const classification = await classifyMessage(
-          message.content,
+          message,
           ollamaClient,
-          channel
+          channel,
+          db
         );
 
+        // Log classification for debugging (especially trade_progress_update)
+        if (classification.type === 'trade_progress_update' || 
+            (classification.type === 'other' && message.content.match(/(target|tp|profit|hit|✅)/i))) {
+          logger.debug('Message classification', {
+            channel,
+            messageId: message.message_id,
+            content: message.content.substring(0, 100),
+            classification: classification.type,
+            confidence: classification.confidence,
+            reasoning: classification.reasoning
+          });
+        }
+
+        // Track actionable types (signal and management) as formats
+        // Trade progress updates are informational and don't need format tracking
         if (classification.type === 'signal' || classification.type === 'management') {
           // Extract format pattern
           const pattern = extractFormatPattern(message.content);
@@ -226,6 +341,8 @@ export async function analyzeChannelMessages(
           } else {
             managementFound++;
           }
+        } else if (classification.type === 'trade_progress_update') {
+          tradeProgressUpdatesFound++;
         }
 
         processed++;
@@ -296,6 +413,7 @@ export async function analyzeChannelMessages(
     totalMessages: messages.length,
     signalsFound,
     managementFound,
+    tradeProgressUpdatesFound,
     uniqueFormats: formatMap.size,
     savedFormats
   });
@@ -304,6 +422,7 @@ export async function analyzeChannelMessages(
     totalMessages: messages.length,
     signalsFound,
     managementFound,
+    tradeProgressUpdatesFound,
     uniqueFormats: formatMap.size,
   };
 }

@@ -113,9 +113,12 @@ const fetchNewMessages = async (
   lastMessageId: number
 ): Promise<number> => {
   try {
+    // For forward polling (new messages), always get the most recent messages
+    // offsetId: 0 means get the newest messages
+    // We'll filter out already-processed messages below
     const history = await client.invoke(new Api.messages.GetHistory({
       peer: entity,
-      offsetId: BigInt(lastMessageId || 0) as any,
+      offsetId: 0,
       limit: 100,
       addOffset: 0,
       maxId: 0,
@@ -128,15 +131,40 @@ const fetchNewMessages = async (
       return lastMessageId;
     }
 
-    let newLastMessageId = lastMessageId;
+    // Telegram API returns messages newest-first, reverse to process oldest-first
     const ordered = [...messages].reverse();
+    let newLastMessageId = lastMessageId;
     let newMessagesCount = 0;
+    let skippedCount = 0;
 
     for (const msg of ordered) {
-      if (!('message' in msg) || !msg.message) continue;
+      if (!('message' in msg) || !msg.message) {
+        skippedCount++;
+        logger.debug('Skipping message: no message content', {
+          channel: config.channel,
+          messageId: msg.id
+        });
+        continue;
+      }
 
-      const msgId = Number(msg.id);
-      if (Number.isNaN(msgId) || msgId <= lastMessageId) continue;
+      // Handle BigInt message IDs properly
+      const msgIdBigInt = typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id);
+      const msgId = Number(msgIdBigInt);
+      if (Number.isNaN(msgId)) {
+        skippedCount++;
+        logger.debug('Skipping message: invalid ID', {
+          channel: config.channel,
+          messageId: msgId
+        });
+        continue;
+      }
+
+      // Note: We don't skip based on lastMessageId here because:
+      // 1. Telegram returns messages newest-first, we reverse to process oldest-first
+      // 2. After reversing, we process messages in order: oldest (lowest ID) to newest (highest ID)
+      // 3. If we skip based on lastMessageId, we'd incorrectly skip older messages that come after newer ones
+      // 4. The database UNIQUE constraint on (message_id, channel) will handle duplicates
+      // 5. We track newLastMessageId to know the highest ID we've processed in this batch
 
       let msgDate: Date;
       if ('date' in msg && msg.date) {
@@ -194,11 +222,14 @@ const fetchNewMessages = async (
         newMessagesCount++;
         newLastMessageId = Math.max(newLastMessageId, msgId);
       } catch (error) {
-        if (error instanceof Error && !error.message.includes('UNIQUE constraint')) {
+        if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+          // Message already exists in database - this is expected for duplicates
+          skippedCount++;
+        } else {
           logger.warn('Failed to insert message', {
             channel: config.channel,
             messageId: msgId,
-            error: error.message
+            error: error instanceof Error ? error.message : String(error)
           });
         }
       }
@@ -208,7 +239,14 @@ const fetchNewMessages = async (
       logger.info('Harvested new messages', {
         channel: config.channel,
         count: newMessagesCount,
+        skipped: skippedCount,
         lastMessageId: newLastMessageId
+      });
+    } else if (skippedCount > 0) {
+      logger.debug('All messages in batch were skipped', {
+        channel: config.channel,
+        totalMessages: messages.length,
+        skipped: skippedCount
       });
     }
 
@@ -267,7 +305,9 @@ export const startSignalHarvester = async (
         const message = update.message;
         if (!message || !('id' in message)) return;
         
-        const messageId = Number(message.id);
+        // Handle BigInt message IDs properly
+        const messageIdBigInt = typeof message.id === 'bigint' ? message.id : BigInt(message.id);
+        const messageId = Number(messageIdBigInt);
         if (Number.isNaN(messageId)) return;
 
         // Get the updated message
