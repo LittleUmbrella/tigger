@@ -4,6 +4,7 @@
  * Provides CLI and programmatic access to the evaluation subsystem
  */
 
+import 'dotenv/config';
 import { Command } from 'commander';
 import { DatabaseManager } from '../db/schema.js';
 import { harvestMessages, HarvestOptions } from './messageHarvester.js';
@@ -20,6 +21,18 @@ program
   .description('Evaluate Telegram channel signals against prop firm rules')
   .version('1.0.0');
 
+// Helper function to log all options
+const logOptions = (commandName: string, options: any) => {
+  logger.info('Command options', {
+    command: commandName,
+    options: JSON.parse(JSON.stringify(options, (key, value) => {
+      // Handle undefined values
+      if (value === undefined) return undefined;
+      return value;
+    }))
+  });
+};
+
 // Harvest command
 program
   .command('harvest')
@@ -35,6 +48,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('harvest', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,
@@ -87,6 +101,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('evaluate', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,
@@ -198,6 +213,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('analyze', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,
@@ -217,6 +233,7 @@ program
       console.log(`   Total messages: ${result.totalMessages}`);
       console.log(`   Signals found: ${result.signalsFound}`);
       console.log(`   Management commands found: ${result.managementFound}`);
+      console.log(`   Trade progress updates found: ${result.tradeProgressUpdatesFound}`);
       console.log(`   Unique formats: ${result.uniqueFormats}\n`);
 
       await db.close();
@@ -238,6 +255,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('generate-parser', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,
@@ -283,6 +301,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('formats', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,
@@ -333,6 +352,7 @@ program
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
+    logOptions('results', options);
     try {
       const db = new DatabaseManager({
         type: options.dbType,

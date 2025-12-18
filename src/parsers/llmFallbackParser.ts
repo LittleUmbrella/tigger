@@ -14,6 +14,7 @@ import { logger } from '../utils/logger.js';
 import { createOllamaClient, OllamaClient, OllamaConfig } from '../utils/llmClient.js';
 import { extractAndParseJSON } from '../utils/jsonExtractor.js';
 import { LLMOutputSchema, LLMOutput, LLMOpenAction, LLMNoneAction, LLMCloseAllAction, LLMSetTPAction, LLMSetSLAction, LLMAdjustEntryAction } from './llmSchemas.js';
+import { Message, DatabaseManager } from '../db/schema.js';
 
 /**
  * Result from LLM fallback parser - can be either a trade order or a management command
@@ -22,6 +23,23 @@ export type LLMParserResult =
   | { type: 'order'; order: ParsedOrder }
   | { type: 'management'; command: ParsedManagementCommand }
   | null;
+
+/**
+ * Format reply chain messages with sequence indicators
+ */
+function formatReplyChain(replyChain: Message[]): string {
+  if (replyChain.length === 0) {
+    return '';
+  }
+
+  const formatted = replyChain.map((msg, index) => {
+    const sequence = index + 1;
+    const timestamp = new Date(msg.date).toISOString();
+    return `[Message ${sequence} - ${timestamp}]\n${msg.content}`;
+  }).join('\n\n---\n\n');
+
+  return formatted;
+}
 
 /**
  * System prompt for the LLM
@@ -102,10 +120,11 @@ interface LLMFallbackParserState {
   client: OllamaClient;
   channel: string;
   enabled: boolean;
+  db?: DatabaseManager;
 }
 
 export interface LLMFallbackParser {
-  parse: (content: string) => Promise<LLMParserResult>;
+  parse: (content: string, message?: Message) => Promise<LLMParserResult>;
   disable: () => void;
   enable: () => void;
 }
@@ -206,16 +225,17 @@ function convertToCloseAllCommand(llmOutput: LLMCloseAllAction): ParsedManagemen
  * Create LLM Fallback Parser
  */
 export function createLLMFallbackParser(
-  config: OllamaConfig & { channel?: string } = {}
+  config: OllamaConfig & { channel?: string; db?: DatabaseManager } = {}
 ): LLMFallbackParser {
   const state: LLMFallbackParserState = {
     client: createOllamaClient(config),
     channel: config.channel || 'default',
     enabled: true,
+    db: config.db,
   };
 
   return {
-    parse: async (content: string): Promise<LLMParserResult> => {
+    parse: async (content: string, message?: Message): Promise<LLMParserResult> => {
       if (!state.enabled) {
         logger.debug('LLM fallback parser is disabled');
         return null;
@@ -235,8 +255,24 @@ export function createLLMFallbackParser(
           return null;
         }
 
+        // Fetch reply chain if this is a reply
+        let replyChainText = '';
+        if (message?.reply_to_message_id && state.db) {
+          try {
+            const replyChain = await state.db.getMessageReplyChain(message.message_id, message.channel);
+            if (replyChain.length > 0) {
+              replyChainText = `\n\n**Previous Messages in Reply Chain:**\n${formatReplyChain(replyChain)}\n\n---\n\n**Current Message:**`;
+            }
+          } catch (error) {
+            logger.warn('Failed to fetch reply chain for LLM parser', {
+              messageId: message.message_id,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
+
         // Build the prompt
-        const prompt = `${SYSTEM_PROMPT}\n\n**User Message:**\n${content}\n\n**Output JSON:**`;
+        const prompt = `${SYSTEM_PROMPT}${replyChainText}\n\n**User Message:**\n${content}\n\n**Output JSON:**`;
 
         // Call LLM
         const llmOutput = await state.client.generate(prompt, state.channel);
@@ -398,8 +434,9 @@ export function createLLMFallbackParserSync(
  */
 export async function parseWithLLMFallback(
   content: string,
-  config: OllamaConfig & { channel?: string } = {}
+  config: OllamaConfig & { channel?: string; db?: DatabaseManager } = {},
+  message?: Message
 ): Promise<LLMParserResult> {
   const parser = createLLMFallbackParser(config);
-  return parser.parse(content);
+  return parser.parse(content, message);
 }

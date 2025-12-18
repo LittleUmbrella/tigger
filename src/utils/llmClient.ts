@@ -108,6 +108,25 @@ export function createOllamaClient(config: OllamaConfig = {}): OllamaClient {
       : null,
   };
 
+  async function checkModelExists(): Promise<boolean> {
+    try {
+      const response = await fetch(`${state.baseUrl}/api/tags`, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      
+      if (!response.ok) {
+        return false;
+      }
+      
+      const data = (await response.json()) as { models?: Array<{ name: string }> };
+      const models = data.models || [];
+      return models.some((m) => m.name === state.model || m.name.startsWith(`${state.model}:`));
+    } catch (error) {
+      return false;
+    }
+  }
+
   async function makeRequest(prompt: string): Promise<string> {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), state.timeout);
@@ -129,6 +148,18 @@ export function createOllamaClient(config: OllamaConfig = {}): OllamaClient {
       clearTimeout(timeoutId);
 
       if (!response.ok) {
+        // Check if it's a 404 - likely means model doesn't exist
+        if (response.status === 404) {
+          const modelExists = await checkModelExists();
+          if (!modelExists) {
+            throw new Error(
+              `Model "${state.model}" not found. Please pull the model first:\n` +
+              `  ollama pull ${state.model}\n` +
+              `Or if using Docker:\n` +
+              `  docker exec -it tigger-ollama ollama pull ${state.model}`
+            );
+          }
+        }
         throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
       }
 

@@ -20,10 +20,13 @@ export interface OllamaConfig {
   };
 }
 
+import type { DatabaseManager } from '../db/schema.js';
+
 export interface ParserConfig {
   name: string;
   channel: string;
   ollama?: OllamaConfig; // LLM fallback configuration (only for LLM parsers)
+  db?: DatabaseManager; // DatabaseManager instance (optional, passed at runtime for reply chain support)
   // Parser-specific config can be added here
 }
 

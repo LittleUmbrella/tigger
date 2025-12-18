@@ -55,6 +55,7 @@ export const parseMessageWithFallback = async (
       const llmResult = await parseWithLLMFallback(content, {
         ...config.ollama,
         channel: config.channel,
+        db: config.db,
       });
       if (llmResult && llmResult.type === 'order') {
         return llmResult.order;
@@ -103,7 +104,8 @@ export const parseUnparsedMessages = async (
           const llmResult = await parseWithLLMFallback(message.content, {
             ...config.ollama,
             channel: config.channel,
-          });
+            db: config.db,
+          }, message);
           
           if (llmResult) {
             usedLLMFallback = true;

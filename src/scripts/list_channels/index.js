@@ -5,6 +5,19 @@ import { StringSession } from "telegram/sessions/index.js";
 import input from "input";
 import fs from "fs-extra";
 import { Command } from "commander";
+import { logger } from "../../utils/logger.js";
+
+// Helper function to log all options
+const logOptions = (commandName, options) => {
+  logger.info("Command options", {
+    command: commandName,
+    options: JSON.parse(JSON.stringify(options, (key, value) => {
+      // Handle undefined values
+      if (value === undefined) return undefined;
+      return value;
+    }))
+  });
+};
 
 // -----------------------------
 // CLI setup
@@ -20,6 +33,7 @@ program
   .parse(process.argv);
 
 const opts = program.opts();
+logOptions("list-channels", opts);
 
 // -----------------------------
 // Environment / session setup

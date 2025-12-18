@@ -18,8 +18,21 @@ import fs from "fs-extra";
 import { Command } from "commander";
 import pkg from "csv-writer";
 import dayjs from "dayjs";
+import { logger } from "../utils/logger.js";
 
 const { createObjectCsvWriter } = pkg;
+
+// Helper function to log all options
+const logOptions = (commandName, options) => {
+  logger.info("Command options", {
+    command: commandName,
+    options: JSON.parse(JSON.stringify(options, (key, value) => {
+      // Handle undefined values
+      if (value === undefined) return undefined;
+      return value;
+    }))
+  });
+};
 
 const program = new Command();
 program
@@ -36,6 +49,7 @@ program
   .parse(process.argv);
 
 const opts = program.opts();
+logOptions("harvest-script", opts);
 
 // --- environment ---
 const apiId = parseInt(process.env.TG_API_ID, 10);
