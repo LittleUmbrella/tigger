@@ -11,6 +11,7 @@ export interface Message {
   date: string;
   created_at: string;
   parsed: boolean;
+  analyzed?: boolean; // Whether message has been analyzed for format identification
   reply_to_message_id?: number; // Telegram message ID this message is replying to (if any)
   old_content?: string; // Previous content if message was edited (deprecated - use message_versions table)
   edited_at?: string; // Timestamp when message was last edited (deprecated - use message_versions table)
@@ -102,9 +103,11 @@ type DatabaseType = 'sqlite' | 'postgresql';
 
 interface DatabaseAdapter {
   initializeSchema(): Promise<void>;
-  insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number>;
+  insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number>;
   getUnparsedMessages(channel?: string): Promise<Message[]>;
+  getUnanalyzedMessages(channel?: string): Promise<Message[]>;
   markMessageParsed(id: number): Promise<void>;
+  markMessageAnalyzed(id: number): Promise<void>;
   updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void>;
   insertMessageVersion(messageId: number, channel: string, content: string): Promise<number>;
   getMessageVersions(messageId: number, channel: string): Promise<MessageVersion[]>;
@@ -151,12 +154,20 @@ class SQLiteAdapter implements DatabaseAdapter {
         date TEXT NOT NULL,
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         parsed BOOLEAN NOT NULL DEFAULT 0,
+        analyzed BOOLEAN NOT NULL DEFAULT 0,
         reply_to_message_id INTEGER,
         old_content TEXT,
         edited_at TEXT,
         UNIQUE(message_id, channel)
       )
     `);
+    
+    // Add analyzed column if it doesn't exist (for backward compatibility)
+    try {
+      this.db.exec(`ALTER TABLE messages ADD COLUMN analyzed BOOLEAN NOT NULL DEFAULT 0`);
+    } catch (error) {
+      // Column already exists, ignore error
+    }
     
     // Message versions table - stores full edit history
     this.db.exec(`
@@ -312,10 +323,10 @@ class SQLiteAdapter implements DatabaseAdapter {
     `);
   }
 
-  async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number> {
+  async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number> {
     const stmt = this.db.prepare(`
-      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id, image_paths)
-      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, ?, ?)
+      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, analyzed, reply_to_message_id, image_paths)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, 0, 0, ?, ?)
     `);
     const result = stmt.run(
       message.message_id,
@@ -844,10 +855,21 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           date TEXT NOT NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           parsed BOOLEAN NOT NULL DEFAULT FALSE,
+          analyzed BOOLEAN NOT NULL DEFAULT FALSE,
           reply_to_message_id INTEGER,
           UNIQUE(message_id, channel)
         )
       `);
+      
+      // Add analyzed column if it doesn't exist (for backward compatibility)
+      try {
+        await client.query(`ALTER TABLE messages ADD COLUMN analyzed BOOLEAN NOT NULL DEFAULT FALSE`);
+      } catch (error: any) {
+        // Column already exists, ignore
+        if (!error.message?.includes('already exists') && !error.message?.includes('duplicate')) {
+          throw error;
+        }
+      }
       
       // Add reply_to_message_id column if it doesn't exist (migration)
       try {
@@ -1021,10 +1043,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     }
   }
 
-  async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number> {
+  async insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number> {
     const result = await this.pool.query(`
-      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, reply_to_message_id, image_paths)
-      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, FALSE, $6, $7)
+      INSERT INTO messages (message_id, channel, content, sender, date, created_at, parsed, analyzed, reply_to_message_id, image_paths)
+      VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, FALSE, FALSE, $6, $7)
       RETURNING id
     `, [
       message.message_id,
@@ -1047,6 +1069,22 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return result.rows.map(row => ({
       ...row,
       parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      date: row.date instanceof Date ? row.date.toISOString() : row.date
+    })) as Message[];
+  }
+
+  async getUnanalyzedMessages(channel?: string): Promise<Message[]> {
+    const query = channel
+      ? 'SELECT * FROM messages WHERE (analyzed IS NULL OR analyzed = FALSE) AND channel = $1 ORDER BY id ASC'
+      : 'SELECT * FROM messages WHERE analyzed IS NULL OR analyzed = FALSE ORDER BY id ASC';
+    const params = channel ? [channel] : [];
+    const result = await this.pool.query(query, params);
+    return result.rows.map(row => ({
+      ...row,
+      parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
       created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
       date: row.date instanceof Date ? row.date.toISOString() : row.date
     })) as Message[];
@@ -1054,6 +1092,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
 
   async markMessageParsed(id: number): Promise<void> {
     await this.pool.query('UPDATE messages SET parsed = TRUE WHERE id = $1', [id]);
+  }
+
+  async markMessageAnalyzed(id: number): Promise<void> {
+    await this.pool.query('UPDATE messages SET analyzed = TRUE WHERE id = $1', [id]);
   }
 
   async updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void> {
@@ -1148,6 +1190,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return {
       ...row,
       parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
       created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
       date: row.date instanceof Date ? row.date.toISOString() : row.date
     } as Message;
@@ -1161,6 +1204,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return result.rows.map(row => ({
       ...row,
       parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
       created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
       date: row.date instanceof Date ? row.date.toISOString() : row.date
     })) as Message[];
@@ -1609,7 +1653,7 @@ export class DatabaseManager {
     await this.adapter.initializeSchema();
   }
 
-  insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed'>): Promise<number> {
+  insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number> {
     return this.adapter.insertMessage(message);
   }
 
@@ -1617,8 +1661,16 @@ export class DatabaseManager {
     return this.adapter.getUnparsedMessages(channel);
   }
 
+  getUnanalyzedMessages(channel?: string): Promise<Message[]> {
+    return this.adapter.getUnanalyzedMessages(channel);
+  }
+
   markMessageParsed(id: number): Promise<void> {
     return this.adapter.markMessageParsed(id);
+  }
+
+  markMessageAnalyzed(id: number): Promise<void> {
+    return this.adapter.markMessageAnalyzed(id);
   }
 
   updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void> {
