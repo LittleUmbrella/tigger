@@ -260,16 +260,18 @@ export async function analyzeChannelMessages(
     throw new Error('Ollama service is not available. Please ensure Ollama is running.');
   }
 
-  // Get messages - either specific IDs or all unparsed messages
+  // Get messages - either specific IDs or all unanalyzed messages
   let messages: Message[];
   if (messageIds && messageIds.length > 0) {
-    // Fetch specific messages by ID
+    // Fetch specific messages by ID (filter out already analyzed ones)
     const fetchedMessages: Message[] = [];
     for (const messageId of messageIds) {
       try {
         const message = await db.getMessageByMessageId(messageId, channel);
-        if (message) {
+        if (message && (!message.analyzed)) {
           fetchedMessages.push(message);
+        } else if (message?.analyzed) {
+          logger.debug('Message already analyzed, skipping', { messageId, channel });
         } else {
           logger.warn('Message not found', { messageId, channel });
         }
@@ -284,8 +286,8 @@ export async function analyzeChannelMessages(
     messages = fetchedMessages;
     logger.info('Messages to analyze (by ID)', { channel, requested: messageIds.length, found: messages.length });
   } else {
-    // Get all messages for this channel
-    messages = await db.getUnparsedMessages(channel);
+    // Get all unanalyzed messages for this channel
+    messages = await db.getUnanalyzedMessages(channel);
     logger.info('Messages to analyze', { channel, count: messages.length });
   }
 
@@ -317,6 +319,7 @@ export async function analyzeChannelMessages(
     examples: string[];
     firstSeen: string;
     lastSeen: string;
+    saved: boolean; // Track if format has been persisted to database
   }>();
 
   let signalsFound = 0;
@@ -324,6 +327,46 @@ export async function analyzeChannelMessages(
   let tradeProgressUpdatesFound = 0;
   let processed = 0;
   let skippedOllama = 0;
+  let savedFormats = 0;
+
+  // Helper function to persist a format to the database
+  const saveFormatToDatabase = async (hash: string, format: {
+    pattern: string;
+    classification: 'signal' | 'management';
+    examples: string[];
+    firstSeen: string;
+    lastSeen: string;
+  }): Promise<void> => {
+    try {
+      // Check if format already exists
+      const existing = await db.getSignalFormats(channel, hash);
+      if (existing.length > 0) {
+        // Update existing format
+        await db.updateSignalFormat(existing[0].id, {
+          example_count: format.examples.length,
+          last_seen: format.lastSeen,
+        });
+      } else {
+        // Insert new format
+        await db.insertSignalFormat({
+          channel,
+          format_pattern: format.examples[0], // Use first example as the pattern
+          format_hash: hash,
+          classification: format.classification,
+          example_count: format.examples.length,
+          first_seen: format.firstSeen,
+          last_seen: format.lastSeen,
+        });
+        savedFormats++;
+      }
+    } catch (error) {
+      logger.error('Error saving format to database', {
+        channel,
+        hash,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  };
 
   // Process messages in batches to avoid overwhelming the LLM
   const batchSize = 10;
@@ -384,13 +427,18 @@ export async function analyzeChannelMessages(
         if (classification.type === 'signal' || classification.type === 'management') {
           // Update format map
           if (!formatMap.has(hash)) {
-            formatMap.set(hash, {
+            const newFormat = {
               pattern,
               classification: classification.type,
               examples: [message.content],
               firstSeen: message.date,
               lastSeen: message.date,
-            });
+              saved: false,
+            };
+            formatMap.set(hash, newFormat);
+            // Persist new format to database immediately
+            await saveFormatToDatabase(hash, newFormat);
+            newFormat.saved = true;
           } else {
             const format = formatMap.get(hash)!;
             format.examples.push(message.content);
@@ -400,6 +448,9 @@ export async function analyzeChannelMessages(
             if (message.date > format.lastSeen) {
               format.lastSeen = message.date;
             }
+            // Update existing format in database (example_count and last_seen may have changed)
+            await saveFormatToDatabase(hash, format);
+            format.saved = true;
           }
 
           if (classification.type === 'signal') {
@@ -409,6 +460,18 @@ export async function analyzeChannelMessages(
           }
         } else if (classification.type === 'trade_progress_update') {
           tradeProgressUpdatesFound++;
+        }
+
+        // Mark message as analyzed after processing
+        try {
+          await db.markMessageAnalyzed(message.id);
+        } catch (error) {
+          logger.error('Error marking message as analyzed', {
+            channel,
+            messageId: message.message_id,
+            id: message.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
         }
 
         processed++;
@@ -441,40 +504,6 @@ export async function analyzeChannelMessages(
     // Longer delay between batches
     if (i + batchSize < messages.length) {
       await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-
-  // Save formats to database
-  let savedFormats = 0;
-  for (const [hash, format] of formatMap.entries()) {
-    try {
-      // Check if format already exists
-      const existing = await db.getSignalFormats(channel, hash);
-      if (existing.length > 0) {
-        // Update existing format
-        await db.updateSignalFormat(existing[0].id, {
-          example_count: format.examples.length,
-          last_seen: format.lastSeen,
-        });
-      } else {
-        // Insert new format
-        await db.insertSignalFormat({
-          channel,
-          format_pattern: format.examples[0], // Use first example as the pattern
-          format_hash: hash,
-          classification: format.classification,
-          example_count: format.examples.length,
-          first_seen: format.firstSeen,
-          last_seen: format.lastSeen,
-        });
-        savedFormats++;
-      }
-    } catch (error) {
-      logger.error('Error saving format', {
-        channel,
-        hash,
-        error: error instanceof Error ? error.message : String(error)
-      });
     }
   }
 
