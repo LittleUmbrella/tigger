@@ -6,8 +6,9 @@ import { logger } from './logger.js';
 export interface OllamaConfig {
   baseUrl?: string;
   model?: string;
-  timeout?: number;
+  timeout?: number; // Default: 60000ms (60s), increase for larger models or slower hardware
   maxRetries?: number;
+  maxInputLength?: number; // Default: 8000, maximum prompt length before truncation
   rateLimit?: {
     perChannel?: number;
     perMinute?: number;
@@ -86,6 +87,7 @@ interface OllamaClientState {
   model: string;
   timeout: number;
   maxRetries: number;
+  maxInputLength: number;
   rateLimiter: LLMRateLimiter | null;
 }
 
@@ -101,8 +103,9 @@ export function createOllamaClient(config: OllamaConfig = {}): OllamaClient {
   const state: OllamaClientState = {
     baseUrl: config.baseUrl || 'http://localhost:11434',
     model: config.model || 'llama3.2:1b',
-    timeout: config.timeout || 30000,
+    timeout: config.timeout || 60000,
     maxRetries: config.maxRetries || 2,
+    maxInputLength: config.maxInputLength || 8000,
     rateLimiter: config.rateLimit
       ? createLLMRateLimiter(config.rateLimit.perChannel || 10, config.rateLimit.perMinute || 30)
       : null,
@@ -178,10 +181,25 @@ export function createOllamaClient(config: OllamaConfig = {}): OllamaClient {
 
   function sanitizeInput(input: string): string | null {
     // Limit message length to prevent token bloat
-    const MAX_LENGTH = 2000;
-    if (input.length > MAX_LENGTH) {
-      logger.warn('Input too long, truncating', { originalLength: input.length, maxLength: MAX_LENGTH });
-      return input.substring(0, MAX_LENGTH);
+    // Increased from 2000 to 8000 to accommodate longer prompts with reply chains
+    // Most LLMs can handle 8k tokens, and this prevents aggressive truncation
+    if (input.length > state.maxInputLength) {
+      logger.warn('Input too long, truncating', { 
+        service: 'tigger-bot',
+        originalLength: input.length, 
+        maxLength: state.maxInputLength 
+      });
+      // Truncate from the end, but try to preserve structure
+      // If it looks like JSON instructions are at the end, preserve them
+      const truncated = input.substring(0, state.maxInputLength);
+      // Try to find a good truncation point (end of a sentence or instruction)
+      const lastPeriod = truncated.lastIndexOf('.');
+      const lastNewline = truncated.lastIndexOf('\n');
+      const truncateAt = Math.max(lastPeriod, lastNewline);
+      if (truncateAt > state.maxInputLength * 0.8) {
+        return truncated.substring(0, truncateAt + 1);
+      }
+      return truncated;
     }
 
     // Basic sanitization - remove null bytes and other control characters
@@ -210,9 +228,45 @@ export function createOllamaClient(config: OllamaConfig = {}): OllamaClient {
         } catch (error) {
           lastError = error instanceof Error ? error : new Error(String(error));
           
+          // Log detailed info on timeout to help diagnose issues
+          const isTimeout = lastError.message.includes('timeout');
+          if (isTimeout) {
+            // Truncate prompt for logging (first 500 chars + last 200 chars if long)
+            let promptPreview = sanitizedPrompt;
+            if (sanitizedPrompt.length > 700) {
+              promptPreview = sanitizedPrompt.substring(0, 500) + 
+                '\n\n... [truncated ' + (sanitizedPrompt.length - 700) + ' chars] ...\n\n' + 
+                sanitizedPrompt.substring(sanitizedPrompt.length - 200);
+            }
+            
+            // Estimate token count (rough approximation: ~4 chars per token)
+            const estimatedTokens = Math.ceil(sanitizedPrompt.length / 4);
+            
+            logger.warn('LLM request timeout', {
+              service: 'tigger-bot',
+              attempt: attempt + 1,
+              maxRetries: state.maxRetries,
+              model: state.model,
+              channel,
+              promptLength: sanitizedPrompt.length,
+              estimatedTokens,
+              timeout: state.timeout,
+              promptPreview,
+              suggestions: [
+                `Model "${state.model}" may be too slow for your hardware. Consider:`,
+                `- Using a smaller model: llama3.2:3b or llama3.2:1b (faster, less accurate)`,
+                `- Increasing timeout: Set timeout to 120000 (120s) for 8B+ models on CPU`,
+                `- Check if GPU is available: ollama ps (should show GPU usage)`,
+                `- Simplify prompt: Reduce examples in classification prompt`,
+                `- Hardware: 8B models need GPU or very fast CPU (16+ cores) for <60s responses`
+              ].join(' ')
+            });
+          }
+          
           if (attempt < state.maxRetries) {
             const delay = Math.min(1000 * Math.pow(2, attempt), 5000); // Exponential backoff, max 5s
             logger.warn('LLM request failed, retrying', {
+              service: 'tigger-bot',
               attempt: attempt + 1,
               maxRetries: state.maxRetries,
               delay,

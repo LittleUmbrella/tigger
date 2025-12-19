@@ -208,8 +208,10 @@ program
   .command('analyze')
   .description('Analyze messages to identify signal and management formats')
   .requiredOption('-c, --channel <channel>', 'Channel to analyze')
+  .option('--message-ids <ids>', 'Comma-delimited list of message IDs to analyze (if not provided, analyzes all messages)')
   .option('--ollama-url <url>', 'Ollama base URL', 'http://localhost:11434')
   .option('--ollama-model <model>', 'Ollama model to use', 'llama3.2:1b')
+  .option('--ollama-timeout <ms>', 'Ollama request timeout in milliseconds', '60000')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -224,10 +226,25 @@ program
 
       const { analyzeChannelMessages } = await import('./messageAnalyzer.js');
       
+      // Parse message IDs if provided
+      let messageIds: number[] | undefined;
+      if (options.messageIds) {
+        messageIds = options.messageIds
+          .split(',')
+          .map((id: string) => {
+            const parsed = parseInt(id.trim(), 10);
+            if (isNaN(parsed)) {
+              throw new Error(`Invalid message ID: ${id.trim()}`);
+            }
+            return parsed;
+          });
+      }
+      
       const result = await analyzeChannelMessages(db, options.channel, {
         baseUrl: options.ollamaUrl,
         model: options.ollamaModel,
-      });
+        timeout: parseInt(options.ollamaTimeout, 10) || 60000,
+      }, messageIds);
 
       console.log('\n✅ Analysis completed:');
       console.log(`   Total messages: ${result.totalMessages}`);

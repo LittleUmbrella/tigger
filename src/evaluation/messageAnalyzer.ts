@@ -6,7 +6,7 @@
  */
 
 import { DatabaseManager, Message, SignalFormatRecord } from '../db/schema.js';
-import { createOllamaClient, OllamaClient } from '../utils/llmClient.js';
+import { createOllamaClient, OllamaClient, OllamaConfig } from '../utils/llmClient.js';
 import { logger } from '../utils/logger.js';
 import { extractAndParseJSON } from '../utils/jsonExtractor.js';
 
@@ -31,17 +31,30 @@ export interface SignalFormat {
 
 /**
  * Format reply chain messages with sequence indicators
+ * Limits the chain to prevent prompt bloat while preserving recent context
  */
-function formatReplyChain(replyChain: Message[]): string {
+function formatReplyChain(replyChain: Message[], maxMessages: number = 5, maxMessageLength: number = 600): string {
   if (replyChain.length === 0) {
     return '';
   }
 
-  const formatted = replyChain.map((msg, index) => {
-    const sequence = index + 1;
+  // Keep only the most recent messages (most relevant for context)
+  const recentMessages = replyChain.slice(-maxMessages);
+
+  const formatted = recentMessages.map((msg, index) => {
+    const sequence = replyChain.length - recentMessages.length + index + 1;
     const timestamp = new Date(msg.date).toISOString();
-    return `[Message ${sequence} - ${timestamp}]\n${msg.content}`;
+    // Truncate individual messages if they're too long
+    const content = msg.content.length > maxMessageLength 
+      ? msg.content.substring(0, maxMessageLength) + '...'
+      : msg.content;
+    return `[Message ${sequence} - ${timestamp}]\n${content}`;
   }).join('\n\n---\n\n');
+
+  // Add indicator if messages were truncated
+  if (replyChain.length > maxMessages) {
+    return `[Showing ${maxMessages} most recent of ${replyChain.length} messages]\n\n${formatted}`;
+  }
 
   return formatted;
 }
@@ -208,16 +221,9 @@ export function hashFormatPattern(pattern: string): string {
 export async function analyzeChannelMessages(
   db: DatabaseManager,
   channel: string,
-  ollamaConfig?: {
-    baseUrl?: string;
-    model?: string;
-    timeout?: number;
-    maxRetries?: number;
-    rateLimit?: {
-      perChannel?: number;
-      perMinute?: number;
-    };
-  }
+  ollamaConfig?: OllamaConfig,
+  messageIds?: number[],
+  logInterval: number = 25
 ): Promise<{
   totalMessages: number;
   signalsFound: number;
@@ -225,7 +231,7 @@ export async function analyzeChannelMessages(
   tradeProgressUpdatesFound: number;
   uniqueFormats: number;
 }> {
-  logger.info('Starting message analysis', { channel });
+  logger.info('Starting message analysis', { channel, messageIds: messageIds?.length || 'all' });
 
   // Use a larger model for better classification accuracy
   // llama3.2:1b is very small and may struggle with nuanced classification
@@ -239,11 +245,13 @@ export async function analyzeChannelMessages(
     logger.warn('Using llama3.2:1b model - this small model may struggle with nuanced classification. Consider using llama3.1:8b, llama3.2:11b, or llama3.2:3b for better trade_progress_update detection.');
   }
 
-  const ollamaClient = createOllamaClient(ollamaConfig || {
-    baseUrl: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+  const ollamaClient = createOllamaClient({
+    baseUrl: ollamaConfig?.baseUrl || process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
     model: modelToUse,
-    timeout: 30000,
-    maxRetries: 2,
+    timeout: ollamaConfig?.timeout || 60000, // Increased to 60s for larger models
+    maxRetries: ollamaConfig?.maxRetries || 2,
+    maxInputLength: ollamaConfig?.maxInputLength || 8000, // Increased from default 2000
+    rateLimit: ollamaConfig?.rateLimit,
   });
 
   // Check if Ollama is available
@@ -252,9 +260,34 @@ export async function analyzeChannelMessages(
     throw new Error('Ollama service is not available. Please ensure Ollama is running.');
   }
 
-  // Get all messages for this channel
-  const messages = await db.getUnparsedMessages(channel);
-  logger.info('Messages to analyze', { channel, count: messages.length });
+  // Get messages - either specific IDs or all unparsed messages
+  let messages: Message[];
+  if (messageIds && messageIds.length > 0) {
+    // Fetch specific messages by ID
+    const fetchedMessages: Message[] = [];
+    for (const messageId of messageIds) {
+      try {
+        const message = await db.getMessageByMessageId(messageId, channel);
+        if (message) {
+          fetchedMessages.push(message);
+        } else {
+          logger.warn('Message not found', { messageId, channel });
+        }
+      } catch (error) {
+        logger.error('Error fetching message', {
+          messageId,
+          channel,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    messages = fetchedMessages;
+    logger.info('Messages to analyze (by ID)', { channel, requested: messageIds.length, found: messages.length });
+  } else {
+    // Get all messages for this channel
+    messages = await db.getUnparsedMessages(channel);
+    logger.info('Messages to analyze', { channel, count: messages.length });
+  }
 
   if (messages.length === 0) {
     logger.warn('No messages found for analysis', { channel });
@@ -266,6 +299,16 @@ export async function analyzeChannelMessages(
       uniqueFormats: 0,
     };
   }
+
+  // Load existing formats for this channel to avoid unnecessary Ollama calls
+  const existingFormats = await db.getSignalFormats(channel);
+  const existingFormatMap = new Map<string, 'signal' | 'management'>();
+  for (const format of existingFormats) {
+    if (format.classification === 'signal' || format.classification === 'management') {
+      existingFormatMap.set(format.format_hash, format.classification);
+    }
+  }
+  logger.info('Loaded existing formats', { channel, count: existingFormatMap.size });
 
   // Track formats
   const formatMap = new Map<string, {
@@ -280,6 +323,7 @@ export async function analyzeChannelMessages(
   let managementFound = 0;
   let tradeProgressUpdatesFound = 0;
   let processed = 0;
+  let skippedOllama = 0;
 
   // Process messages in batches to avoid overwhelming the LLM
   const batchSize = 10;
@@ -288,13 +332,39 @@ export async function analyzeChannelMessages(
     
     for (const message of batch) {
       try {
-        // Classify message
-        const classification = await classifyMessage(
-          message,
-          ollamaClient,
-          channel,
-          db
-        );
+        // Extract format pattern first to check if we can skip Ollama
+        const pattern = extractFormatPattern(message.content);
+        const hash = hashFormatPattern(pattern);
+        
+        // Check if this format already exists in our loaded format map
+        let classification: MessageClassification | null = null;
+        const existingClassification = existingFormatMap.get(hash);
+        
+        if (existingClassification) {
+          // If format exists and is signal or management, use it and skip Ollama
+          classification = {
+            type: existingClassification,
+            confidence: 1.0, // High confidence since we've seen this format before
+            reasoning: 'Matched existing format pattern'
+          };
+          skippedOllama++;
+          logger.debug('Skipped Ollama - matched existing format', {
+            channel,
+            messageId: message.message_id,
+            formatHash: hash,
+            classification: classification.type
+          });
+        }
+        
+        // If no existing format match, classify with Ollama
+        if (!classification) {
+          classification = await classifyMessage(
+            message,
+            ollamaClient,
+            channel,
+            db
+          );
+        }
 
         // Log classification for debugging (especially trade_progress_update)
         if (classification.type === 'trade_progress_update' || 
@@ -312,10 +382,6 @@ export async function analyzeChannelMessages(
         // Track actionable types (signal and management) as formats
         // Trade progress updates are informational and don't need format tracking
         if (classification.type === 'signal' || classification.type === 'management') {
-          // Extract format pattern
-          const pattern = extractFormatPattern(message.content);
-          const hash = hashFormatPattern(pattern);
-
           // Update format map
           if (!formatMap.has(hash)) {
             formatMap.set(hash, {
@@ -346,14 +412,18 @@ export async function analyzeChannelMessages(
         }
 
         processed++;
-        if (processed % 50 === 0) {
+        const remaining = messages.length - processed;
+        // Log progress periodically
+        if (processed % logInterval === 0 || remaining === 0) {
           logger.info('Analysis progress', {
             channel,
             processed,
             total: messages.length,
+            remaining,
             signalsFound,
             managementFound,
-            uniqueFormats: formatMap.size
+            uniqueFormats: formatMap.size,
+            skippedOllama
           });
         }
 
@@ -415,7 +485,9 @@ export async function analyzeChannelMessages(
     managementFound,
     tradeProgressUpdatesFound,
     uniqueFormats: formatMap.size,
-    savedFormats
+    savedFormats,
+    skippedOllama,
+    ollamaRequests: messages.length - skippedOllama
   });
 
   return {
