@@ -386,7 +386,8 @@ const monitorTrade = async (
   db: DatabaseManager,
   bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider
+  priceProvider: HistoricalPriceProvider | undefined,
+  breakevenAfterTPs: number
 ): Promise<void> => {
   try {
     // In simulation mode, use price provider's current time; otherwise use real time
@@ -447,18 +448,42 @@ const monitorTrade = async (
       // Check if entry is filled
       const entryResult = await checkEntryFilled(trade, bybitClient, isSimulation, priceProvider);
       if (entryResult.filled) {
-        logger.info('Entry filled', { 
+        logger.info('Entry order filled', { 
           tradeId: trade.id,
-          positionId: entryResult.positionId
+          tradingPair: trade.trading_pair,
+          entryPrice: trade.entry_price,
+          positionId: entryResult.positionId,
+          channel: trade.channel
         });
+        const fillTime = dayjs().toISOString();
         await db.updateTrade(trade.id, {
           status: 'active',
-          entry_filled_at: dayjs().toISOString(),
+          entry_filled_at: fillTime,
           position_id: entryResult.positionId
         });
         trade.status = 'active';
-        trade.entry_filled_at = dayjs().toISOString();
+        trade.entry_filled_at = fillTime;
         trade.position_id = entryResult.positionId;
+
+        // Update entry order to filled status
+        const orders = await db.getOrdersByTradeId(trade.id);
+        const entryOrder = orders.find(o => o.order_type === 'entry');
+        if (entryOrder) {
+          await db.updateOrder(entryOrder.id, {
+            status: 'filled',
+            filled_at: fillTime,
+            filled_price: trade.entry_price
+          });
+          logger.debug('Entry order updated to filled', {
+            tradeId: trade.id,
+            orderId: entryOrder.id,
+            fillPrice: trade.entry_price
+          });
+        } else {
+          logger.warn('Entry order not found when filling entry', {
+            tradeId: trade.id
+          });
+        }
       }
     }
 
@@ -471,13 +496,33 @@ const monitorTrade = async (
       for (const order of pendingOrders) {
         const orderResult = await checkOrderFilled(order, trade, bybitClient, isSimulation, priceProvider);
         if (orderResult.filled) {
-          logger.info('Order filled', {
-            tradeId: trade.id,
-            orderId: order.id,
-            orderType: order.order_type,
-            tpIndex: order.tp_index,
-            filledPrice: orderResult.filledPrice
-          });
+          if (order.order_type === 'take_profit') {
+            logger.info('Take profit order filled', {
+              tradeId: trade.id,
+              tradingPair: trade.trading_pair,
+              orderId: order.id,
+              tpIndex: order.tp_index,
+              tpPrice: order.price,
+              filledPrice: orderResult.filledPrice,
+              channel: trade.channel
+            });
+          } else if (order.order_type === 'stop_loss') {
+            logger.info('Stop loss order filled', {
+              tradeId: trade.id,
+              tradingPair: trade.trading_pair,
+              orderId: order.id,
+              slPrice: order.price,
+              filledPrice: orderResult.filledPrice,
+              channel: trade.channel
+            });
+          } else {
+            logger.info('Order filled', {
+              tradeId: trade.id,
+              orderId: order.id,
+              orderType: order.order_type,
+              filledPrice: orderResult.filledPrice
+            });
+          }
 
           await db.updateOrder(order.id, {
             status: 'filled',
@@ -529,19 +574,20 @@ const monitorTrade = async (
       }
       
       const takeProfits = JSON.parse(trade.take_profits) as number[];
-      const firstTP = takeProfits[0];
       const isLong = currentPrice > trade.entry_price;
 
-      // Check if first take profit is hit
-      const firstTPHit = isLong
-        ? currentPrice >= firstTP
-        : currentPrice <= firstTP;
+      // Count how many take profits have been filled
+      const tradeOrders = await db.getOrdersByTradeId(trade.id);
+      const filledTPCount = tradeOrders.filter(
+        o => o.order_type === 'take_profit' && o.status === 'filled'
+      ).length;
 
-      if (firstTPHit && !trade.stop_loss_breakeven) {
-        logger.info('First take profit hit - moving stop loss to breakeven', {
+      // Check if we've hit the required number of TPs to move to breakeven
+      if (filledTPCount >= breakevenAfterTPs && !trade.stop_loss_breakeven) {
+        logger.info('Required take profits hit - moving stop loss to breakeven', {
           tradeId: trade.id,
-          currentPrice,
-          firstTP,
+          filledTPCount,
+          breakevenAfterTPs,
           entryPrice: trade.entry_price
         });
         
@@ -632,6 +678,7 @@ export const startTradeMonitor = async (
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutDays = monitorConfig.entryTimeoutDays || 2;
+  const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
 
   const monitorLoop = async (): Promise<void> => {
     // Check if we're in maximum speed mode (no delays)
@@ -646,7 +693,7 @@ export const startTradeMonitor = async (
           const accountClient = getBybitClient 
             ? getBybitClient(trade.account_name)
             : bybitClient; // Fallback to legacy client
-          await monitorTrade(channel, monitorConfig.type, entryTimeoutDays, trade, db, accountClient, isSimulation, priceProvider);
+          await monitorTrade(channel, monitorConfig.type, entryTimeoutDays, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs);
         }
 
         // Skip sleep in maximum speed mode

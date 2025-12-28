@@ -1,6 +1,7 @@
-import { BotConfig, AccountConfig } from '../types/config.js';
+import { BotConfig, AccountConfig, MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { startSignalHarvester } from '../harvesters/signalHarvester.js';
+import { startDiscordHarvester } from '../harvesters/discordHarvester.js';
 import { startCSVHarvester } from '../harvesters/csvHarvester.js';
 import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
@@ -15,9 +16,11 @@ import { parseManagementCommand, getManager, ManagerContext } from '../managers/
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
+import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
+registerParser('vip_crypto_signals', vipCryptoSignals);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];
@@ -171,14 +174,25 @@ export const startTradeOrchestrator = async (
         // Use CSV harvester in simulation mode
         stopHarvester = await startCSVHarvester(config.simulation.messagesFile, channelConfig.channel, db);
       } else {
-        // Use Telegram harvester in live mode
-        stopHarvester = await startSignalHarvester(harvester, db);
+        // Select harvester based on platform
+        const platform = harvester.platform || 'telegram'; // Default to telegram for backward compatibility
+        if (platform === 'discord') {
+          stopHarvester = await startDiscordHarvester(harvester, db);
+        } else {
+          stopHarvester = await startSignalHarvester(harvester, db);
+        }
       }
       state.stopHarvesters.push(stopHarvester);
 
+      // Merge channel-specific breakevenAfterTPs override with monitor config
+      const monitorConfigWithOverride: MonitorConfig = {
+        ...monitor,
+        breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs
+      };
+
       // Start monitor for this channel
       const stopMonitor = await startTradeMonitor(
-        monitor, 
+        monitorConfigWithOverride, 
         channelConfig.channel, 
         db, 
         isSimulation, 

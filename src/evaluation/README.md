@@ -1,12 +1,12 @@
 # Evaluation Module
 
-The evaluation module allows you to assess the quality of trading signals from Telegram channels by simulating trades using historical price data and evaluating performance against proprietary trading firm (prop firm) rules.
+The evaluation module allows you to assess the quality of trading signals from Telegram and Discord channels by simulating trades using historical price data and evaluating performance against proprietary trading firm (prop firm) rules.
 
 ## Overview
 
 The evaluation subsystem replaces the simulation subsystem with a more focused purpose: evaluating whether signals from candidate channels would keep accounts open with various prop firms. It:
 
-1. **Harvests historical messages** from Telegram channels and stores them in a database
+1. **Harvests historical messages** from Telegram or Discord channels and stores them in a database
 2. **Analyzes messages** to identify signal and management message formats
 3. **Generates parsers** automatically based on identified signal formats (optional)
 4. **Processes messages and signals** just like the running bot
@@ -20,19 +20,36 @@ The evaluation subsystem replaces the simulation subsystem with a more focused p
 
 ### 1. Harvest Messages from a Channel
 
-Pull historical messages from a Telegram channel:
+Pull historical messages from a Telegram or Discord channel:
 
+**Telegram:**
 ```bash
 npm run evaluate harvest -- \
   --channel "your_channel_username" \
+  --platform telegram \
+  --start-date "2024-01-01" \
+  --end-date "2024-12-31" \
+  --limit 1000
+```
+
+**Discord:**
+```bash
+npm run evaluate harvest -- \
+  --channel "1234567890123456789" \
+  --platform discord \
+  --bot-token "your-bot-token" \
   --start-date "2024-01-01" \
   --end-date "2024-12-31" \
   --limit 1000
 ```
 
 Options:
-- `-c, --channel`: Channel username, invite link, or channel ID (required)
-- `-a, --access-hash`: Access hash for private channels
+- `-c, --channel`: Channel identifier (required)
+  - Telegram: username, invite link, or channel ID
+  - Discord: channel ID (numeric string)
+- `-p, --platform`: Platform type - `telegram` or `discord` (default: `telegram`)
+- `-a, --access-hash`: Access hash for private Telegram channels
+- `--bot-token`: Discord bot token (can also use `DISCORD_BOT_TOKEN` env var)
 - `-s, --start-date`: Start date (YYYY-MM-DD or ISO format)
 - `-e, --end-date`: End date (YYYY-MM-DD or ISO format)
 - `-k, --keywords`: Comma-separated keywords to filter messages
@@ -108,7 +125,8 @@ npm run evaluate evaluate -- \
   --parser "emoji_heavy" \
   --prop-firms "crypto-fund-trader,hyrotrader,mubite" \
   --initial-balance 10000 \
-  --risk-percentage 3
+  --risk-percentage 3 \
+  --breakeven-after-tps 2
 ```
 
 Options:
@@ -121,6 +139,7 @@ Options:
 - `--speed-multiplier`: Speed multiplier (0 = max speed, default: 0)
 - `--max-trade-duration`: Maximum trade duration in days (default: 7)
 - `--risk-percentage`: Risk percentage per trade (default: 3)
+- `--breakeven-after-tps`: Number of take profits to hit before moving stop-loss to breakeven (default: 1)
 - `--db-path`: Database path (default: data/evaluation.db)
 - `--db-type`: Database type: sqlite or postgresql (default: sqlite)
 
@@ -179,7 +198,8 @@ You can also use a configuration file for more complex setups:
       "type": "bybit",
       "testnet": false,
       "pollInterval": 10000,
-      "entryTimeoutDays": 2
+      "entryTimeoutDays": 2,
+      "breakevenAfterTPs": 1
     },
     "propFirms": [
       "crypto-fund-trader",
@@ -212,7 +232,7 @@ npm run evaluate evaluate -- --config config.evaluation.json
 ## Supported Prop Firms
 
 ### Crypto Fund Trader
-- **Reverse Trading Rule**: Cannot open opposite trades with simultaneous duration of 60+ seconds
+- **Reverse Trading/Hedging Rule**: Cannot open opposite positions (long/short) on the same trading pair with simultaneous duration of 60+ seconds
 - **30 Seconds Rule**: Trades < 30 seconds cannot exceed 5% of total trades
 - **Gambling Rule**: Daily or per-trade profit limit of $10,000
 
@@ -280,7 +300,7 @@ Results can be viewed using the `results` command or queried directly from the d
 
 The evaluation module consists of:
 
-- **Message Harvester** (`messageHarvester.ts`): Pulls historical messages from Telegram channels
+- **Message Harvester** (`messageHarvester.ts`): Pulls historical messages from Telegram or Discord channels
 - **Message Analyzer** (`messageAnalyzer.ts`): Analyzes messages to identify signal and management formats using LLM classification
 - **Parser Generator** (`parserGenerator.ts`): Generates parser code automatically based on identified signal formats
 - **Prop Firm Rules** (`propFirmRules.ts`): Defines rule configurations for prop firms
@@ -295,6 +315,7 @@ The evaluation module:
 - Reuses the historical price provider for price simulation
 - Can use the same database or a separate one
 - Processes messages in chronological order, just like simulation mode
+- Supports the same `breakevenAfterTPs` configuration for moving stop-loss to breakeven after N take profits
 
 ## Notes
 

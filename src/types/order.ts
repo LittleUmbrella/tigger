@@ -1,7 +1,7 @@
 export interface ParsedOrder {
   tradingPair: string;
   leverage: number;
-  entryPrice: number;
+  entryPrice?: number; // Optional for market/current price orders
   stopLoss: number;
   takeProfits: number[];
   signalType: 'long' | 'short';
