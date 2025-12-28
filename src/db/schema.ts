@@ -62,11 +62,11 @@ export interface TradeWithMessage extends Trade {
 export interface Order {
   id: number;
   trade_id: number; // Foreign key to trades.id
-  order_type: 'stop_loss' | 'take_profit';
+  order_type: 'entry' | 'stop_loss' | 'take_profit';
   order_id?: string; // Exchange order ID
-  price: number; // Order price (SL price or TP price)
+  price: number; // Order price (entry price, SL price, or TP price)
   tp_index?: number; // Index in take_profits array (0-based, only for TP orders)
-  quantity?: number; // Order quantity (for TP orders)
+  quantity?: number; // Order quantity (for entry and TP orders)
   status: 'pending' | 'filled' | 'cancelled';
   filled_at?: string; // When the order was filled
   filled_price?: number; // Actual fill price
@@ -106,6 +106,7 @@ interface DatabaseAdapter {
   insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number>;
   getUnparsedMessages(channel?: string): Promise<Message[]>;
   getUnanalyzedMessages(channel?: string): Promise<Message[]>;
+  getMessagesByChannel(channel: string, limit?: number): Promise<Message[]>;
   markMessageParsed(id: number): Promise<void>;
   markMessageAnalyzed(id: number): Promise<void>;
   updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void>;
@@ -114,7 +115,7 @@ interface DatabaseAdapter {
   getMessageByMessageId(messageId: number, channel: string): Promise<Message | null>;
   getMessagesByReplyTo(replyToMessageId: number, channel: string): Promise<Message[]>;
   getMessageReplyChain(messageId: number, channel: string): Promise<Message[]>;
-  insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'>): Promise<number>;
+  insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number>;
   getActiveTrades(): Promise<Trade[]>;
   getClosedTrades(): Promise<Trade[]>;
   getTradesByStatus(status: Trade['status']): Promise<Trade[]>;
@@ -347,8 +348,27 @@ class SQLiteAdapter implements DatabaseAdapter {
     return (channel ? stmt.all(channel) : stmt.all()) as Message[];
   }
 
+  async getUnanalyzedMessages(channel?: string): Promise<Message[]> {
+    const stmt = channel
+      ? this.db.prepare('SELECT * FROM messages WHERE (analyzed IS NULL OR analyzed = 0) AND channel = ? ORDER BY id ASC')
+      : this.db.prepare('SELECT * FROM messages WHERE analyzed IS NULL OR analyzed = 0 ORDER BY id ASC');
+    return (channel ? stmt.all(channel) : stmt.all()) as Message[];
+  }
+
+  async getMessagesByChannel(channel: string, limit?: number): Promise<Message[]> {
+    const stmt = limit && limit > 0
+      ? this.db.prepare('SELECT * FROM messages WHERE channel = ? ORDER BY id ASC LIMIT ?')
+      : this.db.prepare('SELECT * FROM messages WHERE channel = ? ORDER BY id ASC');
+    return (limit && limit > 0 ? stmt.all(channel, limit) : stmt.all(channel)) as Message[];
+  }
+
   async markMessageParsed(id: number): Promise<void> {
     const stmt = this.db.prepare('UPDATE messages SET parsed = 1 WHERE id = ?');
+    stmt.run(id);
+  }
+
+  async markMessageAnalyzed(id: number): Promise<void> {
+    const stmt = this.db.prepare('UPDATE messages SET analyzed = 1 WHERE id = ?');
     stmt.run(id);
   }
 
@@ -433,7 +453,8 @@ class SQLiteAdapter implements DatabaseAdapter {
     })) as MessageVersion[];
   }
 
-  async insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+  async insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number> {
+    const created_at = trade.created_at;
     const stmt = this.db.prepare(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
@@ -441,9 +462,9 @@ class SQLiteAdapter implements DatabaseAdapter {
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
     `);
-    const result = stmt.run(
+    const params = [
       trade.message_id,
       trade.channel,
       trade.trading_pair,
@@ -465,7 +486,11 @@ class SQLiteAdapter implements DatabaseAdapter {
       trade.pnl_percentage || null,
       trade.stop_loss_breakeven ? 1 : 0,
       trade.expires_at
-    );
+    ];
+    if (created_at) {
+      params.push(created_at);
+    }
+    const result = stmt.run(...params);
     return result.lastInsertRowid as number;
   }
 
@@ -1090,6 +1115,21 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     })) as Message[];
   }
 
+  async getMessagesByChannel(channel: string, limit?: number): Promise<Message[]> {
+    const query = limit && limit > 0
+      ? 'SELECT * FROM messages WHERE channel = $1 ORDER BY id ASC LIMIT $2'
+      : 'SELECT * FROM messages WHERE channel = $1 ORDER BY id ASC';
+    const params = limit && limit > 0 ? [channel, limit] : [channel];
+    const result = await this.pool.query(query, params);
+    return result.rows.map(row => ({
+      ...row,
+      parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      date: row.date instanceof Date ? row.date.toISOString() : row.date
+    })) as Message[];
+  }
+
   async markMessageParsed(id: number): Promise<void> {
     await this.pool.query('UPDATE messages SET parsed = TRUE WHERE id = $1', [id]);
   }
@@ -1279,7 +1319,8 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return tradeWithMessages;
   }
 
-  async insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+  async insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number> {
+    const created_at = trade.created_at;
     const result = await this.pool.query(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
@@ -1287,7 +1328,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, ${created_at ? '$22' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
       RETURNING id
     `, [
       trade.message_id,
@@ -1310,7 +1351,8 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       trade.pnl || null,
       trade.pnl_percentage || null,
       trade.stop_loss_breakeven,
-      trade.expires_at
+      trade.expires_at,
+      ...(created_at ? [created_at] : [])
     ]);
     return result.rows[0].id;
   }
@@ -1697,7 +1739,11 @@ export class DatabaseManager {
     return this.adapter.getMessageReplyChain(messageId, channel);
   }
 
-  insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'>): Promise<number> {
+  getMessagesByChannel(channel: string, limit?: number): Promise<Message[]> {
+    return this.adapter.getMessagesByChannel(channel, limit);
+  }
+
+  insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number> {
     return this.adapter.insertTrade(trade);
   }
 

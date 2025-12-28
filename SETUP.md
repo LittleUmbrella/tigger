@@ -17,6 +17,7 @@
    - Database (better-sqlite3)
    - Logging (winston)
    - Telegram client
+   - Discord.js client
    - Bybit API client
    - Other dependencies
 
@@ -29,16 +30,24 @@
    ```bash
    # Create .env file with credentials
    cat > .env << EOF
+   # Telegram (required if using Telegram harvesters)
    TG_API_ID=your_api_id
    TG_API_HASH=your_api_hash
    TG_SESSION=your_session_string
+   
+   # Discord (required if using Discord harvesters)
+   DISCORD_BOT_TOKEN=your_discord_bot_token
+   
+   # Bybit (required for trading)
    BYBIT_API_KEY=your_bybit_api_key
    BYBIT_API_SECRET=your_bybit_api_secret
    EOF
    ```
    
-   Get your Telegram API credentials from https://my.telegram.org
-   Get your Bybit API credentials from https://www.bybit.com/app/user/api-management
+   **Get credentials:**
+   - Telegram API credentials: https://my.telegram.org
+   - Discord bot token: Create a bot at https://discord.com/developers/applications
+   - Bybit API credentials: https://www.bybit.com/app/user/api-management
 
 4. **Create configuration:**
    ```bash
@@ -46,7 +55,9 @@
    ```
 
 5. **Edit `config.json`** with your settings:
-   - Define named harvesters (one per Telegram channel you want to monitor)
+   - Define named harvesters (one per Telegram or Discord channel you want to monitor)
+     - Set `platform: "telegram"` or `platform: "discord"` (defaults to `"telegram"`)
+     - For Discord: include `botToken` or set `DISCORD_BOT_TOKEN` env var
    - Define named parsers (one per channel you want to parse)
    - Define monitors by type (bybit, and optionally dex in the future)
    - Define channel sets that combine harvesters, parsers, and monitors
@@ -79,11 +90,30 @@
    docker-compose logs -f
    ```
 
-## Getting Telegram Session String
+## Platform Setup
+
+### Telegram
 
 To get your Telegram session string, you can use the existing utility script or manually authenticate. The session string should be stored in your `.env` file as `TG_SESSION`.
 
 You can also use the existing utility script at `src/utilities/index.js` which will save the session to `.env` automatically after first login.
+
+### Discord
+
+To set up Discord:
+
+1. Go to https://discord.com/developers/applications
+2. Create a new application or select an existing one
+3. Go to the "Bot" section
+4. Create a bot and copy the token
+5. Add the token to your `.env` file as `DISCORD_BOT_TOKEN`
+6. In the "OAuth2" → "URL Generator" section:
+   - Select scopes: `bot`
+   - Select bot permissions: `Read Message History`
+   - Copy the generated URL and open it in your browser to invite the bot to your server
+7. Enable Developer Mode in Discord (User Settings → Advanced → Developer Mode)
+8. Right-click on the channel you want to monitor → Copy ID
+9. Use the channel ID in your harvester configuration
 
 ## Notes
 

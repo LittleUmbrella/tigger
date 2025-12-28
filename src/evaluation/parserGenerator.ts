@@ -41,7 +41,7 @@ export async function generateParserForChannel(
   logger.info('Found signal formats', {
     channel,
     count: signalFormats.length,
-    topFormats: signalFormats.slice(0, 3).map(f => ({
+    topFormats: signalFormats.slice(0, 10).map(f => ({
       hash: f.format_hash,
       examples: f.example_count
     }))
@@ -103,17 +103,18 @@ Example signal formats:
 ${examples}
 
 The parser should:
-1. Import ParsedOrder from '../types/order.js'
+1. Import ParsedOrder from '../../../types/order'
 2. Export a function that takes a string (message content) and returns ParsedOrder | null
 3. Extract: trading_pair, entry_price, stop_loss, take_profits (array), leverage, signal_type ('long' | 'short')
-4. Handle multiple format variations from the examples
-5. Return null if the message doesn't match any format
-6. Use regex patterns to extract the required fields
+4. The entry price can be 'current' or 'market'. If it is a range, pick the worst value for the signal_type.
+5. Handle multiple format variations from the examples
+6. Return null if the message doesn't match any format
+7. Use regex patterns to extract the required fields
 
 Return ONLY the TypeScript code, no explanations. The function should be exported with the name provided in the export statement.
 
 Example structure:
-import { ParsedOrder } from '../../types/order.js';
+import { ParsedOrder } from '../../../types/order';
 
 export const ${parserName} = (content: string): ParsedOrder | null => {
   // Your parser logic here
@@ -152,7 +153,7 @@ function generateBasicParserTemplate(
 ): string {
   const topFormat = formats[0]?.format_pattern || '';
 
-  return `import { ParsedOrder } from '../../types/order.js';
+  return `import { ParsedOrder } from '../../../types/order';
 import { logger } from '../../utils/logger.js';
 
 /**

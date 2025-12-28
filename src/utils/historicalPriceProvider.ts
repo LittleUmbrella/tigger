@@ -1,6 +1,7 @@
 import dayjs from 'dayjs';
 import { logger } from './logger.js';
 import { RestClientV5 } from 'bybit-api';
+import { RateLimiter, createBybitPublicRateLimiter } from './rateLimiter.js';
 
 interface PriceDataPoint {
   timestamp: number;
@@ -14,6 +15,7 @@ interface HistoricalPriceProviderState {
   startTime: dayjs.Dayjs;
   bybitClient: RestClientV5;
   hasAuth: boolean;
+  rateLimiter: RateLimiter;
 }
 
 export interface HistoricalPriceProvider {
@@ -26,6 +28,426 @@ export interface HistoricalPriceProvider {
   getPriceHistory: (symbol: string, startTime: dayjs.Dayjs, endTime: dayjs.Dayjs) => Promise<PriceDataPoint[]>;
   hasData: (symbol: string) => boolean;
   getAvailableSymbols: () => string[];
+}
+
+/**
+ * Serialize an error object for logging
+ * Handles Error instances, API response objects, and plain objects
+ * Always returns a structured object for consistent logging
+ */
+function serializeError(error: any): Record<string, any> {
+  // If it's an Error instance, extract message and optionally stack
+  if (error instanceof Error) {
+    const result: Record<string, any> = {
+      message: error.message,
+      name: error.name
+    };
+    if (error.stack) {
+      result.stack = error.stack;
+    }
+    // Include any additional properties that might be on the error
+    if (error.cause) {
+      result.cause = serializeError(error.cause);
+    }
+    // Include any custom properties on the error object
+    Object.keys(error).forEach(key => {
+      if (!['message', 'name', 'stack', 'cause'].includes(key)) {
+        try {
+          result[key] = (error as Record<string, any>)[key];
+        } catch (e) {
+          // Skip non-serializable properties
+        }
+      }
+    });
+    return result;
+  }
+  
+  // If it's an object with retCode/retMsg (API response format)
+  if (error && typeof error === 'object') {
+    const result: Record<string, any> = {};
+    
+    // Extract common API response fields
+    if (error.retCode !== undefined) result.retCode = error.retCode;
+    if (error.retMsg !== undefined) result.retMsg = error.retMsg;
+    if (error.code !== undefined) result.code = error.code;
+    if (error.status !== undefined) result.status = error.status;
+    if (error.statusText !== undefined) result.statusText = error.statusText;
+    if (error.message !== undefined) result.message = error.message;
+    
+    // Try to include other enumerable properties (but limit depth to avoid huge objects)
+    try {
+      Object.keys(error).forEach(key => {
+        if (!result.hasOwnProperty(key)) {
+          const value = error[key];
+          // Skip functions and circular references
+          if (typeof value === 'function') {
+            result[key] = '[Function]';
+          } else if (value instanceof Error) {
+            result[key] = { message: value.message, name: value.name };
+          } else if (typeof value === 'object' && value !== null) {
+            // Limit depth - just include a summary for nested objects
+            try {
+              const str = JSON.stringify(value);
+              if (str.length < 200) {
+                result[key] = value;
+              } else {
+                result[key] = `[Object: ${str.substring(0, 100)}...]`;
+              }
+            } catch (e) {
+              result[key] = '[Circular or non-serializable]';
+            }
+          } else {
+            result[key] = value;
+          }
+        }
+      });
+    } catch (e) {
+      // If we can't enumerate keys, that's okay - we already have the important fields
+    }
+    
+    // Ensure we always have at least a message
+    if (!result.message && Object.keys(result).length === 0) {
+      try {
+        result.message = String(error);
+      } catch (e) {
+        result.message = '[Unable to serialize error]';
+      }
+    }
+    
+    return result;
+  }
+  
+  // Primitive types - wrap in an object
+  return {
+    message: String(error),
+    value: error
+  };
+}
+
+/**
+ * Try fetching data with a specific category, return null if it fails
+ */
+async function tryFetchWithCategory(
+  state: HistoricalPriceProviderState,
+  normalizedSymbol: string,
+  startTimestamp: number,
+  endTimestamp: number,
+  category: 'spot' | 'linear'
+): Promise<PriceDataPoint[] | null> {
+  const pricePoints: PriceDataPoint[] = [];
+  
+  try {
+    if (state.hasAuth) {
+      // Try authenticated execution history first (most granular)
+      const windowSize = 24 * 60 * 60 * 1000; // 24 hours
+      let execStart = startTimestamp;
+      const now = Date.now();
+      const cappedEndTimestamp = Math.min(endTimestamp, now);
+      
+      while (execStart < cappedEndTimestamp) {
+        const execEnd = Math.min(execStart + windowSize, cappedEndTimestamp);
+        
+        if (execStart > now || execEnd > now) {
+          execStart = execEnd + 1;
+          continue;
+        }
+        
+        await state.rateLimiter.waitIfNeeded();
+        
+        try {
+          const executionResponse = await state.bybitClient.getExecutionList({
+            category,
+            symbol: normalizedSymbol,
+            startTime: execStart,
+            endTime: execEnd,
+            limit: 1000
+          });
+          
+          if (executionResponse.retCode === 0 && executionResponse.result?.list) {
+            const validTrades = executionResponse.result.list.filter((execution: any) => {
+              const execTime = parseFloat(execution.execTime || '0');
+              const execPrice = parseFloat(execution.execPrice || '0');
+              return execPrice > 0 && execTime >= startTimestamp && execTime <= endTimestamp;
+            });
+            
+            for (const execution of validTrades) {
+              const execTime = parseFloat(execution.execTime || '0');
+              const execPrice = parseFloat(execution.execPrice || '0');
+              pricePoints.push({
+                timestamp: execTime,
+                price: execPrice
+              });
+            }
+          }
+        } catch (error) {
+          // Continue to klines if execution history fails
+        }
+        
+        execStart = execEnd + 1;
+      }
+    }
+    
+    // If we got execution history data, use it; otherwise fall back to klines
+    if (pricePoints.length > 0) {
+      return pricePoints;
+    }
+    
+    // Fetch klines as fallback or primary method
+    const chunkSize = 200 * 60 * 1000; // 200 minutes (max kline limit)
+    let currentStart = startTimestamp;
+    let triedTicker = false; // Track if we've tried ticker fallback
+    
+    while (currentStart < endTimestamp) {
+      const currentEnd = Math.min(currentStart + chunkSize, endTimestamp);
+      
+      await state.rateLimiter.waitIfNeeded();
+      
+      let klineSuccess = false;
+      
+      if (category === 'spot') {
+        // For spot, use regular kline
+        try {
+          const klineResponse = await state.bybitClient.getKline({
+            category: 'spot',
+            symbol: normalizedSymbol,
+            interval: '1',
+            start: currentStart,
+            end: currentEnd,
+            limit: 200
+          });
+          
+          logger.debug('Spot kline API response', {
+            symbol: normalizedSymbol,
+            retCode: klineResponse.retCode,
+            retMsg: klineResponse.retMsg,
+            listLength: klineResponse.result?.list?.length || 0,
+            start: new Date(currentStart).toISOString(),
+            end: new Date(currentEnd).toISOString()
+          });
+          
+          if (klineResponse.retCode === 0 && klineResponse.result?.list) {
+            for (const kline of klineResponse.result.list) {
+              const klineTime = parseFloat(kline[0] || '0');
+              const klineOpen = parseFloat(kline[1] || '0');
+              const klineClose = parseFloat(kline[4] || '0');
+              
+              if (klineTime >= startTimestamp && klineTime <= endTimestamp) {
+                const price = klineClose > 0 ? klineClose : klineOpen;
+                if (price > 0) {
+                  pricePoints.push({
+                    timestamp: klineTime,
+                    price
+                  });
+                }
+              }
+            }
+            klineSuccess = pricePoints.length > 0;
+          } else if (klineResponse.retCode !== 10001) {
+            // If it's not a "not found" error, this category doesn't work
+            logger.debug('Spot kline failed with non-10001 error', {
+              symbol: normalizedSymbol,
+              retCode: klineResponse.retCode,
+              retMsg: klineResponse.retMsg
+            });
+            return null;
+          }
+        } catch (error) {
+          logger.debug('Spot kline request threw error', {
+            symbol: normalizedSymbol,
+            error: serializeError(error)
+          });
+          const errorCode = (error as any)?.retCode;
+          if (errorCode !== undefined && errorCode !== 10001) {
+            return null;
+          }
+        }
+      } else {
+        // For linear, try multiple methods in order:
+        // 1. Regular kline (most accurate for trading)
+        // 2. Mark price kline (if available)
+        // 3. Index price kline (fallback)
+        
+        const klineMethods = [
+          // Method 1: Regular kline
+          () => state.bybitClient.getKline({
+            category: 'linear',
+            symbol: normalizedSymbol,
+            interval: '1',
+            start: currentStart,
+            end: currentEnd,
+            limit: 200
+          }),
+          // Method 2: Mark price kline (if available)
+          ...((state.bybitClient as any).getMarkPriceKline ? [() => (state.bybitClient as any).getMarkPriceKline({
+            category: 'linear',
+            symbol: normalizedSymbol,
+            interval: '1',
+            start: currentStart,
+            end: currentEnd,
+            limit: 200
+          })] : []),
+          // Method 3: Index price kline (fallback)
+          () => state.bybitClient.getIndexPriceKline({
+            category: 'linear',
+            symbol: normalizedSymbol,
+            interval: '1',
+            start: currentStart,
+            end: currentEnd,
+            limit: 200
+          })
+        ];
+        
+        for (let methodIndex = 0; methodIndex < klineMethods.length; methodIndex++) {
+          const methodName = methodIndex === 0 ? 'regular kline' : methodIndex === 1 ? 'mark price kline' : 'index price kline';
+          try {
+            const klineResponse = await klineMethods[methodIndex]();
+            
+            logger.debug('Linear kline API response', {
+              symbol: normalizedSymbol,
+              method: methodName,
+              retCode: klineResponse.retCode,
+              retMsg: klineResponse.retMsg,
+              listLength: klineResponse.result?.list?.length || 0,
+              start: new Date(currentStart).toISOString(),
+              end: new Date(currentEnd).toISOString()
+            });
+            
+            if (klineResponse.retCode === 0 && klineResponse.result?.list) {
+              for (const kline of klineResponse.result.list) {
+                const klineTime = parseFloat(kline[0] || '0');
+                const klineOpen = parseFloat(kline[1] || '0');
+                const klineClose = parseFloat(kline[4] || '0');
+                
+                if (klineTime >= startTimestamp && klineTime <= endTimestamp) {
+                  const price = klineClose > 0 ? klineClose : klineOpen;
+                  if (price > 0) {
+                    pricePoints.push({
+                      timestamp: klineTime,
+                      price
+                    });
+                  }
+                }
+              }
+              klineSuccess = pricePoints.length > 0;
+              if (klineSuccess) {
+                logger.debug('Linear kline method succeeded', {
+                  symbol: normalizedSymbol,
+                  method: methodName,
+                  dataPoints: pricePoints.length
+                });
+                break; // Success, stop trying other methods
+              }
+            } else if (klineResponse.retCode !== 10001) {
+              // If it's not a "not found" error, try next method
+              logger.debug('Linear kline method failed, trying next', {
+                symbol: normalizedSymbol,
+                method: methodName,
+                retCode: klineResponse.retCode,
+                retMsg: klineResponse.retMsg
+              });
+              continue;
+            }
+          } catch (error) {
+            logger.debug('Linear kline method threw error, trying next', {
+              symbol: normalizedSymbol,
+              method: methodName,
+              error: serializeError(error)
+            });
+            // Try next method on error
+            continue;
+          }
+        }
+      }
+      
+      // If all kline methods failed and we have no data, try ticker for last price (only once)
+      if (!klineSuccess && pricePoints.length === 0 && !triedTicker && currentStart === startTimestamp) {
+        triedTicker = true;
+        try {
+          await state.rateLimiter.waitIfNeeded();
+          
+          // Handle different ticker API signatures for spot vs linear
+          const tickerResponse = category === 'spot'
+            ? await state.bybitClient.getTickers({
+                category: 'spot',
+                symbol: normalizedSymbol
+              } as any)
+            : await state.bybitClient.getTickers({
+                category: 'linear',
+                symbol: normalizedSymbol
+              } as any);
+          
+          const resultList = (tickerResponse.result as any)?.list;
+          
+          logger.debug('Ticker API response', {
+            symbol: normalizedSymbol,
+            category,
+            retCode: tickerResponse.retCode,
+            retMsg: tickerResponse.retMsg,
+            listLength: resultList?.length || 0
+          });
+          
+          if (tickerResponse.retCode === 0 && resultList && resultList.length > 0) {
+            const ticker = resultList[0];
+            const lastPrice = parseFloat(ticker.lastPrice || '0');
+            // For spot tickers, updateTime might not be present, so use the requested start time
+            const tickerUpdateTime = parseFloat(ticker.updateTime || '0');
+            const useTimestamp = tickerUpdateTime > 0 ? tickerUpdateTime : startTimestamp;
+            
+            logger.debug('Ticker data', {
+              symbol: normalizedSymbol,
+              category,
+              lastPrice,
+              tickerUpdateTime: tickerUpdateTime > 0 ? new Date(tickerUpdateTime).toISOString() : 'not provided',
+              useTimestamp: new Date(useTimestamp).toISOString(),
+              ticker: JSON.stringify(ticker)
+            });
+            
+            if (lastPrice > 0) {
+              // Use ticker price as a single data point with the requested start time
+              // (or ticker's updateTime if available)
+              pricePoints.push({
+                timestamp: useTimestamp,
+                price: lastPrice
+              });
+              logger.info('Using ticker last price as fallback', {
+                symbol: normalizedSymbol,
+                category,
+                price: lastPrice,
+                timestamp: new Date(useTimestamp).toISOString(),
+                source: tickerUpdateTime > 0 ? 'ticker updateTime' : 'requested startTime'
+              });
+            } else {
+              logger.warn('Ticker returned invalid price', {
+                symbol: normalizedSymbol,
+                category,
+                lastPrice,
+                ticker: JSON.stringify(ticker)
+              });
+            }
+          } else {
+            logger.warn('Ticker API returned no data', {
+              symbol: normalizedSymbol,
+              category,
+              retCode: tickerResponse.retCode,
+              retMsg: tickerResponse.retMsg
+            });
+          }
+        } catch (error) {
+          logger.warn('Ticker API request failed', {
+            symbol: normalizedSymbol,
+            category,
+            error: serializeError(error)
+          });
+        }
+      }
+      
+      currentStart = currentEnd + 1;
+    }
+    
+    return pricePoints.length > 0 ? pricePoints : null;
+  } catch (error) {
+    return null;
+  }
 }
 
 // Fetch historical price data for a symbol starting from a specific time
@@ -42,176 +464,90 @@ async function fetchPriceData(
   if (state.priceCache.has(cacheKey)) {
     return state.priceCache.get(cacheKey)!;
   }
-
-  try {
-    logger.debug('Fetching historical price data', {
-      symbol: normalizedSymbol,
-      startTime: startTime.toISOString(),
-      endTime: endTime.toISOString()
-    });
-
-    const pricePoints: PriceDataPoint[] = [];
+  
+  // Try both spot and linear categories
+  const categories: Array<'spot' | 'linear'> = ['spot', 'linear'];
+  let pricePoints: PriceDataPoint[] = [];
+  const categoryResults: Record<string, { success: boolean; dataPoints: number; error?: any }> = {};
+  
+  for (const category of categories) {
+    const result = await tryFetchWithCategory(
+      state,
+      normalizedSymbol,
+      startTime.valueOf(),
+      endTime.valueOf(),
+      category
+    );
     
-    const startTimestamp = startTime.valueOf();
-    const endTimestamp = endTime.valueOf();
-    
-    if (state.hasAuth) {
-      // With API key: Use execution history for individual trades (most granular)
-      // This provides tick-by-tick price data from actual trade executions
-      // Note: Execution history may be limited to recent trades, so we'll try to fetch
-      // what's available and supplement with klines for older data
-      logger.debug('Using authenticated API for granular trade data', {
+    if (result && result.length > 0) {
+      pricePoints = result;
+      categoryResults[category] = { success: true, dataPoints: pricePoints.length };
+      logger.info('Fetched price data using category', {
         symbol: normalizedSymbol,
-        timeRange: `${startTime.toISOString()} to ${endTime.toISOString()}`
+        category,
+        dataPoints: pricePoints.length,
+        startTime: startTime.toISOString(),
+        endTime: endTime.toISOString()
       });
-      
-      try {
-        // Fetch execution history (individual trades) - most granular data available
-        // Execution history typically returns recent trades, so we fetch in time windows
-        const windowSize = 24 * 60 * 60 * 1000; // 24 hours
-        let execStart = startTimestamp;
-        
-        while (execStart < endTimestamp) {
-          const execEnd = Math.min(execStart + windowSize, endTimestamp);
-          
-          try {
-            const executionResponse = await state.bybitClient.getExecutionList({
-              category: 'linear',
-              symbol: normalizedSymbol,
-              startTime: execStart,
-              endTime: execEnd,
-              limit: 1000 // Maximum per request
-            });
-
-            if (executionResponse.retCode === 0 && executionResponse.result?.list) {
-              for (const execution of executionResponse.result.list) {
-                const execTime = parseFloat(execution.execTime || '0');
-                const execPrice = parseFloat(execution.execPrice || '0');
-                
-                if (execPrice > 0 && execTime >= startTimestamp && execTime <= endTimestamp) {
-                  pricePoints.push({
-                    timestamp: execTime,
-                    price: execPrice
-                  });
-                }
-              }
-              
-              logger.debug('Fetched execution history chunk', {
-                symbol: normalizedSymbol,
-                trades: executionResponse.result.list.length,
-                window: `${new Date(execStart).toISOString()} to ${new Date(execEnd).toISOString()}`
-              });
-            }
-          } catch (error) {
-            // If execution history fails for this window, continue with klines
-            logger.debug('Execution history not available for this time window, using klines', {
-              symbol: normalizedSymbol,
-              window: `${new Date(execStart).toISOString()} to ${new Date(execEnd).toISOString()}`
-            });
-          }
-          
-          execStart = execEnd + 1;
-          await new Promise(resolve => setTimeout(resolve, 100)); // Rate limiting
-        }
-      } catch (error) {
-        logger.warn('Error fetching execution history, falling back to klines', {
-          symbol: normalizedSymbol,
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
+      break;
+    } else {
+      categoryResults[category] = { 
+        success: false, 
+        dataPoints: result?.length || 0,
+        error: result === null ? 'API returned null' : 'Empty result list'
+      };
+      logger.debug('Category attempt returned no data, will try next category', {
+        symbol: normalizedSymbol,
+        category,
+        result: result === null ? 'null' : `empty list (${result?.length || 0} items)`,
+        nextCategory: category === 'spot' ? 'linear' : 'none'
+      });
     }
-    
-    // Supplement with kline data for better coverage
-    // Use index price kline with 1-minute intervals as base/fallback
-    const startTimestampSec = Math.floor(startTime.valueOf() / 1000);
-    const endTimestampSec = Math.floor(endTime.valueOf() / 1000);
-    
-    // Fetch in chunks (Bybit limits to 200 candles per request)
-    let currentStart = startTimestampSec;
-    const chunkSize = 200 * 60; // 200 minutes in seconds
-    
-    while (currentStart < endTimestampSec) {
-      const currentEnd = Math.min(currentStart + chunkSize, endTimestampSec);
-      
-      try {
-        // Use index price kline with 1-minute interval
-        // This fills gaps and provides baseline price data
-        const klineResponse = await state.bybitClient.getIndexPriceKline({
-          category: 'linear',
-          symbol: normalizedSymbol,
-          interval: '1', // 1 minute intervals
-          start: currentStart * 1000,
-          end: currentEnd * 1000,
-          limit: 200
-        });
-
-        if (klineResponse.retCode === 0 && klineResponse.result?.list) {
-          for (const candle of klineResponse.result.list) {
-            const timestamp = parseInt(candle[0] || '0');
-            const closePrice = parseFloat(candle[4] || '0');
-            
-            if (closePrice > 0) {
-              // Only add if we don't already have a price point very close to this timestamp
-              // (within 5 seconds) to avoid duplicates from execution history
-              const hasNearbyPrice = pricePoints.some(p => 
-                Math.abs(p.timestamp - timestamp) < 5000
-              );
-              
-              if (!hasNearbyPrice) {
-                pricePoints.push({
-                  timestamp: timestamp,
-                  price: closePrice
-                });
-              }
-            }
-          }
-        }
-      } catch (error) {
-        logger.warn('Error fetching kline chunk', {
-          symbol: normalizedSymbol,
-          start: new Date(currentStart * 1000).toISOString(),
-          end: new Date(currentEnd * 1000).toISOString(),
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-      
-      currentStart = currentEnd + 1;
-      
-      // Rate limiting
-      await new Promise(resolve => setTimeout(resolve, 150));
-    }
-
-    // Sort by timestamp
-    pricePoints.sort((a, b) => a.timestamp - b.timestamp);
-    
-    // Cache the results
-    state.priceCache.set(cacheKey, pricePoints);
-    
-    logger.info('Fetched historical price data', {
+  }
+  
+  if (pricePoints.length === 0) {
+    // Log detailed information about what was tried
+    const triedCategories = Object.keys(categoryResults);
+    logger.warn('No price data found for symbol in any category', {
       symbol: normalizedSymbol,
-      dataPoints: pricePoints.length,
       startTime: startTime.toISOString(),
-      endTime: endTime.toISOString()
+      endTime: endTime.toISOString(),
+      triedCategories,
+      categoryResults,
+      note: triedCategories.length < 2 ? 'Not all categories were attempted - this may indicate an early return' : 'All categories attempted'
     });
-
-    return pricePoints;
-  } catch (error) {
-    logger.error('Failed to fetch historical price data', {
-      symbol: normalizedSymbol,
-      error: error instanceof Error ? error.message : String(error)
-    });
+    state.priceCache.set(cacheKey, []);
     return [];
   }
+  
+  // Sort by timestamp
+  pricePoints.sort((a, b) => a.timestamp - b.timestamp);
+  
+  // Cache the results
+  state.priceCache.set(cacheKey, pricePoints);
+  
+  logger.info('Fetched historical price data', {
+    symbol: normalizedSymbol,
+    dataPoints: pricePoints.length,
+    startTime: startTime.toISOString(),
+    endTime: endTime.toISOString()
+  });
+  
+  return pricePoints;
 }
 
 export function createHistoricalPriceProvider(
   startDate: string,
   speedMultiplier: number = 1.0,
   bybitApiKey?: string,
-  bybitApiSecret?: string
+  bybitApiSecret?: string,
+  sharedRateLimiter?: RateLimiter
 ): HistoricalPriceProvider {
   const hasAuth = !!(bybitApiKey && bybitApiSecret);
   const bybitClient = new RestClientV5({ key: bybitApiKey || '', secret: bybitApiSecret || '', testnet: false });
+  
+  // Use shared rate limiter if provided (for parallel requests), otherwise create new one
+  const rateLimiter = sharedRateLimiter || createBybitPublicRateLimiter();
   
   const state: HistoricalPriceProviderState = {
     priceCache: new Map(),
@@ -220,6 +556,7 @@ export function createHistoricalPriceProvider(
     startTime: dayjs(startDate),
     bybitClient,
     hasAuth,
+    rateLimiter,
   };
 
   logger.info('Historical price provider initialized', {
@@ -283,7 +620,7 @@ export function createHistoricalPriceProvider(
           break;
         }
       }
-
+      
       return closest.price;
     },
     
@@ -331,7 +668,7 @@ export function createHistoricalPriceProvider(
           break;
         }
       }
-
+      
       return closest.price;
     },
     

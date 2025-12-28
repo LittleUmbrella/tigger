@@ -1,10 +1,15 @@
 export interface HarvesterConfig {
   name: string;
   channel: string;
-  apiId: number;
+  platform?: 'telegram' | 'discord'; // Platform type (default: 'telegram' for backward compatibility)
+  // Telegram-specific fields
+  apiId?: number; // Required for Telegram
   phone?: string;
   password?: string;
   accessHash?: string;
+  // Discord-specific fields
+  botToken?: string; // Discord bot token (can also use DISCORD_BOT_TOKEN env var)
+  guildId?: string; // Discord server/guild ID (optional, can be inferred from channel)
   pollInterval?: number; // milliseconds
   downloadImages?: boolean; // Whether to download and store images from messages (default: false)
 }
@@ -61,6 +66,7 @@ export interface MonitorConfig {
   testnet?: boolean;
   pollInterval?: number; // milliseconds
   entryTimeoutDays?: number; // days to wait for entry before cancelling
+  breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
 }
 
 export interface ChannelSetConfig {
@@ -69,6 +75,7 @@ export interface ChannelSetConfig {
   parser: string; // Reference to parser name
   initiator: string; // Reference to initiator name
   monitor: 'bybit' | 'dex'; // Reference to monitor type
+  breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
 }
 
 export interface SimulationConfig {

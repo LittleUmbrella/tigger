@@ -13,6 +13,8 @@ import { EvaluationConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs-extra';
 import path from 'path';
+// Register initiators before using them
+import '../initiators/index.js';
 
 const program = new Command();
 
@@ -36,9 +38,11 @@ const logOptions = (commandName: string, options: any) => {
 // Harvest command
 program
   .command('harvest')
-  .description('Harvest historical messages from a Telegram channel')
-  .requiredOption('-c, --channel <channel>', 'Channel username, invite link, or channel ID')
-  .option('-a, --access-hash <hash>', 'Access hash for private channels')
+  .description('Harvest historical messages from a Telegram or Discord channel')
+  .requiredOption('-c, --channel <channel>', 'Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)')
+  .option('-p, --platform <platform>', 'Platform type: telegram or discord (default: telegram)', 'telegram')
+  .option('-a, --access-hash <hash>', 'Access hash for private Telegram channels')
+  .option('--bot-token <token>', 'Discord bot token (can also use DISCORD_BOT_TOKEN env var)')
   .option('-s, --start-date <date>', 'Start date (YYYY-MM-DD or ISO format)')
   .option('-e, --end-date <date>', 'End date (YYYY-MM-DD or ISO format)')
   .option('-k, --keywords <keywords>', 'Comma-separated keywords to filter messages')
@@ -59,7 +63,9 @@ program
 
       const harvestOptions: HarvestOptions = {
         channel: options.channel,
+        platform: options.platform === 'discord' ? 'discord' : 'telegram',
         accessHash: options.accessHash,
+        botToken: options.botToken,
         startDate: options.startDate,
         endDate: options.endDate,
         keywords: options.keywords ? options.keywords.split(',').map((k: string) => k.trim()) : undefined,
@@ -98,6 +104,7 @@ program
   .option('--speed-multiplier <n>', 'Speed multiplier (0 = max speed)', '0')
   .option('--max-trade-duration <days>', 'Maximum trade duration in days', '7')
   .option('--risk-percentage <n>', 'Risk percentage per trade', '3')
+  .option('--breakeven-after-tps <n>', 'Number of take profits to hit before moving stop-loss to breakeven (default: 1)', '1')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -131,7 +138,7 @@ program
           channel: options.channel,
           parser: options.parser,
           initiator: {
-            name: 'bybit',
+            name: 'evaluation',
             riskPercentage: parseFloat(options.riskPercentage) || 3,
             testnet: false,
           },
@@ -140,6 +147,7 @@ program
             testnet: false,
             pollInterval: 10000,
             entryTimeoutDays: 2,
+            breakevenAfterTPs: parseInt(options.breakevenAfterTps || '1', 10),
           },
           propFirms,
           initialBalance: parseFloat(options.initialBalance) || 10000,
@@ -269,6 +277,7 @@ program
   .requiredOption('-n, --name <name>', 'Parser name')
   .option('--ollama-url <url>', 'Ollama base URL', 'http://localhost:11434')
   .option('--ollama-model <model>', 'Ollama model to use', 'llama3.2:1b')
+  .option('--ollama-timeout <ms>', 'Ollama request timeout in milliseconds', '60000')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -290,6 +299,7 @@ program
         {
           baseUrl: options.ollamaUrl,
           model: options.ollamaModel,
+          timeout: parseInt(options.ollamaTimeout, 10) || 60000,
         }
       );
 

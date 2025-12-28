@@ -2,6 +2,7 @@ import { RestClientV5 } from 'bybit-api';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
+import { validateBybitSymbol } from './symbolValidator.js';
 import dayjs from 'dayjs';
 
 /**
@@ -200,8 +201,36 @@ const executeTradeForAccount = async (
       logger.info('Simulation mode: Using default balance', { balance, channel });
     }
 
-    // Convert trading pair to Bybit format (e.g., BTCUSDT)
-    const symbol = order.tradingPair.replace('/', '');
+    // Convert trading pair to Bybit format (e.g., BTCUSDT or BTCUSDC)
+    // Ensure symbol always ends with USDT or USDC
+    let symbol = order.tradingPair.replace('/', '').toUpperCase();
+    if (!symbol.endsWith('USDT') && !symbol.endsWith('USDC')) {
+      symbol = symbol + 'USDT'; // Default to USDT
+    }
+    
+    // Validate symbol exists before creating trade
+    // Validation will try both USDT and USDC if needed
+    if (!isSimulation && bybitClient) {
+      const validation = await validateBybitSymbol(bybitClient, symbol);
+      if (!validation.valid) {
+        logger.error('Invalid symbol, skipping trade', {
+          channel,
+          symbol,
+          tradingPair: order.tradingPair,
+          error: validation.error
+        });
+        throw new Error(`Invalid symbol: ${validation.error}`);
+      }
+      // Use the actual symbol found (might be USDC if USDT doesn't exist)
+      if (validation.actualSymbol && validation.actualSymbol !== symbol) {
+        symbol = validation.actualSymbol;
+        logger.info('Using alternative quote currency', {
+          originalSymbol: order.tradingPair.replace('/', ''),
+          actualSymbol: symbol
+        });
+      }
+      logger.debug('Symbol validated', { symbol, tradingPair: order.tradingPair });
+    }
     
     // Determine side (Buy for long, Sell for short)
     const side = order.signalType === 'long' ? 'Buy' : 'Sell';
@@ -588,6 +617,23 @@ const executeTradeForAccount = async (
       stop_loss_breakeven: false,
       expires_at: expiresAt
     });
+
+    // Store entry order
+    try {
+      await db.insertOrder({
+        trade_id: tradeId,
+        order_type: 'entry',
+        order_id: orderId || undefined,
+        price: entryPrice,
+        quantity: qty,
+        status: 'pending'
+      });
+    } catch (error) {
+      logger.warn('Failed to store entry order', {
+        tradeId,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
     // Store stop loss order (if not in simulation)
     if (!isSimulation && order.stopLoss && order.stopLoss > 0) {

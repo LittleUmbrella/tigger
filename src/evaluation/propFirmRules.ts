@@ -51,7 +51,8 @@ export const PROP_FIRM_RULES: Record<string, PropFirmRule> = {
     displayName: 'Crypto Fund Trader',
     initialBalance: 10000, // Default, can be overridden
     
-    // Reverse trading rule: cannot open opposite trades with simultaneous duration of 60+ seconds
+    // Reverse trading/hedging rule: cannot open opposite positions on the same trading pair
+    // with simultaneous duration of 60+ seconds (prevents hedging the same symbol)
     reverseTradingAllowed: false,
     reverseTradingTimeLimit: 60,
     

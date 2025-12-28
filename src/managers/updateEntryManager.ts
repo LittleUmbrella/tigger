@@ -29,6 +29,14 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
     const newEntryPrice = newOrder.entryTargets?.[0] || newOrder.entryPrice;
     const symbol = trade.trading_pair.replace('/', '');
 
+    // Skip update if entry price is undefined (market order)
+    if (newEntryPrice === undefined) {
+      logger.info('Entry price update skipped - market order', {
+        tradeId: trade.id
+      });
+      return;
+    }
+
     if (isSimulation) {
       // In simulation, just update the database
       await db.updateTrade(trade.id, {

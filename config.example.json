@@ -3,8 +3,17 @@
     {
       "name": "main_harvester",
       "channel": "your_telegram_channel",
+      "platform": "telegram",
       "apiId": 12345678,
       "accessHash": "optional_access_hash_for_private_channels",
+      "pollInterval": 5000,
+      "downloadImages": false
+    },
+    {
+      "name": "discord_harvester",
+      "channel": "1234567890123456789",
+      "platform": "discord",
+      "botToken": "your_discord_bot_token",
       "pollInterval": 5000,
       "downloadImages": false
     }
@@ -67,7 +76,8 @@
       "type": "bybit",
       "testnet": false,
       "pollInterval": 10000,
-      "entryTimeoutDays": 2
+      "entryTimeoutDays": 2,
+      "breakevenAfterTPs": 1
     }
   ],
   "channels": [
@@ -76,7 +86,16 @@
       "harvester": "main_harvester",
       "parser": "main_parser",
       "initiator": "bybit",
-      "monitor": "bybit"
+      "monitor": "bybit",
+      "breakevenAfterTPs": 1
+    },
+    {
+      "channel": "1234567890123456789",
+      "harvester": "discord_harvester",
+      "parser": "main_parser",
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "breakevenAfterTPs": 1
     }
   ],
   "database": {

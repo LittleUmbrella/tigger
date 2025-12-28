@@ -267,9 +267,13 @@ export const startSignalHarvester = async (
   logger.info('Starting signal harvester', { name: config.name, channel: config.channel });
   
   // Read global settings from environment variables
+  const apiId = config.apiId || parseInt(process.env.TG_API_ID || '', 10);
   const apiHash = process.env.TG_API_HASH;
   const sessionString = process.env.TG_SESSION || '';
   
+  if (!apiId) {
+    throw new Error('TG_API_ID environment variable or apiId in config is required for Telegram');
+  }
   if (!apiHash) {
     throw new Error('TG_API_HASH environment variable is required');
   }
@@ -279,7 +283,7 @@ export const startSignalHarvester = async (
   
   const client = new TelegramClient(
     new StringSession(sessionString),
-    config.apiId,
+    apiId,
     apiHash,
     { connectionRetries: 5 }
   );
@@ -296,6 +300,18 @@ export const startSignalHarvester = async (
     channel: config.channel,
     title: (entity as any).title || (entity as any).username || config.channel
   });
+
+  // Initialize lastMessageId from database to avoid reprocessing existing messages on startup
+  const existingMessages = await db.getMessagesByChannel(config.channel);
+  if (existingMessages.length > 0) {
+    const maxMessageId = Math.max(...existingMessages.map(m => m.message_id));
+    lastMessageId = maxMessageId;
+    logger.info('Initialized lastMessageId from database', {
+      channel: config.channel,
+      lastMessageId,
+      existingMessageCount: existingMessages.length
+    });
+  }
 
   // Set up event handler for message edits
   client.addEventHandler(async (update: any) => {

@@ -14,9 +14,35 @@ export const processUnparsedMessages = async (
   isSimulation: boolean = false,
   priceProvider?: HistoricalPriceProvider,
   parserName?: string,
-  accounts?: AccountConfig[]
+  accounts?: AccountConfig[],
+  startDate?: string
 ): Promise<void> => {
-  const messages = await db.getUnparsedMessages(channel);
+  // In simulation/evaluation mode, get all messages (including parsed ones)
+  // so we can re-process them for backtesting
+  const messages = isSimulation 
+    ? await db.getMessagesByChannel(channel)
+    : await db.getUnparsedMessages(channel);
+  
+  // Filter messages by startDate if provided
+  let filteredMessages = messages;
+  if (startDate) {
+    const startDateObj = dayjs(startDate);
+    filteredMessages = messages.filter(msg => {
+      const msgDate = dayjs(msg.date);
+      // Include messages on or after startDate (same day or later)
+      return msgDate.isAfter(startDateObj, 'day') || msgDate.isSame(startDateObj, 'day');
+    });
+    
+    if (filteredMessages.length < messages.length) {
+      logger.info('Filtered messages by start date', {
+        channel,
+        startDate,
+        totalMessages: messages.length,
+        filteredMessages: filteredMessages.length,
+        excludedMessages: messages.length - filteredMessages.length
+      });
+    }
+  }
   
   // Get initiator name (support both 'name' and deprecated 'type' field for backward compatibility)
   const initiatorName = initiatorConfig.name || initiatorConfig.type;
@@ -41,12 +67,12 @@ export const processUnparsedMessages = async (
 
   // In simulation mode, process messages in chronological order
   const sortedMessages = isSimulation
-    ? [...messages].sort((a, b) => {
+    ? [...filteredMessages].sort((a, b) => {
         const dateA = new Date(a.date).getTime();
         const dateB = new Date(b.date).getTime();
         return dateA - dateB;
       })
-    : messages;
+    : filteredMessages;
 
   for (const message of sortedMessages) {
     try {

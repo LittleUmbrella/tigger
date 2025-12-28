@@ -1,5 +1,5 @@
 import { PropFirmRule } from './propFirmRules.js';
-import { Trade } from '../db/schema.js';
+import { Trade, Order, DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 
@@ -58,7 +58,7 @@ export interface EvaluationResult {
 export interface PropFirmEvaluator {
   addTrade: (trade: Trade) => void;
   updateEquity: (openTradesUnrealizedPnL: number) => void;
-  evaluate: () => EvaluationResult;
+  evaluate: () => Promise<EvaluationResult>;
 }
 
 // Evaluation helper functions
@@ -84,23 +84,45 @@ function evaluateProfitTarget(rule: PropFirmRule, accountState: AccountState): v
 function evaluateMaxDrawdown(rule: PropFirmRule, accountState: AccountState): void {
   if (rule.maxDrawdown === undefined) return;
 
-  const maxDrawdown = accountState.peakBalance - Math.min(
-    ...accountState.trades.map(t => {
-      if (t.exit_filled_at && t.pnl !== undefined) {
-        // Calculate balance at time of trade
-        const tradesBefore = accountState.trades.filter(
-          t2 => t2.exit_filled_at && dayjs(t2.exit_filled_at).isBefore(dayjs(t.exit_filled_at))
-        );
-        const balanceAtTrade = accountState.initialBalance + 
-          tradesBefore.reduce((sum, t2) => sum + (t2.pnl || 0), 0) + (t.pnl || 0);
-        return balanceAtTrade;
-      }
-      return accountState.initialBalance;
-    }),
-    accountState.currentBalance
-  );
+  // Calculate max drawdown by tracking peak balance chronologically
+  let runningBalance = accountState.initialBalance;
+  let peakBalance = accountState.initialBalance;
+  let maxDrawdown = 0;
+  let maxDrawdownPercentage = 0;
 
-  const maxDrawdownPercentage = (maxDrawdown / accountState.initialBalance) * 100;
+  // Sort trades chronologically by exit time
+  const sortedTrades = [...accountState.trades].sort((a, b) => {
+    const timeA = a.exit_filled_at ? dayjs(a.exit_filled_at).valueOf() : 0;
+    const timeB = b.exit_filled_at ? dayjs(b.exit_filled_at).valueOf() : 0;
+    return timeA - timeB;
+  });
+
+  for (const trade of sortedTrades) {
+    if (trade.pnl !== undefined) {
+      runningBalance += trade.pnl;
+      // Update peak balance if we've reached a new high
+      if (runningBalance > peakBalance) {
+        peakBalance = runningBalance;
+      }
+      // Calculate drawdown from current peak
+      const drawdown = peakBalance - runningBalance;
+      const drawdownPercentage = (drawdown / accountState.initialBalance) * 100;
+      if (drawdown > maxDrawdown) {
+        maxDrawdown = drawdown;
+        maxDrawdownPercentage = drawdownPercentage;
+      }
+    }
+  }
+
+  // Also check current balance if there are open trades
+  if (accountState.currentBalance < peakBalance) {
+    const currentDrawdown = peakBalance - accountState.currentBalance;
+    const currentDrawdownPercentage = (currentDrawdown / accountState.initialBalance) * 100;
+    if (currentDrawdown > maxDrawdown) {
+      maxDrawdown = currentDrawdown;
+      maxDrawdownPercentage = currentDrawdownPercentage;
+    }
+  }
 
   if (maxDrawdownPercentage > rule.maxDrawdown) {
     accountState.violations.push({
@@ -119,9 +141,36 @@ function evaluateMaxDrawdown(rule: PropFirmRule, accountState: AccountState): vo
 function evaluateDailyDrawdown(rule: PropFirmRule, accountState: AccountState): void {
   if (rule.dailyDrawdown === undefined) return;
 
-  const dailyDrawdownLimit = (rule.dailyDrawdown / 100) * accountState.initialBalance;
+  // Calculate balance at the start of each day to properly calculate daily drawdown limits
+  // Daily drawdown should be relative to the balance at the START of the day, not initial balance
+  const sortedTrades = [...accountState.trades].sort((a, b) => {
+    const timeA = a.exit_filled_at ? dayjs(a.exit_filled_at).valueOf() : 0;
+    const timeB = b.exit_filled_at ? dayjs(b.exit_filled_at).valueOf() : 0;
+    return timeA - timeB;
+  });
 
+  // Track balance by date to find starting balance for each day
+  const balanceByDate = new Map<string, number>();
+  let runningBalance = accountState.initialBalance;
+
+  // First pass: calculate balance at start of each trading day
+  for (const trade of sortedTrades) {
+    if (trade.exit_filled_at && trade.pnl !== undefined) {
+      const tradeDate = dayjs(trade.exit_filled_at).format('YYYY-MM-DD');
+      // Store balance at start of day (before this trade's P&L is applied)
+      if (!balanceByDate.has(tradeDate)) {
+        balanceByDate.set(tradeDate, runningBalance);
+      }
+      runningBalance += trade.pnl;
+    }
+  }
+
+  // Second pass: check daily drawdown violations
   for (const [date, dailyPnL] of accountState.dailyPnL.entries()) {
+    // Get balance at start of this day (default to initial balance if no trades before this day)
+    const dayStartBalance = balanceByDate.get(date) || accountState.initialBalance;
+    const dailyDrawdownLimit = (rule.dailyDrawdown / 100) * dayStartBalance;
+
     if (dailyPnL < -dailyDrawdownLimit) {
       accountState.violations.push({
         rule: 'dailyDrawdown',
@@ -131,6 +180,7 @@ function evaluateDailyDrawdown(rule: PropFirmRule, accountState: AccountState): 
         details: {
           date,
           dailyPnL,
+          dayStartBalance,
           limit: -dailyDrawdownLimit,
         },
       });
@@ -175,27 +225,108 @@ function evaluateMinTradesPerDay(rule: PropFirmRule, accountState: AccountState)
   }
 }
 
-function evaluateMaxRiskPerTrade(rule: PropFirmRule, accountState: AccountState): void {
+async function evaluateMaxRiskPerTrade(rule: PropFirmRule, accountState: AccountState, db: DatabaseManager): Promise<void> {
   if (rule.maxRiskPerTrade === undefined) return;
 
   const maxRiskAmount = (rule.maxRiskPerTrade / 100) * accountState.initialBalance;
 
   for (const trade of accountState.trades) {
-    if (trade.entry_price && trade.stop_loss) {
-      const riskAmount = Math.abs(trade.entry_price - trade.stop_loss) * (trade.risk_percentage / 100) * accountState.initialBalance;
+    if (trade.entry_price && trade.stop_loss && trade.quantity) {
+      // Get all orders for this trade to calculate remaining quantity over time
+      const orders = await db.getOrdersByTradeId(trade.id);
       
-      if (riskAmount > maxRiskAmount) {
+      // Get original stop loss from stop_loss order (before breakeven move)
+      // If trade.stop_loss_breakeven is true, trade.stop_loss might be the breakeven price
+      const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+      const originalStopLoss = stopLossOrder?.price || trade.stop_loss;
+      
+      // Determine if SL is at breakeven (within small tolerance)
+      const breakevenTolerance = trade.entry_price * 0.001; // 0.1% tolerance
+      const isAtBreakeven = trade.stop_loss_breakeven || 
+        Math.abs(trade.entry_price - trade.stop_loss) <= breakevenTolerance;
+      
+      // Calculate initial risk (at entry) using original stop loss
+      const originalPriceDiff = Math.abs(trade.entry_price - originalStopLoss);
+      const initialQuantity = trade.quantity || 0;
+      const leverage = trade.leverage || 1;
+      const initialRiskAmount = originalPriceDiff * initialQuantity * leverage;
+      
+      // Check initial risk (before any TPs or breakeven)
+      if (initialRiskAmount > maxRiskAmount) {
         accountState.violations.push({
           rule: 'maxRiskPerTrade',
-          message: `Trade ${trade.id} exceeds maximum risk per trade: ${riskAmount.toFixed(2)} USDT > ${maxRiskAmount.toFixed(2)} USDT`,
-          timestamp: trade.created_at,
+          message: `Trade ${trade.id} exceeds maximum risk per trade at entry: ${initialRiskAmount.toFixed(2)} USDT > ${maxRiskAmount.toFixed(2)} USDT`,
+          timestamp: trade.entry_filled_at || trade.created_at,
           severity: 'error',
           details: {
             tradeId: trade.id,
-            riskAmount,
+            riskAmount: initialRiskAmount,
             limit: maxRiskAmount,
+            quantity: initialQuantity,
+            originalStopLoss,
           },
         });
+      }
+
+      // Track risk over time as TPs are filled and SL moves to breakeven
+      // Sort orders chronologically by fill time
+      const filledOrders = orders
+        .filter(o => o.status === 'filled' && o.filled_at)
+        .sort((a, b) => {
+          const timeA = a.filled_at ? dayjs(a.filled_at).valueOf() : 0;
+          const timeB = b.filled_at ? dayjs(b.filled_at).valueOf() : 0;
+          return timeA - timeB;
+        });
+
+      let remainingQuantity = initialQuantity;
+      let filledTPCount = 0;
+      
+      // If trade.stop_loss_breakeven is true, SL was moved to breakeven at some point
+      // We'll check risk chronologically: before breakeven uses original SL, after breakeven risk is 0
+      // Since we don't know exactly when breakeven happened, we'll be conservative:
+      // - If stop_loss_breakeven is true, we know it happened, so after any TP fill, risk should be 0
+      // - Before that, use original SL
+      
+      // Check risk after each TP fill
+      for (const order of filledOrders) {
+        if (order.order_type === 'take_profit' && order.quantity) {
+          remainingQuantity -= order.quantity;
+          remainingQuantity = Math.max(0, remainingQuantity); // Ensure non-negative
+          filledTPCount++;
+          
+          // If SL was moved to breakeven, risk after breakeven is effectively 0
+          // We check if the current stop_loss is at breakeven (within tolerance)
+          const currentStopLossAtBreakeven = trade.stop_loss_breakeven || 
+            Math.abs(trade.entry_price - trade.stop_loss) <= breakevenTolerance;
+          
+          // Calculate current risk:
+          // - If SL is at breakeven, risk is 0 (or very small, just rounding errors)
+          // - Otherwise, use original stop loss with remaining quantity
+          const effectiveStopLoss = currentStopLossAtBreakeven ? trade.entry_price : originalStopLoss;
+          const effectivePriceDiff = Math.abs(trade.entry_price - effectiveStopLoss);
+          const currentRiskAmount = effectivePriceDiff * remainingQuantity * leverage;
+          
+          // Only flag violation if risk is significant (account for floating point precision)
+          if (currentRiskAmount > maxRiskAmount + 0.01) { // Small buffer for floating point
+            accountState.violations.push({
+              rule: 'maxRiskPerTrade',
+              message: `Trade ${trade.id} exceeds maximum risk per trade after TP fill: ${currentRiskAmount.toFixed(2)} USDT > ${maxRiskAmount.toFixed(2)} USDT (remaining quantity: ${remainingQuantity.toFixed(2)}, SL at breakeven: ${currentStopLossAtBreakeven})`,
+              timestamp: order.filled_at || trade.created_at,
+              severity: 'error',
+              details: {
+                tradeId: trade.id,
+                riskAmount: currentRiskAmount,
+                limit: maxRiskAmount,
+                remainingQuantity,
+                filledTPCount,
+                slAtBreakeven: currentStopLossAtBreakeven,
+                effectiveStopLoss,
+                originalStopLoss,
+                orderId: order.id,
+              },
+            });
+          }
+        }
       }
     }
   }
@@ -301,17 +432,18 @@ function evaluateReverseTrading(rule: PropFirmRule, accountState: AccountState):
     const trade1 = sortedTrades[i];
     if (!trade1.entry_filled_at || !trade1.exit_filled_at) continue;
 
-    // Determine trade direction (simplified: check if entry < exit for long, entry > exit for short)
-    const isLong1 = trade1.entry_price < (trade1.exit_price || trade1.entry_price);
+    // Determine trade direction: for longs, entry > stop_loss; for shorts, entry < stop_loss
+    const isLong1 = trade1.entry_price > trade1.stop_loss;
 
     for (let j = i + 1; j < sortedTrades.length; j++) {
       const trade2 = sortedTrades[j];
       if (!trade2.entry_filled_at || !trade2.exit_filled_at) continue;
 
-      const isLong2 = trade2.entry_price < (trade2.exit_price || trade2.entry_price);
+      const isLong2 = trade2.entry_price > trade2.stop_loss;
 
-      // Check if opposite directions
-      if (isLong1 !== isLong2) {
+      // Check if opposite directions AND same trading pair
+      // Reverse trading rule applies only to the same symbol with opposite positions (hedging)
+      if (isLong1 !== isLong2 && trade1.trading_pair === trade2.trading_pair) {
         // Check if they overlap for more than the time limit
         const trade1Start = dayjs(trade1.entry_filled_at);
         const trade1End = dayjs(trade1.exit_filled_at);
@@ -327,12 +459,13 @@ function evaluateReverseTrading(rule: PropFirmRule, accountState: AccountState):
           if (overlapSeconds >= rule.reverseTradingTimeLimit!) {
             accountState.violations.push({
               rule: 'reverseTrading',
-              message: `Reverse trading violation: trades ${trade1.id} and ${trade2.id} overlap for ${overlapSeconds}s > ${rule.reverseTradingTimeLimit}s`,
+              message: `Reverse trading violation: trades ${trade1.id} and ${trade2.id} (${trade1.trading_pair}) overlap for ${overlapSeconds}s > ${rule.reverseTradingTimeLimit}s`,
               timestamp: overlapStart.toISOString(),
               severity: 'error',
               details: {
                 trade1Id: trade1.id,
                 trade2Id: trade2.id,
+                tradingPair: trade1.trading_pair,
                 overlapSeconds,
                 limit: rule.reverseTradingTimeLimit,
               },
@@ -423,7 +556,7 @@ function getEndDate(accountState: AccountState): string {
 /**
  * Create Prop Firm Evaluator
  */
-export function createPropFirmEvaluator(rule: PropFirmRule): PropFirmEvaluator {
+export function createPropFirmEvaluator(rule: PropFirmRule, db: DatabaseManager): PropFirmEvaluator {
   const accountState: AccountState = {
     initialBalance: rule.initialBalance,
     currentBalance: rule.initialBalance,
@@ -439,8 +572,28 @@ export function createPropFirmEvaluator(rule: PropFirmRule): PropFirmEvaluator {
 
   return {
     addTrade: (trade: Trade): void => {
+      // Exclude cancelled trades - they never entered, so TPs and SLs don't apply
+      if (trade.status === 'cancelled') {
+        logger.debug('Skipping cancelled trade (entry never filled)', {
+          tradeId: trade.id,
+          tradingPair: trade.trading_pair
+        });
+        return;
+      }
+
+      // Only process trades that have a filled entry - if entry wasn't filled, ignore the trade
+      // This ensures TPs and SLs are only considered for trades that actually entered
+      if (!trade.entry_filled_at) {
+        logger.debug('Skipping trade without filled entry', {
+          tradeId: trade.id,
+          status: trade.status,
+          tradingPair: trade.trading_pair
+        });
+        return;
+      }
+
       if (trade.status !== 'closed' && trade.status !== 'stopped' && trade.status !== 'completed') {
-        // Track open trades
+        // Track open trades (but only if they have a filled entry)
         if (trade.status === 'active' || trade.status === 'filled') {
           accountState.openTrades.push(trade);
         }
@@ -483,7 +636,7 @@ export function createPropFirmEvaluator(rule: PropFirmRule): PropFirmEvaluator {
       accountState.equity = accountState.currentBalance + openTradesUnrealizedPnL;
     },
 
-    evaluate: (): EvaluationResult => {
+    evaluate: async (): Promise<EvaluationResult> => {
       accountState.violations = [];
 
       // Evaluate each rule category
@@ -492,7 +645,7 @@ export function createPropFirmEvaluator(rule: PropFirmRule): PropFirmEvaluator {
       evaluateDailyDrawdown(rule, accountState);
       evaluateMinTradingDays(rule, accountState);
       evaluateMinTradesPerDay(rule, accountState);
-      evaluateMaxRiskPerTrade(rule, accountState);
+      await evaluateMaxRiskPerTrade(rule, accountState, db);
       evaluateStopLossRequirement(rule, accountState);
       evaluateMaxProfitLimits(rule, accountState);
       evaluateShortTradePercentage(rule, accountState);

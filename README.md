@@ -1,14 +1,14 @@
 # Tigger - Crypto Trading Bot
 
-A comprehensive crypto trading bot written in TypeScript that harvests trading signals from Telegram channels, parses them, initiates trades on exchanges (Bybit), and monitors them automatically.
+A comprehensive crypto trading bot written in TypeScript that harvests trading signals from Telegram and Discord channels, parses them, initiates trades on exchanges (Bybit), and monitors them automatically.
 
 ## Features
 
-- **Signal Harvestors**: Long-running, long-polling Telegram message readers that store messages in a database
+- **Signal Harvestors**: Long-running, long-polling message readers for Telegram and Discord channels that store messages in a database
 - **CSV Harvester**: Alternative harvester for simulation mode that reads from CSV files
-- **Signal Parsers**: Parse Telegram messages into structured order data (trading pair, leverage, entry price, stop-loss, take-profits)
+- **Signal Parsers**: Parse messages from Telegram or Discord into structured order data (trading pair, leverage, entry price, stop-loss, take-profits)
 - **Signal Initiators**: Automatically initiate trades on Bybit exchange based on parsed signals
-- **Trade Monitors**: Monitor open trades, adjust stop-loss to breakeven when first TP is hit, cancel orders if conditions aren't met, track PNL
+- **Trade Monitors**: Monitor open trades, adjust stop-loss to breakeven after N take profits are hit (configurable per channel), cancel orders if conditions aren't met, track PNL
 - **Trade Orchestrator**: Coordinates all components based on JSON configuration
 - **Simulation Mode**: Backtest strategies using historical signals and price data
 - **Database Storage**: SQLite database for messages and trades
@@ -22,7 +22,7 @@ A comprehensive crypto trading bot written in TypeScript that harvests trading s
 │ Orchestrator│
 └──────┬──────┘
        │
-       ├──► Harvesters (Telegram polling)
+       ├──► Harvesters (Telegram/Discord polling)
        │         │
        │         ▼
        │    Database (Messages)
@@ -81,11 +81,15 @@ The bot is configured via `config.json`. See `config.example.json` for a templat
 ### Environment Variables
 
 Required environment variables (set in `.env` file):
-- `TG_API_ID`: Telegram API ID (get from https://my.telegram.org)
-- `TG_API_HASH`: Telegram API Hash (get from https://my.telegram.org)
-- `TG_SESSION`: Telegram session string (obtained after first login)
-- `BYBIT_API_KEY`: Bybit API key (for Bybit exchange operations)
-- `BYBIT_API_SECRET`: Bybit API secret (for Bybit exchange operations)
+- **Telegram** (required if using Telegram harvesters):
+  - `TG_API_ID`: Telegram API ID (get from https://my.telegram.org)
+  - `TG_API_HASH`: Telegram API Hash (get from https://my.telegram.org)
+  - `TG_SESSION`: Telegram session string (obtained after first login)
+- **Discord** (required if using Discord harvesters):
+  - `DISCORD_BOT_TOKEN`: Discord bot token (get from https://discord.com/developers/applications)
+- **Bybit** (required for trading):
+  - `BYBIT_API_KEY`: Bybit API key (for Bybit exchange operations)
+  - `BYBIT_API_SECRET`: Bybit API secret (for Bybit exchange operations)
 
 ### Configuration Structure
 
@@ -93,10 +97,16 @@ The configuration file has four main sections:
 
 1. **harvesters**: Array of named harvester configurations
    - `name`: Unique name for this harvester
-   - `channel`: Telegram channel username or ID
-   - `apiId`: Telegram API ID
-   - `accessHash`: Optional access hash for private channels
+   - `channel`: Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)
+   - `platform`: Platform type - `"telegram"` or `"discord"` (default: `"telegram"` for backward compatibility)
+   - **Telegram-specific fields**:
+     - `apiId`: Telegram API ID (can also use `TG_API_ID` env var)
+     - `accessHash`: Optional access hash for private channels
+   - **Discord-specific fields**:
+     - `botToken`: Discord bot token (can also use `DISCORD_BOT_TOKEN` env var)
+     - `guildId`: Optional Discord server/guild ID (can be inferred from channel)
    - `pollInterval`: Polling interval in milliseconds (default: 5000)
+   - `downloadImages`: Whether to download and store images from messages (default: false)
 
 2. **parsers**: Array of named parser configurations
    - `name`: Unique name for this parser
@@ -111,13 +121,15 @@ The configuration file has four main sections:
    - `type`: Either "bybit" or "dex" (dex not yet implemented)
    - `pollInterval`: Polling interval in milliseconds (default: 10000)
    - `entryTimeoutDays`: Days to wait for entry before cancelling (default: 2)
+   - `breakevenAfterTPs`: Number of take profits to hit before moving stop-loss to breakeven (default: 1)
 
 5. **channels**: Array of channel sets that combine harvesters, parsers, initiators, and monitors
-   - `channel`: Telegram channel name
+   - `channel`: Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)
    - `harvester`: Name of harvester to use (references harvesters array)
    - `parser`: Name of parser to use (references parsers array)
    - `initiator`: Initiator type to use ("bybit" or "dex")
    - `monitor`: Monitor type to use ("bybit" or "dex")
+   - `breakevenAfterTPs`: Optional per-channel override for number of TPs before breakeven (overrides monitor config)
 
 6. **simulation** (optional): Simulation mode configuration
    - `enabled`: Enable simulation mode (default: false)
@@ -171,9 +183,49 @@ To evaluate the profitability of a Telegram channel using historical data:
 
 See `SIMULATION.md` for detailed simulation mode documentation.
 
+## Platform Support
+
+### Telegram
+
+Telegram channels are supported using the Telegram API. Configure a harvester with `platform: "telegram"` (or omit the platform field for backward compatibility).
+
+**Channel identifiers:**
+- Username: `"@channelname"`
+- Channel ID: `"1234567890"`
+- Invite link: `"https://t.me/+invitehash"` or `"t.me/+invitehash"`
+
+### Discord
+
+Discord channels are supported using Discord.js. Configure a harvester with `platform: "discord"`.
+
+**Setup:**
+1. Create a Discord bot at https://discord.com/developers/applications
+2. Get the bot token
+3. Invite the bot to your server with "Read Message History" permission
+4. Get the channel ID (enable Developer Mode in Discord, right-click channel → Copy ID)
+
+**Channel identifiers:**
+- Channel ID: `"1234567890123456789"` (numeric string)
+- Channel mention: `"<#1234567890123456789>"` (also supported)
+
+**Example Discord harvester configuration:**
+```json
+{
+  "harvesters": [
+    {
+      "name": "discord-signals",
+      "channel": "1234567890123456789",
+      "platform": "discord",
+      "botToken": "your-bot-token",
+      "pollInterval": 5000
+    }
+  ]
+}
+```
+
 ## Message Format
 
-The parser supports various Telegram signal formats. Example:
+The parser supports various signal formats from both Telegram and Discord. Example:
 
 ```
 ⚡️© PERP/USDT ©⚡️ Exchanges: Pionex, Binance, Bybit 
@@ -196,13 +248,47 @@ The monitor performs the following actions:
 
 1. **Entry Timeout**: Cancels orders if entry price is not hit within the configured timeout (default: 2 days)
 2. **Pre-Entry Cancellation**: Cancels orders if price hits stop-loss or first take-profit before entry
-3. **Breakeven Stop-Loss**: When first take-profit is hit, moves stop-loss to entry price (breakeven)
+3. **Breakeven Stop-Loss**: After N take profits are hit (configurable per channel, default: 1), moves stop-loss to entry price (breakeven) to protect profits
 4. **Stop-Loss Monitoring**: Closes position if stop-loss is hit
+
+### Configuring Breakeven After N Take Profits
+
+You can configure when the stop-loss moves to breakeven (entry price) by setting `breakevenAfterTPs`:
+
+- **At monitor level**: Set `breakevenAfterTPs` in the monitor configuration to apply to all channels using that monitor
+- **Per channel**: Override the monitor setting by adding `breakevenAfterTPs` to individual channel configurations
+
+Example configuration:
+
+```json
+{
+  "monitors": [
+    {
+      "type": "bybit",
+      "breakevenAfterTPs": 1  // Default: move to breakeven after 1 TP
+    }
+  ],
+  "channels": [
+    {
+      "channel": "aggressive_channel",
+      "monitor": "bybit",
+      "breakevenAfterTPs": 2  // Override: move to breakeven after 2 TPs
+    },
+    {
+      "channel": "conservative_channel",
+      "monitor": "bybit"
+      // Uses monitor default (1 TP)
+    }
+  ]
+}
+```
+
+This allows you to customize risk management per channel - some channels may benefit from moving to breakeven after the first TP (protecting capital early), while others may wait for multiple TPs to be hit before securing breakeven.
 
 ## Database
 
-The bot uses SQLite to store:
-- **messages**: All harvested Telegram messages
+The bot uses SQLite (or PostgreSQL) to store:
+- **messages**: All harvested messages from Telegram and Discord channels
 - **trades**: All initiated trades with their status
 
 Database file location: `data/trading_bot.db` (configurable)
@@ -223,7 +309,8 @@ src/
 ├── db/
 │   └── schema.ts          # Database schema and manager
 ├── harvesters/
-│   └── signalHarvester.ts # Telegram message harvester
+│   ├── signalHarvester.ts # Telegram message harvester
+│   └── discordHarvester.ts # Discord message harvester
 ├── parsers/
 │   └── signalParser.ts    # Message parser
 ├── initiators/
@@ -244,8 +331,12 @@ src/
 
 - Node.js 20+
 - TypeScript 5+
-- Telegram API credentials
-- Bybit API credentials (for trading)
+- **Telegram API credentials** (if using Telegram harvesters)
+  - Get from https://my.telegram.org
+- **Discord Bot Token** (if using Discord harvesters)
+  - Create bot at https://discord.com/developers/applications
+- **Bybit API credentials** (for trading)
+  - Get from https://www.bybit.com/app/user/api-management
 
 ## License
 

@@ -33,8 +33,13 @@ export function diffOrderWithTrade(
     oldTakeProfits.length === newOrder.takeProfits.length &&
     oldTakeProfits.every((tp, i) => Math.abs(tp - newOrder.takeProfits[i]) < 0.0001);
 
+  // Handle undefined entry price (market orders)
+  const entryPriceChanged = newEntryPrice !== undefined && oldEntryPrice !== null
+    ? Math.abs(newEntryPrice - oldEntryPrice) > 0.0001
+    : newEntryPrice !== oldEntryPrice; // Changed if one is undefined and other isn't
+
   return {
-    entryPriceChanged: Math.abs(newEntryPrice - oldEntryPrice) > 0.0001,
+    entryPriceChanged,
     stopLossChanged: Math.abs(newOrder.stopLoss - trade.stop_loss) > 0.0001,
     takeProfitsChanged: !takeProfitsEqual,
     leverageChanged: newOrder.leverage !== trade.leverage,
@@ -61,8 +66,13 @@ export function diffOrders(
     oldOrder.takeProfits.length === newOrder.takeProfits.length &&
     oldOrder.takeProfits.every((tp, i) => Math.abs(tp - newOrder.takeProfits[i]) < 0.0001);
 
+  // Handle undefined entry price (market orders)
+  const entryPriceChanged = newEntryPrice !== undefined && oldEntryPrice !== undefined
+    ? Math.abs(newEntryPrice - oldEntryPrice) > 0.0001
+    : newEntryPrice !== oldEntryPrice; // Changed if one is undefined and other isn't
+
   return {
-    entryPriceChanged: Math.abs(newEntryPrice - oldEntryPrice) > 0.0001,
+    entryPriceChanged,
     stopLossChanged: Math.abs(newOrder.stopLoss - oldOrder.stopLoss) > 0.0001,
     takeProfitsChanged: !takeProfitsEqual,
     leverageChanged: newOrder.leverage !== oldOrder.leverage,
