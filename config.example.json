@@ -63,11 +63,13 @@
     {
       "name": "bybit",
       "riskPercentage": 3,
+      "baseLeverage": 20,
       "accounts": ["main"]
     },
     {
       "name": "bybit_multi",
       "riskPercentage": 3,
+      "baseLeverage": 20,
       "accounts": ["main", "testnet"]
     }
   ],
@@ -87,7 +89,8 @@
       "parser": "main_parser",
       "initiator": "bybit",
       "monitor": "bybit",
-      "breakevenAfterTPs": 1
+      "breakevenAfterTPs": 1,
+      "baseLeverage": 20
     },
     {
       "channel": "1234567890123456789",
@@ -95,7 +98,8 @@
       "parser": "main_parser",
       "initiator": "bybit",
       "monitor": "bybit",
-      "breakevenAfterTPs": 1
+      "breakevenAfterTPs": 1,
+      "baseLeverage": 15
     }
   ],
   "database": {

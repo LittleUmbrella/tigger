@@ -15,7 +15,8 @@ export const processUnparsedMessages = async (
   priceProvider?: HistoricalPriceProvider,
   parserName?: string,
   accounts?: AccountConfig[],
-  startDate?: string
+  startDate?: string,
+  channelBaseLeverage?: number // Per-channel override for baseLeverage
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -65,7 +66,8 @@ export const processUnparsedMessages = async (
     return;
   }
 
-  // In simulation mode, process messages in chronological order
+  // In simulation mode, process messages in chronological order for sorting
+  // But process them in parallel for efficiency - quantities will be calculated later
   const sortedMessages = isSimulation
     ? [...filteredMessages].sort((a, b) => {
         const dateA = new Date(a.date).getTime();
@@ -74,7 +76,9 @@ export const processUnparsedMessages = async (
       })
     : filteredMessages;
 
-  for (const message of sortedMessages) {
+  // Process messages in parallel - trade creation is independent
+  // Quantities will be set to 0 initially and recalculated after mock exchanges complete
+  const processMessage = async (message: Message): Promise<void> => {
     try {
       // In simulation mode, set price provider time to message time
       if (isSimulation && priceProvider) {
@@ -84,7 +88,15 @@ export const processUnparsedMessages = async (
 
       const parsed = parseMessage(message.content, parserName);
       if (parsed) {
+        // Merge channel-specific baseLeverage with initiator config
+        // Channel-specific baseLeverage takes precedence over initiator config
+        const mergedInitiatorConfig: InitiatorConfig = {
+          ...initiatorConfig,
+          baseLeverage: channelBaseLeverage !== undefined ? channelBaseLeverage : initiatorConfig.baseLeverage
+        };
+        
         // Create context for the initiator
+        // Note: currentBalance is not passed here - quantities will be calculated later
         const context: InitiatorContext = {
           channel,
           riskPercentage: initiatorConfig.riskPercentage,
@@ -94,7 +106,7 @@ export const processUnparsedMessages = async (
           db,
           isSimulation,
           priceProvider,
-          config: initiatorConfig,
+          config: mergedInitiatorConfig,
           accounts
         };
 
@@ -112,5 +124,8 @@ export const processUnparsedMessages = async (
         error: error instanceof Error ? error.message : String(error)
       });
     }
-  }
+  };
+
+  // Process all messages in parallel
+  await Promise.all(sortedMessages.map(processMessage));
 };

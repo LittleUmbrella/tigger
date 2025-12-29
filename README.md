@@ -113,9 +113,12 @@ The configuration file has four main sections:
    - `channel`: Channel to parse messages from
 
 3. **initiators**: Array of initiator configurations (by type)
-   - `type`: Either "bybit" or "dex" (dex not yet implemented)
-   - `testnet`: Use testnet (default: false)
+   - `name`: Name of the initiator (e.g., "bybit")
+   - `type`: Either "bybit" or "dex" (deprecated, use `name` instead)
+   - `testnet`: Use testnet (default: false, deprecated - use accounts instead)
    - `riskPercentage`: Percentage of account to risk per trade
+   - `baseLeverage`: Optional default leverage if not specified in message. Also used as confidence indicator for risk adjustment (see Risk Management section)
+   - `accounts`: Optional array of account names to use (from accounts config)
 
 4. **monitors**: Array of monitor configurations (by type)
    - `type`: Either "bybit" or "dex" (dex not yet implemented)
@@ -127,9 +130,10 @@ The configuration file has four main sections:
    - `channel`: Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)
    - `harvester`: Name of harvester to use (references harvesters array)
    - `parser`: Name of parser to use (references parsers array)
-   - `initiator`: Initiator type to use ("bybit" or "dex")
+   - `initiator`: Initiator name to use (references initiators array)
    - `monitor`: Monitor type to use ("bybit" or "dex")
    - `breakevenAfterTPs`: Optional per-channel override for number of TPs before breakeven (overrides monitor config)
+   - `baseLeverage`: Optional per-channel base leverage override (overrides initiator config, see Risk Management section)
 
 6. **simulation** (optional): Simulation mode configuration
    - `enabled`: Enable simulation mode (default: false)
@@ -284,6 +288,78 @@ Example configuration:
 ```
 
 This allows you to customize risk management per channel - some channels may benefit from moving to breakeven after the first TP (protecting capital early), while others may wait for multiple TPs to be hit before securing breakeven.
+
+### Base Leverage and Risk Adjustment
+
+The `baseLeverage` parameter serves two purposes:
+
+1. **Default Leverage**: If a trading signal doesn't specify leverage, `baseLeverage` is used as the default
+2. **Confidence Indicator**: The system adjusts trade risk based on how the specified leverage compares to `baseLeverage`
+
+#### How Risk Adjustment Works
+
+The bot uses leverage as a confidence indicator:
+- **Lower leverage than base** → Reduces risk proportionally (more conservative)
+- **Higher leverage than base** → Increases risk proportionally (more aggressive)
+- **Risk multiplier limits**: Minimum 0.25x (quarter risk), Maximum 2.0x (double risk)
+
+**Examples:**
+- If `baseLeverage = 20` and signal specifies `leverage = 5`:
+  - Risk multiplier = 5/20 = 0.25x
+  - If your risk percentage is 3%, adjusted risk = 3% × 0.25 = 0.75%
+
+- If `baseLeverage = 20` and signal specifies `leverage = 40`:
+  - Risk multiplier = 40/20 = 2.0x
+  - If your risk percentage is 3%, adjusted risk = 3% × 2.0 = 6%
+
+- If `baseLeverage = 20` and signal specifies `leverage = 60`:
+  - Risk multiplier = 60/20 = 3.0x, but clamped to 2.0x max
+  - If your risk percentage is 3%, adjusted risk = 3% × 2.0 = 6% (clamped)
+
+- If `baseLeverage = 20` and signal doesn't specify leverage:
+  - Uses 20x leverage (baseLeverage)
+  - Risk multiplier = 20/20 = 1.0x (no adjustment)
+  - If your risk percentage is 3%, adjusted risk = 3% × 1.0 = 3%
+
+#### Configuration Levels
+
+`baseLeverage` can be configured at two levels (channel-specific takes precedence):
+
+1. **Initiator level**: Set `baseLeverage` in the initiator configuration (applies to all channels using that initiator)
+2. **Channel level**: Set `baseLeverage` in the channel configuration (overrides initiator config for that specific channel)
+
+**Example configuration:**
+
+```json
+{
+  "initiators": [
+    {
+      "name": "bybit",
+      "riskPercentage": 3,
+      "baseLeverage": 20  // Default for all channels using this initiator
+    }
+  ],
+  "channels": [
+    {
+      "channel": "conservative_channel",
+      "initiator": "bybit",
+      "baseLeverage": 10  // Override: more conservative for this channel
+    },
+    {
+      "channel": "aggressive_channel",
+      "initiator": "bybit",
+      "baseLeverage": 30  // Override: more aggressive for this channel
+    },
+    {
+      "channel": "default_channel",
+      "initiator": "bybit"
+      // Uses initiator default (20)
+    }
+  ]
+}
+```
+
+This allows you to customize risk management per channel based on signal quality and your confidence in each channel's signals.
 
 ## Database
 

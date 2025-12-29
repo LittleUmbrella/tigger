@@ -18,6 +18,7 @@ export interface InitiatorContext {
   priceProvider?: HistoricalPriceProvider;
   config: InitiatorConfig; // Full initiator config for initiator-specific settings
   accounts?: AccountConfig[]; // Available accounts configuration
+  currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
 }
 
 /**

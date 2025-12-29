@@ -7,45 +7,10 @@
 
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
-import { validateSymbolWithPriceProvider } from './symbolValidator.js';
+import { validateSymbolWithPriceProvider, getSymbolInfo } from './symbolValidator.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
 import dayjs from 'dayjs';
 
-/**
- * Get decimal precision from a price value
- */
-const getDecimalPrecision = (price: number): number => {
-  if (!isFinite(price)) return 2;
-  const priceStr = price.toString();
-  if (priceStr.includes('.')) {
-    return priceStr.split('.')[1].length;
-  }
-  return 0;
-};
-
-/**
- * Distribute quantity evenly across take profit levels
- */
-const distributeQuantityAcrossTPs = (
-  totalQty: number,
-  numTPs: number,
-  decimalPrecision: number
-): number[] => {
-  if (numTPs === 0) return [];
-  
-  const qtyPerTP = totalQty / numTPs;
-  const roundedQty = Math.floor(qtyPerTP * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
-  
-  // Distribute remainder to first TP
-  const quantities = Array(numTPs).fill(roundedQty);
-  const totalDistributed = roundedQty * numTPs;
-  const remainder = totalQty - totalDistributed;
-  
-  if (remainder > 0 && quantities.length > 0) {
-    quantities[0] = Math.floor((quantities[0] + remainder) * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
-  }
-  
-  return quantities;
-};
 
 /**
  * Evaluation initiator - saves trades to database without exchange calls
@@ -125,28 +90,21 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
   }
 
-  // Use a default balance for evaluation (can be configured later)
-  const defaultBalance = 10000; // Default evaluation balance
-  const balance = defaultBalance;
+  // In evaluation mode, set quantity to 0 initially
+  // Quantities will be recalculated after mock exchanges process trades
+  // This allows parallel trade creation while maintaining accurate balance-based position sizing
+  const qty = 0;
 
-  // Calculate position size based on risk percentage
-  const riskAmount = balance * (riskPercentage / 100);
-  const priceDiff = Math.abs(entryPrice - order.stopLoss);
-  const riskPerUnit = priceDiff / entryPrice;
-  const positionSize = riskAmount / riskPerUnit;
+  // Use baseLeverage as default if leverage is not specified in order
+  const baseLeverage = context.config.baseLeverage;
+  const effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
   
-  // Calculate quantity
-  const decimalPrecision = getDecimalPrecision(entryPrice);
-  const qty = Math.floor((positionSize / entryPrice) * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
-
-  logger.info('Calculated trade parameters for evaluation', {
+  logger.info('Creating trade with placeholder quantity (will be recalculated after processing)', {
     channel,
     tradingPair: order.tradingPair,
-    qty,
     entryPrice,
-    leverage: order.leverage,
-    decimalPrecision,
-    balance
+    leverage: effectiveLeverage,
+    baseLeverage
   });
 
   // Generate a simulation order ID
@@ -168,7 +126,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     message_id: message.message_id,
     channel: channel,
     trading_pair: tradingPairForPriceProvider, // Use normalized format with slash
-    leverage: order.leverage,
+    leverage: effectiveLeverage,
     entry_price: entryPrice,
     stop_loss: order.stopLoss,
     take_profits: JSON.stringify(order.takeProfits),
@@ -182,14 +140,14 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     created_at: messageDate.toISOString()
   });
 
-  // Store entry order
+  // Store entry order with quantity 0 (will be recalculated later)
   try {
     await db.insertOrder({
       trade_id: tradeId,
       order_type: 'entry',
       order_id: orderId,
       price: entryPrice,
-      quantity: qty,
+      quantity: qty, // Will be 0 initially
       status: 'pending'
     });
   } catch (error) {
@@ -199,7 +157,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     });
   }
 
-  // Store stop loss order
+  // Store stop loss order (no quantity needed)
   if (order.stopLoss && order.stopLoss > 0) {
     try {
       await db.insertOrder({
@@ -216,14 +174,8 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
   }
 
-  // Store take profit orders
+  // Store take profit orders with quantity 0 (will be recalculated later)
   if (order.takeProfits && order.takeProfits.length > 0) {
-    const tpQuantities = distributeQuantityAcrossTPs(
-      qty,
-      order.takeProfits.length,
-      decimalPrecision
-    );
-
     for (let i = 0; i < order.takeProfits.length; i++) {
       try {
         await db.insertOrder({
@@ -231,7 +183,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
           order_type: 'take_profit',
           price: order.takeProfits[i],
           tp_index: i,
-          quantity: tpQuantities[i],
+          quantity: 0, // Will be recalculated later
           status: 'pending'
         });
       } catch (error) {

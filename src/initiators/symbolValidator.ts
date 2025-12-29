@@ -7,6 +7,54 @@
 import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
+import { getDecimalPrecision } from '../utils/positionSizing.js';
+
+export interface SymbolInfo {
+  qtyPrecision?: number;
+  pricePrecision?: number;
+}
+
+/**
+ * Get symbol information from Bybit to determine precision
+ */
+export async function getSymbolInfo(
+  bybitClient: RestClientV5,
+  symbol: string
+): Promise<SymbolInfo | null> {
+  try {
+    // Try linear first (futures), then spot
+    const categories = ['linear', 'spot'] as const;
+    
+    for (const category of categories) {
+      try {
+        const instruments = await bybitClient.getInstrumentsInfo({ category, symbol });
+        
+        if (instruments.retCode === 0 && instruments.result && instruments.result.list) {
+          const instrument = instruments.result.list.find((s: any) => s.symbol === symbol);
+          if (!instrument) continue;
+          
+          return {
+            qtyPrecision: (instrument as any).lot_size_filter?.qty_precision 
+              ? parseInt((instrument as any).lot_size_filter.qty_precision) 
+              : undefined,
+            pricePrecision: (instrument as any).price_filter?.tick_size
+              ? getDecimalPrecision(parseFloat((instrument as any).price_filter.tick_size))
+              : undefined
+          };
+        }
+      } catch (error) {
+        // Continue to next category
+        continue;
+      }
+    }
+  } catch (error) {
+    logger.warn('Failed to get symbol info', {
+      symbol,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+  return null;
+}
 
 /**
  * Validate if a symbol exists on Bybit

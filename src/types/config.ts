@@ -57,6 +57,7 @@ export interface InitiatorConfig {
   type?: string; // Deprecated: kept for backward compatibility, use 'name' instead
   testnet?: boolean; // Deprecated: use accounts instead
   riskPercentage: number; // percentage of account to risk
+  baseLeverage?: number; // Default leverage if not specified in message. Also used as confidence indicator for risk adjustment
   accounts?: string | string[]; // Account name(s) to use (from accounts config). If not specified, uses default account or env vars
   [key: string]: any; // Allow additional initiator-specific config
 }
@@ -76,6 +77,7 @@ export interface ChannelSetConfig {
   initiator: string; // Reference to initiator name
   monitor: 'bybit' | 'dex'; // Reference to monitor type
   breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
+  baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
 }
 
 export interface SimulationConfig {
