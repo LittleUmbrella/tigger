@@ -8,6 +8,7 @@
 import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
+import { getDecimalPrecision } from '../utils/positionSizing.js';
 import dayjs from 'dayjs';
 
 interface PriceDataPoint {
@@ -112,9 +113,11 @@ export function createMockExchange(
     const tolerance = state.trade.entry_price * 0.001; // 0.1% tolerance
     
     if (state.isLong) {
-      return price >= state.trade.entry_price - tolerance;
-    } else {
+      // For LONG: fill when price is at or below entry (buy low)
       return price <= state.trade.entry_price + tolerance;
+    } else {
+      // For SHORT: fill when price is at or above entry (sell high)
+      return price >= state.trade.entry_price - tolerance;
     }
   };
 
@@ -157,6 +160,66 @@ export function createMockExchange(
         tradeId: state.trade.id
       });
     }
+
+    // If entry filled at a different price, recalculate TP quantities to maintain same position size
+    // Position size = quantity * price, so if price changes, quantity must change inversely
+    if (Math.abs(price - state.trade.entry_price) > 0.0001 && state.trade.quantity) {
+      const originalPositionSize = state.trade.quantity * state.trade.entry_price;
+      const adjustedQuantity = originalPositionSize / price;
+      
+      // Distribute adjusted quantity across TPs
+      const distributeQuantityAcrossTPs = (
+        totalQty: number,
+        numTPs: number,
+        decimalPrecision: number
+      ): number[] => {
+        if (numTPs === 0) return [];
+        const qtyPerTP = totalQty / numTPs;
+        const roundedQty = Math.floor(qtyPerTP * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+        const quantities = Array(numTPs).fill(roundedQty);
+        const totalDistributed = roundedQty * numTPs;
+        const remainder = totalQty - totalDistributed;
+        if (remainder > 0 && quantities.length > 0) {
+          quantities[0] = Math.floor((quantities[0] + remainder) * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+        }
+        return quantities;
+      };
+
+      const decimalPrecision = getDecimalPrecision(price);
+      const tpQuantities = distributeQuantityAcrossTPs(
+        adjustedQuantity,
+        state.takeProfits.length,
+        decimalPrecision
+      );
+
+      // Update TP order quantities
+      const tpOrders = orders.filter(o => o.order_type === 'take_profit' && o.status === 'pending');
+      for (let i = 0; i < tpOrders.length && i < tpQuantities.length; i++) {
+        await db.updateOrder(tpOrders[i].id, {
+          quantity: tpQuantities[i]
+        });
+      }
+
+      // Update trade quantity to match actual fill
+      await db.updateTrade(state.trade.id, {
+        quantity: adjustedQuantity
+      });
+
+      // Update state
+      state.trade.quantity = adjustedQuantity;
+      state.remainingQuantity = adjustedQuantity;
+
+      logger.info('Recalculated TP quantities after entry fill at different price', {
+        tradeId: state.trade.id,
+        originalEntryPrice: state.trade.entry_price,
+        fillPrice: price,
+        originalQuantity: state.trade.quantity,
+        adjustedQuantity,
+        originalPositionSize,
+        adjustedPositionSize: adjustedQuantity * price,
+        tpQuantities
+      });
+    }
   };
 
   const shouldFillStopLoss = (price: number): boolean => {
@@ -168,7 +231,20 @@ export function createMockExchange(
   };
 
   const calculatePnL = (exitPrice: number, quantity: number): number => {
-    if (!state.entryFillPrice || quantity <= 0) return 0;
+    if (!state.entryFillPrice) return 0;
+    
+    // Quantity must be positive - if negative or zero, this indicates a bug
+    if (quantity <= 0) {
+      logger.error('calculatePnL called with non-positive quantity - this indicates a bug', {
+        tradeId: state.trade.id,
+        quantity,
+        exitPrice,
+        entryFillPrice: state.entryFillPrice,
+        remainingQuantity: state.remainingQuantity,
+        totalQuantity: state.trade.quantity
+      });
+      return 0; // Return 0 to avoid incorrect calculations, but log the error
+    }
 
     const priceDiff = state.isLong
       ? exitPrice - state.entryFillPrice
@@ -195,8 +271,44 @@ export function createMockExchange(
   const fillStopLoss = async (price: number, fillTime: dayjs.Dayjs): Promise<void> => {
     state.stopLossFilled = true;
 
-    // Calculate PNL only on remaining quantity (after TPs have been filled)
-    const pnlFromSL = calculatePnL(price, state.remainingQuantity);
+    // If stop loss is at breakeven, PNL should be 0 (we moved it to protect profits)
+    // Check if current stop loss equals entry fill price (breakeven)
+    const isBreakeven = state.entryFillPrice && 
+      Math.abs(state.currentStopLoss - state.entryFillPrice) < 0.0001;
+    
+    let pnlFromSL = 0;
+    if (isBreakeven) {
+      // Stop loss is at breakeven - PNL should be 0 regardless of actual fill price
+      // This protects the profits from TPs that were already filled
+      pnlFromSL = 0;
+      logger.info('Stop loss hit at breakeven - PNL set to 0 to protect TP profits', {
+        tradeId: state.trade.id,
+        breakevenPrice: state.currentStopLoss,
+        entryFillPrice: state.entryFillPrice,
+        fillPrice: price,
+        remainingQuantity: state.remainingQuantity
+      });
+    } else {
+      // Calculate PNL only on remaining quantity (after TPs have been filled)
+      // If remainingQuantity is 0 but no TPs were filled, use trade quantity instead
+      // This handles the case where trade.quantity is null/undefined and remainingQuantity was initialized to 0
+      let quantityForPnL = state.remainingQuantity;
+      if (quantityForPnL <= 0 && state.filledTakeProfits.size === 0 && state.totalPnL === 0) {
+        // No TPs were filled, so we should use the full trade quantity
+        // If trade.quantity is still null/undefined, we can't calculate PnL accurately
+        quantityForPnL = state.trade.quantity || 0;
+        if (quantityForPnL <= 0) {
+          logger.warn('Cannot calculate PnL for stop loss - trade quantity is missing', {
+            tradeId: state.trade.id,
+            tradeQuantity: state.trade.quantity,
+            remainingQuantity: state.remainingQuantity,
+            filledTPs: state.filledTakeProfits.size
+          });
+        }
+      }
+      pnlFromSL = calculatePnL(price, quantityForPnL);
+    }
+    
     const totalPnL = state.totalPnL + pnlFromSL; // Add PNL from stop loss to accumulated TP PNL
     const pnlPercentage = state.trade.quantity && state.trade.quantity > 0
       ? (totalPnL / (state.trade.quantity * state.entryFillPrice!)) * 100 * state.trade.leverage
@@ -268,7 +380,24 @@ export function createMockExchange(
     // Calculate PNL for this TP
     const tpPnL = calculatePnL(price, tpQuantity);
     state.totalPnL += tpPnL; // Accumulate PNL
+    
+    // Track remaining quantity before subtraction for error detection
+    const remainingBefore = state.remainingQuantity;
     state.remainingQuantity -= tpQuantity; // Reduce remaining quantity
+    
+    // Ensure remainingQuantity doesn't go negative (indicates a bug)
+    if (state.remainingQuantity < 0) {
+      logger.error('remainingQuantity became negative after TP fill', {
+        tradeId: state.trade.id,
+        tpIndex,
+        tpQuantity,
+        remainingQuantityBefore: remainingBefore,
+        remainingQuantityAfter: state.remainingQuantity,
+        totalQuantity: state.trade.quantity
+      });
+      // Set to 0 to prevent further issues, but this indicates a bug
+      state.remainingQuantity = 0;
+    }
 
     logger.info('Mock exchange: Take profit filled', {
       tradeId: state.trade.id,
@@ -286,6 +415,16 @@ export function createMockExchange(
       status: 'filled',
       filled_at: fillTime.toISOString(),
       filled_price: price
+    });
+    
+    // Update trade PNL after each TP is filled
+    const pnlPercentage = state.trade.quantity && state.trade.quantity > 0 && state.entryFillPrice
+      ? (state.totalPnL / (state.trade.quantity * state.entryFillPrice)) * 100 * state.trade.leverage
+      : 0;
+    
+    await db.updateTrade(state.trade.id, {
+      pnl: state.totalPnL,
+      pnl_percentage: pnlPercentage
     });
   };
 
@@ -433,6 +572,15 @@ export function createMockExchange(
       // Check orders to find the actual fill price
       const entryOrder = orders.find(o => o.order_type === 'entry' && o.filled_at);
       state.entryFillPrice = entryOrder?.filled_price || state.trade.entry_price;
+      
+      // If trade.quantity is missing, try to get it from the entry order
+      if (!state.trade.quantity && entryOrder?.quantity) {
+        state.trade.quantity = entryOrder.quantity;
+        logger.info('Using quantity from entry order', {
+          tradeId: state.trade.id,
+          quantity: entryOrder.quantity
+        });
+      }
     }
 
     if (state.trade.stop_loss_breakeven) {
@@ -442,7 +590,18 @@ export function createMockExchange(
     }
 
     // Check which TPs are already filled and calculate accumulated PNL
+    // Use trade quantity, or try to infer from entry order if missing
     let remainingQty = state.trade.quantity || 0;
+    if (remainingQty === 0) {
+      const entryOrder = orders.find(o => o.order_type === 'entry');
+      if (entryOrder?.quantity) {
+        remainingQty = entryOrder.quantity;
+        logger.info('Using quantity from entry order for remainingQuantity initialization', {
+          tradeId: state.trade.id,
+          quantity: entryOrder.quantity
+        });
+      }
+    }
     let accumulatedPnL = 0;
 
     for (const order of orders) {
@@ -455,6 +614,19 @@ export function createMockExchange(
           const tpPnL = calculatePnL(order.filled_price, tpQuantity);
           accumulatedPnL += tpPnL;
           remainingQty -= tpQuantity;
+          
+          // Ensure remainingQty doesn't go negative (indicates TP quantities sum to more than total)
+          if (remainingQty < 0) {
+            logger.error('remainingQty became negative during initialization - TP quantities may be incorrect', {
+              tradeId: state.trade.id,
+              tpIndex: order.tp_index,
+              tpQuantity,
+              remainingQtyBefore: remainingQty + tpQuantity,
+              remainingQtyAfter: remainingQty,
+              totalQuantity: state.trade.quantity
+            });
+            remainingQty = 0; // Cap at 0 to prevent further issues
+          }
         }
       }
       if (order.order_type === 'stop_loss' && order.status === 'filled') {
@@ -463,7 +635,17 @@ export function createMockExchange(
     }
 
     // Update state with restored values
-    state.remainingQuantity = Math.max(0, remainingQty); // Ensure non-negative
+    // Ensure non-negative - if negative, this indicates TP quantities don't match trade quantity
+    if (remainingQty < 0) {
+      logger.error('remainingQuantity is negative after initialization - this indicates a bug', {
+        tradeId: state.trade.id,
+        calculatedRemainingQty: remainingQty,
+        totalQuantity: state.trade.quantity,
+        filledTPs: Array.from(state.filledTakeProfits)
+      });
+      remainingQty = 0;
+    }
+    state.remainingQuantity = remainingQty;
     state.totalPnL = accumulatedPnL;
   };
 
@@ -510,6 +692,14 @@ export function createMockExchange(
     let entryCheckCount = 0;
     let closestPriceToEntry = state.isLong ? Infinity : -Infinity;
     let closestPriceDiff = Infinity;
+    
+    // Track best price within tolerance for entry fill
+    // For LONG: want lowest price (best buy)
+    // For SHORT: want highest price (best sell)
+    let bestEntryPrice: number | null = null;
+    let bestEntryTime: dayjs.Dayjs | null = null;
+    let bestEntryIndex: number | null = null;
+    const tolerance = state.trade.entry_price * 0.001;
 
     // Process each price point chronologically
     for (let i = 0; i < state.priceHistory.length; i++) {
@@ -520,27 +710,52 @@ export function createMockExchange(
       // Check if entry should fill
       if (!state.entryFilled) {
         entryCheckCount++;
-        const tolerance = state.trade.entry_price * 0.001;
         const priceDiff = Math.abs(price - state.trade.entry_price);
         
-        // Track closest price to entry
+        // Track closest price to entry (for debugging)
         if (priceDiff < closestPriceDiff) {
           closestPriceDiff = priceDiff;
           closestPriceToEntry = price;
         }
         
+        // Check if price is within tolerance for entry fill
         if (shouldFillEntry(price)) {
-          logger.info('Entry fill condition met', {
+          // Track best price within tolerance window
+          // For LONG: best = lowest price (best buy)
+          // For SHORT: best = highest price (best sell)
+          if (bestEntryPrice === null) {
+            bestEntryPrice = price;
+            bestEntryTime = priceTime;
+            bestEntryIndex = i;
+          } else {
+            const isBetter = state.isLong 
+              ? price < bestEntryPrice  // LONG: lower is better
+              : price > bestEntryPrice; // SHORT: higher is better
+            
+            if (isBetter) {
+              bestEntryPrice = price;
+              bestEntryTime = priceTime;
+              bestEntryIndex = i;
+            }
+          }
+        } else if (bestEntryPrice !== null && bestEntryTime !== null && bestEntryIndex !== null) {
+          // Price moved outside tolerance window - fill at best price we found
+          // Fill at the best price we encountered while within tolerance
+          logger.info('Entry fill condition met (best price within tolerance)', {
             tradeId: state.trade.id,
             tradingPair: state.trade.trading_pair,
             entryPrice: state.trade.entry_price,
-            fillPrice: price,
-            priceDiff,
+            fillPrice: bestEntryPrice,
+            priceDiff: Math.abs(bestEntryPrice - state.trade.entry_price),
             tolerance,
             isLong,
-            priceTime: priceTime.toISOString()
+            priceTime: bestEntryTime.toISOString()
           });
-          await fillEntry(price, priceTime);
+          await fillEntry(bestEntryPrice, bestEntryTime);
+          // Reset tracking variables
+          bestEntryPrice = null;
+          bestEntryTime = null;
+          bestEntryIndex = null;
         }
       }
 
@@ -581,6 +796,22 @@ export function createMockExchange(
           return true; // Trade expired
         }
       }
+    }
+
+    // If we've processed all price points but entry hasn't filled,
+    // check if we found a best price within tolerance and fill it
+    if (!state.entryFilled && bestEntryPrice !== null && bestEntryTime !== null) {
+      logger.info('Filling entry at best price found within tolerance (end of price history)', {
+        tradeId: state.trade.id,
+        tradingPair: state.trade.trading_pair,
+        entryPrice: state.trade.entry_price,
+        fillPrice: bestEntryPrice,
+        priceDiff: Math.abs(bestEntryPrice - state.trade.entry_price),
+        tolerance,
+        isLong,
+        priceTime: bestEntryTime.toISOString()
+      });
+      await fillEntry(bestEntryPrice, bestEntryTime);
     }
 
     // If we've processed all price points but trade isn't complete,

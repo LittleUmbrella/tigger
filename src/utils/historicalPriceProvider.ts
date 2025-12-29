@@ -2,6 +2,7 @@ import dayjs from 'dayjs';
 import { logger } from './logger.js';
 import { RestClientV5 } from 'bybit-api';
 import { RateLimiter, createBybitPublicRateLimiter } from './rateLimiter.js';
+import { getCachedResponse, setCachedResponse } from './bybitCache.js';
 
 interface PriceDataPoint {
   timestamp: number;
@@ -28,6 +29,7 @@ export interface HistoricalPriceProvider {
   getPriceHistory: (symbol: string, startTime: dayjs.Dayjs, endTime: dayjs.Dayjs) => Promise<PriceDataPoint[]>;
   hasData: (symbol: string) => boolean;
   getAvailableSymbols: () => string[];
+  getBybitClient: () => RestClientV5 | null;
 }
 
 /**
@@ -155,13 +157,24 @@ async function tryFetchWithCategory(
         await state.rateLimiter.waitIfNeeded();
         
         try {
-          const executionResponse = await state.bybitClient.getExecutionList({
+          // Check cache first
+          const cacheParams = {
             category,
             symbol: normalizedSymbol,
             startTime: execStart,
             endTime: execEnd,
             limit: 1000
-          });
+          };
+          let executionResponse = await getCachedResponse('getExecutionList', cacheParams);
+          
+          if (!executionResponse) {
+            // Not in cache, make API call
+            executionResponse = await state.bybitClient.getExecutionList(cacheParams);
+            // Cache successful responses
+            if (executionResponse.retCode === 0) {
+              await setCachedResponse('getExecutionList', cacheParams, executionResponse);
+            }
+          }
           
           if (executionResponse.retCode === 0 && executionResponse.result?.list) {
             const validTrades = executionResponse.result.list.filter((execution: any) => {
@@ -187,8 +200,125 @@ async function tryFetchWithCategory(
       }
     }
     
-    // If we got execution history data, use it; otherwise fall back to klines
+    // If we got execution history data, use it; otherwise try public trade endpoints
     if (pricePoints.length > 0) {
+      return pricePoints;
+    }
+    
+    // Try public trade endpoints (more accurate than klines)
+    // Note: Public trade endpoints typically only return recent trades (last 1000 trades),
+    // not historical data for specific time ranges. For historical backtesting,
+    // execution history (if authenticated) is the most accurate source, followed by klines.
+    // Public trades are useful for real-time or very recent data.
+    let tradeSuccess = false;
+    try {
+      const now = Date.now();
+      const cappedEndTimestamp = Math.min(endTimestamp, now);
+      
+      // Only try public trades if we're looking for very recent data
+      // Public trade endpoints don't support time range queries - they only return recent trades
+      const oneDayAgo = now - (24 * 60 * 60 * 1000);
+      const isRecentData = startTimestamp >= oneDayAgo && endTimestamp <= now;
+      
+      if (isRecentData) {
+        await state.rateLimiter.waitIfNeeded();
+        
+        // Note: Public trade endpoints return the most recent trades, not historical data.
+        // For historical backtesting, we typically simulate past times, so public trades
+        // won't be useful. For real-time/recent data, we could cache, but since the data
+        // changes over time, caching without a time component could serve stale data.
+        // For now, we don't cache public trades to avoid stale data issues.
+        // If needed in the future, we could add a time-based cache key or TTL.
+        
+        let tradeResponse: any = null;
+        
+        // Try common method names for public trade endpoints
+        const client = state.bybitClient as any;
+        if (client.getPublicTradeHistory) {
+          tradeResponse = await client.getPublicTradeHistory({
+            category,
+            symbol: normalizedSymbol,
+            limit: 1000
+          });
+        } else if (client.getMarketTrades) {
+          tradeResponse = await client.getMarketTrades({
+            category,
+            symbol: normalizedSymbol,
+            limit: 1000
+          });
+        } else if (client.getRecentTrades) {
+          tradeResponse = await client.getRecentTrades({
+            category,
+            symbol: normalizedSymbol,
+            limit: 1000
+          });
+        }
+        
+        if (tradeResponse && tradeResponse.retCode === 0 && tradeResponse.result?.list) {
+          const trades = tradeResponse.result.list;
+          logger.debug('Public trade API response', {
+            symbol: normalizedSymbol,
+            category,
+            retCode: tradeResponse.retCode,
+            retMsg: tradeResponse.retMsg,
+            listLength: trades.length
+          });
+          
+          for (const trade of trades) {
+            // Trade format: [time, symbol, side, size, price, ...] or {time, price, ...}
+            let tradeTime: number;
+            let tradePrice: number;
+            
+            if (Array.isArray(trade)) {
+              // Array format: [time, symbol, side, size, price, ...]
+              tradeTime = parseFloat(trade[0] || '0');
+              tradePrice = parseFloat(trade[4] || trade[3] || '0'); // price might be at index 3 or 4
+            } else {
+              // Object format: {time, price, ...}
+              tradeTime = parseFloat(trade.time || trade.execTime || '0');
+              tradePrice = parseFloat(trade.price || trade.execPrice || '0');
+            }
+            
+            // Filter trades within our time range
+            if (tradePrice > 0 && tradeTime >= startTimestamp && tradeTime <= cappedEndTimestamp) {
+              pricePoints.push({
+                timestamp: tradeTime,
+                price: tradePrice
+              });
+            }
+          }
+          
+          if (pricePoints.length > 0) {
+            tradeSuccess = true;
+            logger.info('Using public trade data (more accurate than klines)', {
+              symbol: normalizedSymbol,
+              category,
+              dataPoints: pricePoints.length,
+              startTime: new Date(startTimestamp).toISOString(),
+              endTime: new Date(cappedEndTimestamp).toISOString()
+            });
+          }
+        } else if (tradeResponse && tradeResponse.retCode !== 10001) {
+          logger.debug('Public trade API failed, will try klines', {
+            symbol: normalizedSymbol,
+            category,
+            retCode: tradeResponse.retCode,
+            retMsg: tradeResponse.retMsg
+          });
+        }
+      }
+    } catch (error) {
+      logger.debug('Public trade endpoint not available or failed, will try klines', {
+        symbol: normalizedSymbol,
+        category,
+        error: serializeError(error)
+      });
+    }
+    
+    // If we got trade data, use it; otherwise fall back to klines
+    if (tradeSuccess && pricePoints.length > 0) {
+      // Sort by timestamp to ensure chronological order
+      pricePoints.sort((a, b) => a.timestamp - b.timestamp);
       return pricePoints;
     }
     
@@ -207,14 +337,25 @@ async function tryFetchWithCategory(
       if (category === 'spot') {
         // For spot, use regular kline
         try {
-          const klineResponse = await state.bybitClient.getKline({
+          // Check cache first
+          const cacheParams = {
             category: 'spot',
             symbol: normalizedSymbol,
             interval: '1',
             start: currentStart,
             end: currentEnd,
             limit: 200
-          });
+          };
+          let klineResponse = await getCachedResponse('getKline', cacheParams);
+          
+          if (!klineResponse) {
+            // Not in cache, make API call
+            klineResponse = await state.bybitClient.getKline(cacheParams);
+            // Cache successful responses
+            if (klineResponse.retCode === 0) {
+              await setCachedResponse('getKline', cacheParams, klineResponse);
+            }
+          }
           
           logger.debug('Spot kline API response', {
             symbol: normalizedSymbol,
@@ -269,38 +410,85 @@ async function tryFetchWithCategory(
         
         const klineMethods = [
           // Method 1: Regular kline
-          () => state.bybitClient.getKline({
-            category: 'linear',
-            symbol: normalizedSymbol,
-            interval: '1',
-            start: currentStart,
-            end: currentEnd,
-            limit: 200
-          }),
+          {
+            name: 'regular kline',
+            endpoint: 'getKline',
+            call: () => state.bybitClient.getKline({
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }),
+            params: {
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }
+          },
           // Method 2: Mark price kline (if available)
-          ...((state.bybitClient as any).getMarkPriceKline ? [() => (state.bybitClient as any).getMarkPriceKline({
-            category: 'linear',
-            symbol: normalizedSymbol,
-            interval: '1',
-            start: currentStart,
-            end: currentEnd,
-            limit: 200
-          })] : []),
+          ...((state.bybitClient as any).getMarkPriceKline ? [{
+            name: 'mark price kline',
+            endpoint: 'getMarkPriceKline',
+            call: () => (state.bybitClient as any).getMarkPriceKline({
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }),
+            params: {
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }
+          }] : []),
           // Method 3: Index price kline (fallback)
-          () => state.bybitClient.getIndexPriceKline({
-            category: 'linear',
-            symbol: normalizedSymbol,
-            interval: '1',
-            start: currentStart,
-            end: currentEnd,
-            limit: 200
-          })
+          {
+            name: 'index price kline',
+            endpoint: 'getIndexPriceKline',
+            call: () => state.bybitClient.getIndexPriceKline({
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }),
+            params: {
+              category: 'linear',
+              symbol: normalizedSymbol,
+              interval: '1',
+              start: currentStart,
+              end: currentEnd,
+              limit: 200
+            }
+          }
         ];
         
         for (let methodIndex = 0; methodIndex < klineMethods.length; methodIndex++) {
-          const methodName = methodIndex === 0 ? 'regular kline' : methodIndex === 1 ? 'mark price kline' : 'index price kline';
+          const method = klineMethods[methodIndex];
+          const methodName = method.name;
           try {
-            const klineResponse = await klineMethods[methodIndex]();
+            // Check cache first
+            let klineResponse = await getCachedResponse(method.endpoint, method.params);
+            
+            if (!klineResponse) {
+              // Not in cache, make API call
+              klineResponse = await method.call();
+              // Cache successful responses
+              if (klineResponse.retCode === 0) {
+                await setCachedResponse(method.endpoint, method.params, klineResponse);
+              }
+            }
             
             logger.debug('Linear kline API response', {
               symbol: normalizedSymbol,
@@ -365,16 +553,30 @@ async function tryFetchWithCategory(
         try {
           await state.rateLimiter.waitIfNeeded();
           
-          // Handle different ticker API signatures for spot vs linear
-          const tickerResponse = category === 'spot'
-            ? await state.bybitClient.getTickers({
-                category: 'spot',
-                symbol: normalizedSymbol
-              } as any)
-            : await state.bybitClient.getTickers({
-                category: 'linear',
-                symbol: normalizedSymbol
-              } as any);
+          // Check cache first
+          const tickerParams = {
+            category,
+            symbol: normalizedSymbol
+          };
+          let tickerResponse = await getCachedResponse('getTickers', tickerParams);
+          
+          if (!tickerResponse) {
+            // Not in cache, make API call
+            // Handle different ticker API signatures for spot vs linear
+            tickerResponse = category === 'spot'
+              ? await state.bybitClient.getTickers({
+                  category: 'spot',
+                  symbol: normalizedSymbol
+                } as any)
+              : await state.bybitClient.getTickers({
+                  category: 'linear',
+                  symbol: normalizedSymbol
+                } as any);
+            // Cache successful responses
+            if (tickerResponse.retCode === 0) {
+              await setCachedResponse('getTickers', tickerParams, tickerResponse);
+            }
+          }
           
           const resultList = (tickerResponse.result as any)?.list;
           
@@ -708,6 +910,10 @@ export function createHistoricalPriceProvider(
         }
       }
       return Array.from(symbols);
+    },
+    
+    getBybitClient: (): RestClientV5 | null => {
+      return state.bybitClient || null;
     },
   };
 }

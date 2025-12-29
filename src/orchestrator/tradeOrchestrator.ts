@@ -740,7 +740,9 @@ export const startTradeOrchestrator = async (
           isSimulation,
           priceProvider,
           channelConfig.parser, // Pass parser name to initiator
-          config.accounts // Pass accounts config
+          config.accounts, // Pass accounts config
+          undefined, // startDate (not used in live mode)
+          channelConfig.baseLeverage // Pass channel-specific baseLeverage
         );
       }
     };
@@ -788,7 +790,9 @@ export const startTradeOrchestrator = async (
           isSimulation,
           priceProvider,
           channelConfig.parser, // Pass parser name to initiator
-          config.accounts // Pass accounts config
+          config.accounts, // Pass accounts config
+          undefined, // startDate (not used in live mode)
+          channelConfig.baseLeverage // Pass channel-specific baseLeverage
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

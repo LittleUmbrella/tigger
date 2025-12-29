@@ -2,7 +2,8 @@ import { RestClientV5 } from 'bybit-api';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
-import { validateBybitSymbol } from './symbolValidator.js';
+import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
 import dayjs from 'dayjs';
 
 /**
@@ -70,50 +71,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
   // For backward compatibility, if testnet is set in config, preserve it
   // We'll pass it to getAccountCredentials when account is null
   return [null]; // null means use environment variables
-};
-
-/**
- * Get decimal precision from a price value
- */
-const getDecimalPrecision = (price: number): number => {
-  if (!isFinite(price)) return 2;
-  const priceStr = price.toString();
-  if (priceStr.includes('.')) {
-    return priceStr.split('.')[1].length;
-  }
-  return 0;
-};
-
-/**
- * Get symbol information from Bybit to determine precision
- */
-const getSymbolInfo = async (
-  bybitClient: RestClientV5,
-  symbol: string
-): Promise<{ qtyPrecision?: number; pricePrecision?: number } | null> => {
-  try {
-    // Try to get instrument info
-    const instruments = await bybitClient.getInstrumentsInfo({ category: 'linear', symbol });
-    
-    if (instruments.retCode === 0 && instruments.result && instruments.result.list) {
-      const instrument = instruments.result.list.find((s: any) => s.symbol === symbol);
-      if (!instrument) return null;
-      return {
-        qtyPrecision: (instrument as any).lot_size_filter?.qty_precision 
-          ? parseInt((instrument as any).lot_size_filter.qty_precision) 
-          : undefined,
-        pricePrecision: (instrument as any).price_filter?.tick_size
-          ? getDecimalPrecision(parseFloat((instrument as any).price_filter.tick_size))
-          : undefined
-      };
-    }
-  } catch (error) {
-    logger.warn('Failed to get symbol info', {
-      symbol,
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-  return null;
 };
 
 /**
@@ -258,27 +215,36 @@ const executeTradeForAccount = async (
       }
     }
 
-    // Calculate position size based on risk percentage
-    const riskAmount = balance * (riskPercentage / 100);
-    const priceDiff = Math.abs(entryPrice - order.stopLoss);
-    const riskPerUnit = priceDiff / entryPrice;
-    const positionSize = riskAmount / riskPerUnit;
+    // Use baseLeverage as default if leverage is not specified in order
+    const baseLeverage = context.config.baseLeverage;
+    const effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
     
-    // Calculate quantity (simplified - in production you'd need to handle lot size filters)
-    const qty = Math.floor((positionSize / entryPrice) * 100) / 100;
-
-    // Determine decimal precision for rounding
-    // Use entry price if available, otherwise get from symbol info
-    let decimalPrecision = 2; // default
-    if (entryPrice && entryPrice > 0) {
-      decimalPrecision = getDecimalPrecision(entryPrice);
-    } else if (!isSimulation && bybitClient) {
-      // For market orders, get precision from symbol info
+    // Calculate position size based on risk percentage
+    const positionSize = calculatePositionSize(
+      balance,
+      riskPercentage,
+      entryPrice,
+      order.stopLoss,
+      effectiveLeverage,
+      baseLeverage
+    );
+    
+    // Get decimal precision from exchange symbol info
+    let decimalPrecision = 2; // default fallback
+    if (bybitClient) {
       const symbolInfo = await getSymbolInfo(bybitClient, symbol);
       if (symbolInfo?.qtyPrecision !== undefined) {
         decimalPrecision = symbolInfo.qtyPrecision;
+      } else if (entryPrice && entryPrice > 0) {
+        // Fallback to inferring from entry price if symbol info not available
+        decimalPrecision = getDecimalPrecision(entryPrice);
       }
+    } else if (entryPrice && entryPrice > 0) {
+      decimalPrecision = getDecimalPrecision(entryPrice);
     }
+    
+    // Calculate quantity with exchange-provided precision
+    const qty = calculateQuantity(positionSize, entryPrice, decimalPrecision);
 
     logger.info('Calculated trade parameters', {
       channel,
@@ -286,7 +252,8 @@ const executeTradeForAccount = async (
       side,
       qty,
       entryPrice: entryPrice,
-      leverage: order.leverage,
+      leverage: effectiveLeverage,
+      baseLeverage,
       decimalPrecision
     });
 
@@ -334,15 +301,15 @@ const executeTradeForAccount = async (
         price: entryPrice
       });
     } else if (bybitClient) {
-      // Set leverage first
+      // Set leverage first (use effective leverage)
       try {
         await bybitClient.setLeverage({
           category: 'linear',
           symbol: symbol,
-          buyLeverage: order.leverage.toString(),
-          sellLeverage: order.leverage.toString(),
+          buyLeverage: effectiveLeverage.toString(),
+          sellLeverage: effectiveLeverage.toString(),
         });
-        logger.info('Leverage set', { symbol, leverage: order.leverage });
+        logger.info('Leverage set', { symbol, leverage: effectiveLeverage });
       } catch (error) {
         logger.warn('Failed to set leverage', {
           symbol,
@@ -604,7 +571,7 @@ const executeTradeForAccount = async (
       message_id: message.message_id,
       channel: channel,
       trading_pair: order.tradingPair,
-      leverage: order.leverage,
+      leverage: effectiveLeverage,
       entry_price: entryPrice,
       stop_loss: order.stopLoss,
       take_profits: JSON.stringify(order.takeProfits),

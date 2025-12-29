@@ -104,6 +104,7 @@ program
   .option('--speed-multiplier <n>', 'Speed multiplier (0 = max speed)', '0')
   .option('--max-trade-duration <days>', 'Maximum trade duration in days', '7')
   .option('--risk-percentage <n>', 'Risk percentage per trade', '3')
+  .option('--base-leverage <n>', 'Base/default leverage if not specified in message. Also used as confidence indicator for risk adjustment')
   .option('--breakeven-after-tps <n>', 'Number of take profits to hit before moving stop-loss to breakeven (default: 1)', '1')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
@@ -140,6 +141,7 @@ program
           initiator: {
             name: 'evaluation',
             riskPercentage: parseFloat(options.riskPercentage) || 3,
+            baseLeverage: options.baseLeverage ? parseFloat(options.baseLeverage) : undefined,
             testnet: false,
           },
           monitor: {

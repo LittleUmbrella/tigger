@@ -17,6 +17,8 @@ import { EvaluationConfig } from '../types/config.js';
 import { EvaluationResultRecord } from '../db/schema.js';
 import { createMockExchange } from './mockExchange.js';
 import { createBybitPublicRateLimiter } from '../utils/rateLimiter.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
+import { getSymbolInfo } from '../initiators/symbolValidator.js';
 import dayjs from 'dayjs';
 
 export interface EvaluationRunResult {
@@ -120,8 +122,9 @@ export async function runEvaluation(
     lastMessage: filteredMessages[filteredMessages.length - 1].date
   });
 
-  // Process unparsed messages to initiate trades
-  // Pass startDate to filter messages during processing
+  // Process unparsed messages to initiate trades in parallel
+  // Quantities will be set to 0 initially and recalculated after mock exchanges complete
+  // Note: Evaluation mode doesn't use channel config, so baseLeverage comes from initiatorConfig only
   await processUnparsedMessages(
     initiatorConfig,
     channel,
@@ -131,7 +134,8 @@ export async function runEvaluation(
     priceProvider,
     parserName,
     undefined, // accounts
-    config.startDate ? startDate : undefined // startDate filter
+    config.startDate ? startDate : undefined, // startDate filter
+    undefined // channelBaseLeverage (not used in evaluation mode, use initiatorConfig.baseLeverage instead)
   );
 
   // Get all trades for this channel that need simulation
@@ -144,65 +148,69 @@ export async function runEvaluation(
     tradeCount: allTradesToSimulate.length
   });
 
+  // Recalculate quantities historically BEFORE processing mock exchanges
+  // Mock exchanges need correct quantities to calculate PNL accurately
+  // This must be done sequentially to track balance correctly
+  const initialBalance = config.initialBalance || 10000;
+  const baseLeverage = config.initiator.baseLeverage;
+  logger.info('Recalculating quantities before processing mock exchanges', {
+    channel,
+    initialBalance,
+    baseLeverage
+  });
+  await recalculateQuantitiesHistorically(db, channel, initialBalance, priceProvider, baseLeverage);
+
+  // Reload trades with updated quantities
+  const updatedPendingTrades = await db.getTradesByStatus('pending');
+  const updatedActiveTrades = await db.getTradesByStatus('active');
+  const updatedTradesToSimulate = [...updatedPendingTrades, ...updatedActiveTrades].filter(t => t.channel === channel);
+
   // Create and process mock exchanges for each trade
   const maxDurationDays = config.maxTradeDurationDays || 7;
-  const mockExchanges = allTradesToSimulate.map(trade => ({
+  const mockExchanges = updatedTradesToSimulate.map(trade => ({
     trade,
     exchange: createMockExchange(trade, db, priceProvider, monitorConfig.breakevenAfterTPs ?? 1)
   }));
 
-  // Initialize all mock exchanges (fetch price history)
+  // Initialize all mock exchanges in parallel - price history fetches are independent
   const initStartTime = Date.now();
-  logger.info('Initializing mock exchanges (fetching price history)', {
+  logger.info('Initializing mock exchanges in parallel (fetching price history)', {
     channel,
     totalTrades: mockExchanges.length
   });
 
-  for (let i = 0; i < mockExchanges.length; i++) {
-    const { trade, exchange } = mockExchanges[i];
-    const progress = i + 1;
-    const progressPercent = Math.round((progress / mockExchanges.length) * 100);
-    
+  // Process initializations in parallel
+  const initPromises = mockExchanges.map(async ({ trade, exchange }) => {
     try {
-      logger.info('Initializing mock exchange', {
+      logger.debug('Initializing mock exchange', {
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
-        progress: `${progress}/${mockExchanges.length}`,
-        progressPercent: `${progressPercent}%`,
         tradeCreatedAt: trade.created_at
       });
       
       await exchange.initialize(maxDurationDays);
-      
-      // Log progress every 10 trades or at milestones
-      if (progress % 10 === 0 || progress === mockExchanges.length) {
-        const elapsed = Date.now() - initStartTime;
-        const avgTimePerTrade = elapsed / progress;
-        const estimatedRemaining = avgTimePerTrade * (mockExchanges.length - progress);
-        
-        logger.info('Initialization progress', {
-          channel,
-          completed: progress,
-          total: mockExchanges.length,
-          progressPercent: `${progressPercent}%`,
-          elapsedSeconds: Math.round(elapsed / 1000),
-          estimatedRemainingSeconds: Math.round(estimatedRemaining / 1000)
-        });
-      }
+      return { success: true, tradeId: trade.id };
     } catch (error) {
       logger.error('Failed to initialize mock exchange', {
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
-        progress: `${progress}/${mockExchanges.length}`,
         error: error instanceof Error ? error.message : String(error)
       });
+      return { success: false, tradeId: trade.id };
     }
-  }
+  });
+
+  // Wait for all initializations to complete
+  const results = await Promise.allSettled(initPromises);
+  const successCount = results.filter(r => r.status === 'fulfilled' && r.value?.success).length;
+  const failureCount = results.length - successCount;
 
   const initElapsed = Date.now() - initStartTime;
   logger.info('All mock exchanges initialized', {
     channel,
     totalTrades: mockExchanges.length,
+    successful: successCount,
+    failed: failureCount,
     elapsedSeconds: Math.round(initElapsed / 1000)
   });
 
@@ -268,7 +276,7 @@ export async function runEvaluation(
 
   logger.info('All trades simulated', {
     channel,
-    totalTrades: allTradesToSimulate.length
+    totalTrades: updatedTradesToSimulate.length
   });
 
   // Get all closed trades for this channel
@@ -421,6 +429,265 @@ export async function runEvaluation(
       totalTrades: completedTrades.length,
       totalMessages: filteredMessages.length,
     };
+}
+
+/**
+ * Recalculate quantities for all trades historically based on balance at creation time
+ * This must be done sequentially after mock exchanges have processed all trades
+ */
+async function recalculateQuantitiesHistorically(
+  db: DatabaseManager,
+  channel: string,
+  initialBalance: number,
+  priceProvider?: HistoricalPriceProvider,
+  baseLeverage?: number
+): Promise<void> {
+  logger.info('Recalculating quantities historically based on balance', {
+    channel,
+    initialBalance
+  });
+
+  // Get all trades for this channel, sorted chronologically by creation time
+  // Get all trades and filter by channel
+  const allPendingTrades = await db.getTradesByStatus('pending');
+  const allActiveTrades = await db.getTradesByStatus('active');
+  const allClosedTrades = await db.getTradesByStatus('closed');
+  const allStoppedTrades = await db.getTradesByStatus('stopped');
+  const allCancelledTrades = await db.getTradesByStatus('cancelled');
+  
+  const allTrades = [
+    ...allPendingTrades,
+    ...allActiveTrades,
+    ...allClosedTrades,
+    ...allStoppedTrades,
+    ...allCancelledTrades
+  ].filter(t => t.channel === channel);
+  
+  const sortedTrades = [...allTrades].sort((a, b) => {
+    const dateA = new Date(a.created_at).getTime();
+    const dateB = new Date(b.created_at).getTime();
+    return dateA - dateB;
+  });
+
+  logger.info('Recalculating quantities for trades', {
+    channel,
+    totalTrades: sortedTrades.length,
+    initialBalance
+  });
+
+  let recalculatedCount = 0;
+  let skippedCount = 0;
+
+  // Process trades sequentially to calculate balance at each creation time
+  for (let i = 0; i < sortedTrades.length; i++) {
+    const trade = sortedTrades[i];
+    const tradeCreationTime = dayjs(trade.created_at);
+
+    // Calculate balance at the time this trade was created
+    // Balance = initial balance + sum of PNL from trades that closed before this trade's creation
+    const completedTradesBeforeThis = sortedTrades
+      .slice(0, i) // Only trades created before this one
+      .filter(t => {
+        // Only include trades that have closed (have exit_filled_at and PNL)
+        if (!t.exit_filled_at || t.pnl === null || t.pnl === undefined) {
+          return false;
+        }
+        const exitTime = dayjs(t.exit_filled_at);
+        // Trade must have closed before this trade was created
+        return exitTime.isBefore(tradeCreationTime) || exitTime.isSame(tradeCreationTime, 'minute');
+      });
+
+    const totalPnLBeforeThis = completedTradesBeforeThis.reduce((sum, t) => sum + (t.pnl || 0), 0);
+    const balanceAtCreation = initialBalance + totalPnLBeforeThis;
+
+    // Recalculate quantity based on balance at creation time
+    if (!trade.entry_price || !trade.stop_loss || !trade.leverage || !trade.risk_percentage) {
+      logger.warn('Skipping quantity recalculation - missing required trade fields', {
+        tradeId: trade.id,
+        hasEntryPrice: !!trade.entry_price,
+        hasStopLoss: !!trade.stop_loss,
+        hasLeverage: !!trade.leverage,
+        hasRiskPercentage: !!trade.risk_percentage
+      });
+      skippedCount++;
+      continue;
+    }
+
+    // Use baseLeverage as default if leverage is not specified
+    const effectiveLeverage = trade.leverage > 0 ? trade.leverage : (baseLeverage || 1);
+    
+    const positionSize = calculatePositionSize(
+      balanceAtCreation,
+      trade.risk_percentage,
+      trade.entry_price,
+      trade.stop_loss,
+      effectiveLeverage,
+      baseLeverage
+    );
+
+    // Get decimal precision
+    let decimalPrecision: number | undefined;
+    if (priceProvider) {
+      const bybitClient = priceProvider.getBybitClient();
+      if (bybitClient) {
+        const normalizedTradingPair = trade.trading_pair.replace('/', '').toUpperCase();
+        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair);
+        if (symbolInfo?.qtyPrecision !== undefined) {
+          decimalPrecision = symbolInfo.qtyPrecision;
+        }
+      }
+    }
+    
+    if (decimalPrecision === undefined) {
+      decimalPrecision = getDecimalPrecision(trade.entry_price);
+    }
+
+    const newQuantity = calculateQuantity(positionSize, trade.entry_price, decimalPrecision);
+
+    if (newQuantity <= 0) {
+      logger.warn('Calculated quantity is 0 or negative, skipping update', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        positionSize,
+        entryPrice: trade.entry_price,
+        decimalPrecision,
+        newQuantity,
+        balanceAtCreation
+      });
+      skippedCount++;
+      continue;
+    }
+    
+    recalculatedCount++;
+
+    // Update trade quantity
+    await db.updateTrade(trade.id, {
+      quantity: newQuantity
+    });
+
+    // Update order quantities
+    const orders = await db.getOrdersByTradeId(trade.id);
+    const entryOrder = orders.find(o => o.order_type === 'entry');
+    if (entryOrder) {
+      await db.updateOrder(entryOrder.id, {
+        quantity: newQuantity
+      });
+    } else {
+      logger.warn('Entry order not found when recalculating quantities', {
+        tradeId: trade.id
+      });
+    }
+
+    // Update take profit order quantities
+    const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
+    if (takeProfits.length > 0) {
+      const distributeQuantityAcrossTPs = (
+        totalQty: number,
+        numTPs: number,
+        decimalPrecision: number
+      ): number[] => {
+        if (numTPs === 0) return [];
+        if (totalQty <= 0) return Array(numTPs).fill(0);
+        
+        const qtyPerTP = totalQty / numTPs;
+        const roundedQty = Math.floor(qtyPerTP * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+        const quantities = Array(numTPs).fill(roundedQty);
+        const totalDistributed = roundedQty * numTPs;
+        const remainder = totalQty - totalDistributed;
+        
+        // If rounded quantity is 0 but we have a positive total, put all quantity in first TP
+        if (roundedQty === 0 && totalQty > 0) {
+          // Use higher precision to ensure we can represent the quantity
+          const minPrecision = Math.max(decimalPrecision, 8); // Use at least 8 decimal places
+          const firstTPQty = Math.floor(totalQty * Math.pow(10, minPrecision)) / Math.pow(10, minPrecision);
+          quantities[0] = firstTPQty;
+          // Fill rest with 0
+          for (let i = 1; i < quantities.length; i++) {
+            quantities[i] = 0;
+          }
+        } else if (remainder > 0 && quantities.length > 0) {
+          // Distribute remainder to first TP
+          quantities[0] = Math.floor((quantities[0] + remainder) * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+        }
+        
+        return quantities;
+      };
+
+      const tpQuantities = distributeQuantityAcrossTPs(newQuantity, takeProfits.length, decimalPrecision);
+      const tpOrders = orders.filter(o => o.order_type === 'take_profit');
+      
+      logger.debug('Updating TP order quantities', {
+        tradeId: trade.id,
+        newQuantity,
+        numTPs: takeProfits.length,
+        tpOrdersCount: tpOrders.length,
+        tpQuantities,
+        decimalPrecision,
+        tpOrders: tpOrders.map(o => ({ id: o.id, tp_index: o.tp_index }))
+      });
+
+      if (tpOrders.length !== takeProfits.length) {
+        logger.warn('Mismatch between TP orders and TP prices', {
+          tradeId: trade.id,
+          tpOrdersCount: tpOrders.length,
+          tpPricesCount: takeProfits.length
+        });
+      }
+      
+      // Update TP orders by matching tp_index
+      for (let tpIndex = 0; tpIndex < tpQuantities.length; tpIndex++) {
+        const tpOrder = tpOrders.find(o => o.tp_index === tpIndex);
+        if (tpOrder) {
+          const tpQty = tpQuantities[tpIndex];
+          if (tpQty > 0) {
+            await db.updateOrder(tpOrder.id, {
+              quantity: tpQty
+            });
+            logger.debug('Updated TP order quantity', {
+              tradeId: trade.id,
+              tpIndex,
+              orderId: tpOrder.id,
+              quantity: tpQty
+            });
+          } else {
+            logger.warn('TP quantity rounded to 0, skipping update', {
+              tradeId: trade.id,
+              tpIndex,
+              orderId: tpOrder.id,
+              calculatedQty: tpQuantities[tpIndex],
+              totalQty: newQuantity,
+              numTPs: takeProfits.length,
+              qtyPerTP: newQuantity / takeProfits.length
+            });
+          }
+        } else {
+          logger.warn('TP order not found for tp_index', {
+            tradeId: trade.id,
+            tpIndex,
+            availableTPIndices: tpOrders.map(o => o.tp_index)
+          });
+        }
+      }
+    }
+
+    logger.info('Recalculated quantity for trade', {
+      tradeId: trade.id,
+      tradingPair: trade.trading_pair,
+      balanceAtCreation,
+      oldQuantity: trade.quantity,
+      newQuantity,
+      positionSize,
+      completedTradesBeforeThis: completedTradesBeforeThis.length,
+      totalPnLBeforeThis
+    });
+  }
+
+  logger.info('Finished recalculating quantities historically', {
+    channel,
+    totalTrades: sortedTrades.length,
+    recalculated: recalculatedCount,
+    skipped: skippedCount
+  });
 }
 
 /**
