@@ -1,0 +1,74 @@
+{
+  "_comment": "This config file is safe to commit to version control. Database connection string comes from DATABASE_URL environment variable.",
+  "harvesters": [
+    {
+      "name": "main_harvester",
+      "channel": "vip-future",
+      "apiId": 2427485240,
+      "envVarNames": {
+        "accessHash": "TG_ACCESS_HASH"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
+    }
+  ],
+  "parsers": [
+    {
+      "name": "main_parser",
+      "channel": "vip-future"
+    }
+  ],
+  "accounts": [
+    {
+      "name": "testnet2",
+      "exchange": "bybit",
+      "testnet": true,
+      "envVarNames": {
+        "apiKey": "BYBIT_TESTNET_API_KEY2",
+        "apiSecret": "BYBIT_TESTNET_API_SECRET2"
+      }
+    },
+    {
+      "name": "testnet",
+      "exchange": "bybit",
+      "testnet": true,
+      "envVarNames": {
+        "apiKey": "BYBIT_TESTNET_API_KEY",
+        "apiSecret": "BYBIT_TESTNET_API_SECRET"
+      }
+    }
+  ],
+  "initiators": [
+    {
+      "name": "bybit",
+      "testnet": true,
+      "riskPercentage": 1,
+      "accounts": ["testnet", "testnet2"]
+    }
+  ],
+  "monitors": [
+    {
+      "type": "bybit",
+      "testnet": true,
+      "pollInterval": 3000,
+      "entryTimeoutDays": 7
+    }
+  ],
+  "channels": [
+    {
+      "channel": "vip-future",
+      "harvester": "main_harvester",
+      "parser": "main_parser",
+      "breakevenAfterTPs": 2,
+      "initiator": "bybit",
+      "monitor": "bybit"
+    }
+  ],
+  "database": {
+    "type": "postgresql"
+  }
+}
+
+

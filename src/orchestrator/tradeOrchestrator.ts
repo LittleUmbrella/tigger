@@ -15,7 +15,7 @@ import '../managers/index.js'; // Register built-in managers
 import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
-import { RestClientV5 } from 'bybit-api';
+import { RestClientV5 } from '../utils/bybitClient.js';
 import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 
 // Register built-in parsers
@@ -77,8 +77,11 @@ export const startTradeOrchestrator = async (
 
     if (accountName && accountMap.has(accountName)) {
       const account = accountMap.get(accountName)!;
-      apiKey = account.apiKey || (account.envVars?.apiKey ? process.env[account.envVars.apiKey] : process.env.BYBIT_API_KEY);
-      apiSecret = account.apiSecret || (account.envVars?.apiSecret ? process.env[account.envVars.apiSecret] : process.env.BYBIT_API_SECRET);
+      // Priority: envVarNames > envVars (backward compat) > apiKey/apiSecret (deprecated) > default env vars
+      const envVarNameForKey = account.envVarNames?.apiKey || account.envVars?.apiKey;
+      const envVarNameForSecret = account.envVarNames?.apiSecret || account.envVars?.apiSecret;
+      apiKey = envVarNameForKey ? process.env[envVarNameForKey] : (account.apiKey || process.env.BYBIT_API_KEY);
+      apiSecret = envVarNameForSecret ? process.env[envVarNameForSecret] : (account.apiSecret || process.env.BYBIT_API_SECRET);
       useTestnet = account.testnet || false;
     } else {
       // Fallback to environment variables

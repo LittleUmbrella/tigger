@@ -1,10 +1,13 @@
 {
+  "_comment": "This config file is safe to commit to version control. Database connection string comes from DATABASE_URL environment variable. Sensitive values (accessHash, botToken, API keys) use envVarNames to reference environment variables.",
   "harvesters": [
     {
       "name": "main_harvester",
       "channel": "your_telegram_channel",
       "apiId": 12345678,
-      "accessHash": "optional_access_hash_for_private_channels",
+      "envVarNames": {
+        "accessHash": "TELEGRAM_ACCESS_HASH"
+      },
       "pollInterval": 5000,
       "downloadImages": false
     }
@@ -40,8 +43,7 @@
     }
   ],
   "database": {
-    "type": "postgresql",
-    "url": "postgresql://user:password@host:5432/dbname"
+    "type": "postgresql"
   }
 }
 

@@ -8,7 +8,7 @@
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo } from './symbolValidator.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import dayjs from 'dayjs';
 
 
@@ -90,6 +90,32 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
   }
 
+  // Get price precision from price provider if available
+  let pricePrecision: number | undefined = undefined;
+  if (priceProvider) {
+    try {
+      const bybitClient = priceProvider.getBybitClient();
+      if (bybitClient) {
+        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair);
+        pricePrecision = symbolInfo?.pricePrecision;
+      }
+    } catch (error) {
+      // Fallback to inferring from entry price
+      pricePrecision = getDecimalPrecision(entryPrice);
+    }
+  } else {
+    pricePrecision = getDecimalPrecision(entryPrice);
+  }
+
+  // Round prices to exchange precision
+  const roundedEntryPrice = roundPrice(entryPrice, pricePrecision);
+  const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
+    ? roundPrice(order.stopLoss, pricePrecision)
+    : order.stopLoss;
+  const roundedTPPrices = order.takeProfits && order.takeProfits.length > 0
+    ? order.takeProfits.map(tpPrice => roundPrice(tpPrice, pricePrecision))
+    : order.takeProfits;
+
   // In evaluation mode, set quantity to 0 initially
   // Quantities will be recalculated after mock exchanges process trades
   // This allows parallel trade creation while maintaining accurate balance-based position sizing
@@ -102,9 +128,12 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   logger.info('Creating trade with placeholder quantity (will be recalculated after processing)', {
     channel,
     tradingPair: order.tradingPair,
-    entryPrice,
+    entryPrice: roundedEntryPrice,
+    originalEntryPrice: entryPrice,
+    stopLoss: roundedStopLoss,
     leverage: effectiveLeverage,
-    baseLeverage
+    baseLeverage,
+    pricePrecision
   });
 
   // Generate a simulation order ID
@@ -115,10 +144,10 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     orderId,
     tradingPair: order.tradingPair,
     qty,
-    price: entryPrice
+    price: roundedEntryPrice
   });
 
-  // Store trade in database (use normalized trading pair)
+  // Store trade in database (use normalized trading pair and rounded prices)
   // Use message date for created_at in evaluation mode to ensure proper historical simulation
   const messageDate = dayjs(message.date);
   const expiresAt = messageDate.add(entryTimeoutDays, 'days').toISOString();
@@ -127,9 +156,9 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     channel: channel,
     trading_pair: tradingPairForPriceProvider, // Use normalized format with slash
     leverage: effectiveLeverage,
-    entry_price: entryPrice,
-    stop_loss: order.stopLoss,
-    take_profits: JSON.stringify(order.takeProfits),
+    entry_price: roundedEntryPrice,
+    stop_loss: roundedStopLoss || order.stopLoss,
+    take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
     risk_percentage: riskPercentage,
     quantity: qty,
     exchange: 'bybit', // Keep as bybit for compatibility
@@ -140,13 +169,13 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     created_at: messageDate.toISOString()
   });
 
-  // Store entry order with quantity 0 (will be recalculated later)
+  // Store entry order with quantity 0 (will be recalculated later, use rounded price)
   try {
     await db.insertOrder({
       trade_id: tradeId,
       order_type: 'entry',
       order_id: orderId,
-      price: entryPrice,
+      price: roundedEntryPrice,
       quantity: qty, // Will be 0 initially
       status: 'pending'
     });
@@ -157,13 +186,13 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     });
   }
 
-  // Store stop loss order (no quantity needed)
-  if (order.stopLoss && order.stopLoss > 0) {
+  // Store stop loss order (no quantity needed, use rounded price)
+  if (roundedStopLoss && roundedStopLoss > 0) {
     try {
       await db.insertOrder({
         trade_id: tradeId,
         order_type: 'stop_loss',
-        price: order.stopLoss,
+        price: roundedStopLoss,
         status: 'pending'
       });
     } catch (error) {
@@ -174,14 +203,14 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
   }
 
-  // Store take profit orders with quantity 0 (will be recalculated later)
-  if (order.takeProfits && order.takeProfits.length > 0) {
-    for (let i = 0; i < order.takeProfits.length; i++) {
+  // Store take profit orders with quantity 0 (will be recalculated later, use rounded prices)
+  if (roundedTPPrices && roundedTPPrices.length > 0) {
+    for (let i = 0; i < roundedTPPrices.length; i++) {
       try {
         await db.insertOrder({
           trade_id: tradeId,
           order_type: 'take_profit',
-          price: order.takeProfits[i],
+          price: roundedTPPrices[i],
           tp_index: i,
           quantity: 0, // Will be recalculated later
           status: 'pending'
