@@ -1,4 +1,4 @@
-import { RestClientV5 } from '../utils/bybitClient.js';
+import { RestClientV5 } from 'bybit-api';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';

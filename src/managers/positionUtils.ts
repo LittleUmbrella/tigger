@@ -1,7 +1,7 @@
 import { DatabaseManager, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
-import { RestClientV5 } from '../utils/bybitClient.js';
+import { RestClientV5 } from 'bybit-api';
 
 /**
  * Helper function to close a position
