@@ -587,28 +587,29 @@ async function recalculateQuantitiesHistorically(
         decimalPrecision: number
       ): number[] => {
         if (numTPs === 0) return [];
+        if (numTPs === 1) {
+          // Round down for single TP
+          const multiplier = Math.pow(10, decimalPrecision);
+          return [Math.floor(totalQty * multiplier) / multiplier];
+        }
         if (totalQty <= 0) return Array(numTPs).fill(0);
         
-        const qtyPerTP = totalQty / numTPs;
-        const roundedQty = Math.floor(qtyPerTP * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
-        const quantities = Array(numTPs).fill(roundedQty);
-        const totalDistributed = roundedQty * numTPs;
-        const remainder = totalQty - totalDistributed;
+        // Calculate base quantity per TP
+        const baseQty = totalQty / numTPs;
+        const multiplier = Math.pow(10, decimalPrecision);
         
-        // If rounded quantity is 0 but we have a positive total, put all quantity in first TP
-        if (roundedQty === 0 && totalQty > 0) {
-          // Use higher precision to ensure we can represent the quantity
-          const minPrecision = Math.max(decimalPrecision, 8); // Use at least 8 decimal places
-          const firstTPQty = Math.floor(totalQty * Math.pow(10, minPrecision)) / Math.pow(10, minPrecision);
-          quantities[0] = firstTPQty;
-          // Fill rest with 0
-          for (let i = 1; i < quantities.length; i++) {
-            quantities[i] = 0;
-          }
-        } else if (remainder > 0 && quantities.length > 0) {
-          // Distribute remainder to first TP
-          quantities[0] = Math.floor((quantities[0] + remainder) * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+        // Round down all quantities except the last one
+        const quantities: number[] = [];
+        for (let i = 0; i < numTPs - 1; i++) {
+          quantities.push(Math.floor(baseQty * multiplier) / multiplier);
         }
+        
+        // Calculate remaining quantity for the last TP (max TP)
+        const allocatedQty = quantities.reduce((sum, qty) => sum + qty, 0);
+        const remainingQty = totalQty - allocatedQty;
+        
+        // Round UP the last TP to ensure whole trade quantity is accounted for
+        quantities.push(Math.ceil(remainingQty * multiplier) / multiplier);
         
         return quantities;
       };

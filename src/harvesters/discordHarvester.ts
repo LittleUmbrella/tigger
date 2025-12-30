@@ -51,9 +51,12 @@ const connectDiscord = async (
   client: Client
 ): Promise<void> => {
   try {
-    const botToken = config.botToken || process.env.DISCORD_BOT_TOKEN;
+    // Priority: envVarNames > botToken (deprecated) > default DISCORD_BOT_TOKEN env var
+    const botToken = config.envVarNames?.botToken 
+      ? process.env[config.envVarNames.botToken] 
+      : (config.botToken || process.env.DISCORD_BOT_TOKEN);
     if (!botToken) {
-      throw new Error('DISCORD_BOT_TOKEN environment variable or botToken in config is required');
+      throw new Error('Discord bot token required: set envVarNames.botToken in config, or botToken in config, or DISCORD_BOT_TOKEN environment variable');
     }
     
     await client.login(botToken);

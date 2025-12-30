@@ -1,6 +1,6 @@
 import { DatabaseManager, Message, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
-import { RestClientV5 } from 'bybit-api';
+import { RestClientV5 } from '../utils/bybitClient.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 
 /**

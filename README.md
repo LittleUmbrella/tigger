@@ -101,9 +101,11 @@ The configuration file has four main sections:
    - `platform`: Platform type - `"telegram"` or `"discord"` (default: `"telegram"` for backward compatibility)
    - **Telegram-specific fields**:
      - `apiId`: Telegram API ID (can also use `TG_API_ID` env var)
-     - `accessHash`: Optional access hash for private channels
+     - `envVarNames.accessHash`: Name of environment variable containing Telegram access hash (for private channels)
+     - `accessHash`: @deprecated Use envVarNames.accessHash instead
    - **Discord-specific fields**:
-     - `botToken`: Discord bot token (can also use `DISCORD_BOT_TOKEN` env var)
+     - `envVarNames.botToken`: Name of environment variable containing Discord bot token
+     - `botToken`: @deprecated Use envVarNames.botToken instead (fallback to `DISCORD_BOT_TOKEN` env var still works)
      - `guildId`: Optional Discord server/guild ID (can be inferred from channel)
    - `pollInterval`: Polling interval in milliseconds (default: 5000)
    - `downloadImages`: Whether to download and store images from messages (default: false)
@@ -220,7 +222,9 @@ Discord channels are supported using Discord.js. Configure a harvester with `pla
       "name": "discord-signals",
       "channel": "1234567890123456789",
       "platform": "discord",
-      "botToken": "your-bot-token",
+      "envVarNames": {
+        "botToken": "DISCORD_BOT_TOKEN"
+      },
       "pollInterval": 5000
     }
   ]

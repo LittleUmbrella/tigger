@@ -1,19 +1,26 @@
 {
+  "_comment": "This config file is safe to commit to version control. Sensitive values (accessHash, botToken, API keys) use envVarNames to reference environment variables.",
   "harvesters": [
     {
       "name": "main_harvester",
       "channel": "your_telegram_channel",
       "platform": "telegram",
       "apiId": 12345678,
-      "accessHash": "optional_access_hash_for_private_channels",
+      "envVarNames": {
+        "accessHash": "TELEGRAM_ACCESS_HASH"
+      },
       "pollInterval": 5000,
-      "downloadImages": false
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
     },
     {
       "name": "discord_harvester",
       "channel": "1234567890123456789",
       "platform": "discord",
-      "botToken": "your_discord_bot_token",
+      "envVarNames": {
+        "botToken": "DISCORD_BOT_TOKEN"
+      },
       "pollInterval": 5000,
       "downloadImages": false
     }
@@ -39,23 +46,18 @@
       "name": "main",
       "exchange": "bybit",
       "testnet": false,
-      "apiKey": "your_api_key_here",
-      "apiSecret": "your_api_secret_here"
+      "envVarNames": {
+        "apiKey": "BYBIT_API_KEY",
+        "apiSecret": "BYBIT_API_SECRET"
+      }
     },
     {
       "name": "testnet",
       "exchange": "bybit",
       "testnet": true,
-      "apiKey": "your_testnet_api_key_here",
-      "apiSecret": "your_testnet_api_secret_here"
-    },
-    {
-      "name": "main_env",
-      "exchange": "bybit",
-      "testnet": false,
-      "envVars": {
-        "apiKey": "BYBIT_API_KEY",
-        "apiSecret": "BYBIT_API_SECRET"
+      "envVarNames": {
+        "apiKey": "BYBIT_TESTNET_API_KEY",
+        "apiSecret": "BYBIT_TESTNET_API_SECRET"
       }
     }
   ],

@@ -1,9 +1,9 @@
-import { RestClientV5 } from 'bybit-api';
+import { RestClientV5 } from '../utils/bybitClient.js';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision, roundPrice, roundQuantity } from '../utils/positionSizing.js';
 import dayjs from 'dayjs';
 
 /**
@@ -20,9 +20,11 @@ export interface BybitInitiatorConfig {
  */
 const getAccountCredentials = (account: AccountConfig | null, fallbackTestnet: boolean = false): { apiKey: string | undefined; apiSecret: string | undefined; testnet: boolean } => {
   if (account) {
-    // Use account config credentials, with fallback to env vars if specified
-    const apiKey = account.apiKey || (account.envVars?.apiKey ? process.env[account.envVars.apiKey] : process.env.BYBIT_API_KEY);
-    const apiSecret = account.apiSecret || (account.envVars?.apiSecret ? process.env[account.envVars.apiSecret] : process.env.BYBIT_API_SECRET);
+    // Priority: envVarNames > envVars (backward compat) > apiKey/apiSecret (deprecated) > default env vars
+    const envVarNameForKey = account.envVarNames?.apiKey || account.envVars?.apiKey;
+    const envVarNameForSecret = account.envVarNames?.apiSecret || account.envVars?.apiSecret;
+    const apiKey = envVarNameForKey ? process.env[envVarNameForKey] : (account.apiKey || process.env.BYBIT_API_KEY);
+    const apiSecret = envVarNameForSecret ? process.env[envVarNameForSecret] : (account.apiSecret || process.env.BYBIT_API_SECRET);
     return {
       apiKey,
       apiSecret,
@@ -74,7 +76,7 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
 };
 
 /**
- * Distribute quantity evenly across take profits, rounding with highest amount in first TP
+ * Distribute quantity evenly across take profits, rounding up the last TP (max TP) to ensure whole trade quantity is accounted for
  */
 const distributeQuantityAcrossTPs = (
   totalQty: number,
@@ -82,26 +84,23 @@ const distributeQuantityAcrossTPs = (
   decimalPrecision: number
 ): number[] => {
   if (numTPs === 0) return [];
-  if (numTPs === 1) return [totalQty];
+  if (numTPs === 1) return [roundQuantity(totalQty, decimalPrecision, false)];
   
   // Calculate base quantity per TP
   const baseQty = totalQty / numTPs;
   
-  // Round to specified decimal places
-  const roundToPrecision = (value: number): number => {
-    const multiplier = Math.pow(10, decimalPrecision);
-    return Math.round(value * multiplier) / multiplier;
-  };
+  // Round down all quantities except the last one
+  const roundedQuantities: number[] = [];
+  for (let i = 0; i < numTPs - 1; i++) {
+    roundedQuantities.push(roundQuantity(baseQty, decimalPrecision, false));
+  }
   
-  // Round all quantities
-  const roundedQuantities = Array(numTPs).fill(0).map(() => roundToPrecision(baseQty));
+  // Calculate remaining quantity for the last TP (max TP)
+  const allocatedQty = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
+  const remainingQty = totalQty - allocatedQty;
   
-  // Calculate total rounded quantity
-  const totalRounded = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
-  
-  // Adjust first TP to account for rounding differences (highest amount)
-  const difference = totalQty - totalRounded;
-  roundedQuantities[0] = roundToPrecision(roundedQuantities[0] + difference);
+  // Round UP the last TP to ensure whole trade quantity is accounted for
+  roundedQuantities.push(roundQuantity(remainingQty, decimalPrecision, true));
   
   return roundedQuantities;
 };
@@ -229,8 +228,11 @@ const executeTradeForAccount = async (
       baseLeverage
     );
     
-    // Get decimal precision from exchange symbol info
-    let decimalPrecision = 2; // default fallback
+    // Get precision info from exchange symbol info
+    let decimalPrecision = 2; // default fallback for quantity
+    let pricePrecision: number | undefined = undefined;
+    let tickSize: number | undefined = undefined;
+    
     if (bybitClient) {
       const symbolInfo = await getSymbolInfo(bybitClient, symbol);
       if (symbolInfo?.qtyPrecision !== undefined) {
@@ -239,22 +241,37 @@ const executeTradeForAccount = async (
         // Fallback to inferring from entry price if symbol info not available
         decimalPrecision = getDecimalPrecision(entryPrice);
       }
+      pricePrecision = symbolInfo?.pricePrecision;
+      // Note: tickSize would need to be extracted from symbolInfo if available
+      // For now, we'll use pricePrecision for rounding
     } else if (entryPrice && entryPrice > 0) {
       decimalPrecision = getDecimalPrecision(entryPrice);
+      pricePrecision = getDecimalPrecision(entryPrice);
     }
     
-    // Calculate quantity with exchange-provided precision
-    const qty = calculateQuantity(positionSize, entryPrice, decimalPrecision);
+    // Round entry price to exchange precision
+    const roundedEntryPrice = roundPrice(entryPrice, pricePrecision, tickSize);
+    
+    // Calculate quantity with exchange-provided precision (using rounded entry price)
+    const qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
+
+    // Round stop loss to exchange precision
+    const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
+      ? roundPrice(order.stopLoss, pricePrecision, tickSize)
+      : order.stopLoss;
 
     logger.info('Calculated trade parameters', {
       channel,
       symbol,
       side,
       qty,
-      entryPrice: entryPrice,
+      entryPrice: roundedEntryPrice,
+      originalEntryPrice: entryPrice,
+      stopLoss: roundedStopLoss,
       leverage: effectiveLeverage,
       baseLeverage,
-      decimalPrecision
+      decimalPrecision,
+      pricePrecision
     });
 
     // Determine order type - use Market if original entry price was 0 or not provided
@@ -275,14 +292,14 @@ const executeTradeForAccount = async (
       positionIdx: 0,
     };
 
-    // Only add price for limit orders
+    // Only add price for limit orders (use rounded price)
     if (!isMarketOrder) {
-      orderParams.price = entryPrice.toString();
+      orderParams.price = roundedEntryPrice.toString();
     }
 
-    // Add stop loss to initial order if available (Bybit supports this)
-    if (order.stopLoss && order.stopLoss > 0) {
-      orderParams.stopLoss = order.stopLoss.toString();
+    // Add stop loss to initial order if available (Bybit supports this) - use rounded price
+    if (roundedStopLoss && roundedStopLoss > 0) {
+      orderParams.stopLoss = roundedStopLoss.toString();
     }
 
     let orderId: string | null = null;
@@ -337,12 +354,12 @@ const executeTradeForAccount = async (
           await bybitClient.setTradingStop({
             category: 'linear',
             symbol: symbol,
-            stopLoss: order.stopLoss.toString(),
+            stopLoss: roundedStopLoss.toString(),
             positionIdx: 0
           });
           logger.info('Stop loss verified/set', {
             symbol,
-            stopLoss: order.stopLoss
+            stopLoss: roundedStopLoss
           });
         } catch (error) {
           logger.warn('Failed to set/verify stop loss', {
@@ -381,9 +398,17 @@ const executeTradeForAccount = async (
         }
       }
 
-      // Place take profit orders using batch placement if available
+      // Round TP prices to exchange precision (declare outside if block for use in trade storage)
+      let roundedTPPrices: number[] | undefined = undefined;
       if (order.takeProfits && order.takeProfits.length > 0) {
-        // Distribute quantity evenly across TPs
+        roundedTPPrices = order.takeProfits.map(tpPrice => 
+          roundPrice(tpPrice, pricePrecision, tickSize)
+        );
+      }
+
+      // Place take profit orders using batch placement if available
+      if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices) {
+        // Distribute quantity evenly across TPs (last TP rounded up)
         const tpQuantities = distributeQuantityAcrossTPs(
           qty,
           order.takeProfits.length,
@@ -394,7 +419,7 @@ const executeTradeForAccount = async (
         const tpSide = order.signalType === 'long' ? 'Sell' : 'Buy';
 
         // Prepare batch order requests
-        const batchOrders = order.takeProfits.map((tpPrice, i) => ({
+        const batchOrders = roundedTPPrices.map((tpPrice, i) => ({
           category: 'linear' as const,
           symbol: symbol,
           side: tpSide as 'Buy' | 'Sell',
@@ -425,7 +450,7 @@ const executeTradeForAccount = async (
                   tpOrderIds.push({
                     index: i,
                     orderId: result.orderId,
-                    price: order.takeProfits[i],
+                    price: roundedTPPrices[i],
                     quantity: tpQuantities[i]
                   });
                 }
@@ -454,8 +479,8 @@ const executeTradeForAccount = async (
           let tpSuccessCount = 0;
           const tpErrors: Array<{ index: number; error: string }> = [];
 
-          for (let i = 0; i < order.takeProfits.length; i++) {
-            const tpPrice = order.takeProfits[i];
+          for (let i = 0; i < roundedTPPrices.length; i++) {
+            const tpPrice = roundedTPPrices[i];
             const tpQty = tpQuantities[i];
 
             try {
@@ -565,16 +590,16 @@ const executeTradeForAccount = async (
       tpOrdersPlaced: !isSimulation && order.takeProfits && order.takeProfits.length > 0
     });
 
-    // Store trade in database with account name
+    // Store trade in database with account name (use rounded prices)
     const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
     const tradeId = await db.insertTrade({
       message_id: message.message_id,
       channel: channel,
       trading_pair: order.tradingPair,
       leverage: effectiveLeverage,
-      entry_price: entryPrice,
-      stop_loss: order.stopLoss,
-      take_profits: JSON.stringify(order.takeProfits),
+      entry_price: roundedEntryPrice,
+      stop_loss: roundedStopLoss || order.stopLoss,
+      take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
       risk_percentage: riskPercentage,
       quantity: qty,
       exchange: 'bybit',
@@ -585,13 +610,13 @@ const executeTradeForAccount = async (
       expires_at: expiresAt
     });
 
-    // Store entry order
+    // Store entry order (use rounded price)
     try {
       await db.insertOrder({
         trade_id: tradeId,
         order_type: 'entry',
         order_id: orderId || undefined,
-        price: entryPrice,
+        price: roundedEntryPrice,
         quantity: qty,
         status: 'pending'
       });
@@ -602,13 +627,13 @@ const executeTradeForAccount = async (
       });
     }
 
-    // Store stop loss order (if not in simulation)
-    if (!isSimulation && order.stopLoss && order.stopLoss > 0) {
+    // Store stop loss order (if not in simulation, use rounded price)
+    if (!isSimulation && roundedStopLoss && roundedStopLoss > 0) {
       try {
         await db.insertOrder({
           trade_id: tradeId,
           order_type: 'stop_loss',
-          price: order.stopLoss,
+          price: roundedStopLoss,
           status: 'pending'
         });
       } catch (error) {

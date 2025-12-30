@@ -57,10 +57,15 @@ const resolveEntity = async (
   try {
     await client.getDialogs({ limit: 200 });
     
-    if (/^-?\d+$/.test(config.channel) && config.accessHash) {
+    // Priority: envVarNames > direct accessHash (deprecated) > none
+    const accessHashValue = config.envVarNames?.accessHash 
+      ? process.env[config.envVarNames.accessHash] 
+      : config.accessHash;
+    
+    if (/^-?\d+$/.test(config.channel) && accessHashValue) {
       return new Api.InputPeerChannel({
         channelId: BigInt(config.channel) as any,
-        accessHash: BigInt(config.accessHash) as any
+        accessHash: BigInt(accessHashValue) as any
       });
     }
     
@@ -110,7 +115,8 @@ const fetchNewMessages = async (
   client: TelegramClient,
   entity: Api.TypeInputPeer,
   db: DatabaseManager,
-  lastMessageId: number
+  lastMessageId: number,
+  isFirstFetchAfterStartup: boolean = false
 ): Promise<number> => {
   try {
     // For forward polling (new messages), always get the most recent messages
@@ -136,6 +142,13 @@ const fetchNewMessages = async (
     let newLastMessageId = lastMessageId;
     let newMessagesCount = 0;
     let skippedCount = 0;
+    let skippedOldCount = 0;
+
+    // On first startup, filter out messages older than threshold
+    const maxAgeMinutes = config.maxMessageAgeMinutes ?? 10;
+    const skipOldMessages = config.skipOldMessagesOnStartup !== false; // Default to true
+    const now = Date.now();
+    const maxAgeMs = maxAgeMinutes * 60 * 1000;
 
     for (const msg of ordered) {
       if (!('message' in msg) || !msg.message) {
@@ -159,13 +172,6 @@ const fetchNewMessages = async (
         continue;
       }
 
-      // Note: We don't skip based on lastMessageId here because:
-      // 1. Telegram returns messages newest-first, we reverse to process oldest-first
-      // 2. After reversing, we process messages in order: oldest (lowest ID) to newest (highest ID)
-      // 3. If we skip based on lastMessageId, we'd incorrectly skip older messages that come after newer ones
-      // 4. The database UNIQUE constraint on (message_id, channel) will handle duplicates
-      // 5. We track newLastMessageId to know the highest ID we've processed in this batch
-
       let msgDate: Date;
       if ('date' in msg && msg.date) {
         const dateValue = msg.date as any;
@@ -178,6 +184,29 @@ const fetchNewMessages = async (
       } else {
         msgDate = new Date();
       }
+
+      // Skip old messages on first fetch after startup (prevents processing stale messages after pause/restart)
+      if (isFirstFetchAfterStartup && skipOldMessages) {
+        const msgAge = now - msgDate.getTime();
+        if (msgAge > maxAgeMs) {
+          skippedOldCount++;
+          skippedCount++;
+          logger.debug('Skipping old message on first fetch after startup', {
+            channel: config.channel,
+            messageId: msgId,
+            ageMinutes: Math.round(msgAge / 60000),
+            maxAgeMinutes
+          });
+          continue;
+        }
+      }
+
+      // Note: We don't skip based on lastMessageId here because:
+      // 1. Telegram returns messages newest-first, we reverse to process oldest-first
+      // 2. After reversing, we process messages in order: oldest (lowest ID) to newest (highest ID)
+      // 3. If we skip based on lastMessageId, we'd incorrectly skip older messages that come after newer ones
+      // 4. The database UNIQUE constraint on (message_id, channel) will handle duplicates
+      // 5. We track newLastMessageId to know the highest ID we've processed in this batch
 
       // Extract reply_to information
       let replyToMessageId: number | undefined;
@@ -240,14 +269,24 @@ const fetchNewMessages = async (
         channel: config.channel,
         count: newMessagesCount,
         skipped: skippedCount,
+        skippedOld: skippedOldCount,
         lastMessageId: newLastMessageId
       });
     } else if (skippedCount > 0) {
-      logger.debug('All messages in batch were skipped', {
-        channel: config.channel,
-        totalMessages: messages.length,
-        skipped: skippedCount
-      });
+      if (skippedOldCount > 0) {
+        logger.info('Skipped old messages on first fetch after startup', {
+          channel: config.channel,
+          totalMessages: messages.length,
+          skippedOld: skippedOldCount,
+          maxAgeMinutes
+        });
+      } else {
+        logger.debug('All messages in batch were skipped', {
+          channel: config.channel,
+          totalMessages: messages.length,
+          skipped: skippedCount
+        });
+      }
     }
 
     return newLastMessageId;
@@ -303,6 +342,7 @@ export const startSignalHarvester = async (
 
   // Initialize lastMessageId from database to avoid reprocessing existing messages on startup
   const existingMessages = await db.getMessagesByChannel(config.channel);
+  
   if (existingMessages.length > 0) {
     const maxMessageId = Math.max(...existingMessages.map(m => m.message_id));
     lastMessageId = maxMessageId;
@@ -310,6 +350,15 @@ export const startSignalHarvester = async (
       channel: config.channel,
       lastMessageId,
       existingMessageCount: existingMessages.length
+    });
+  }
+  
+  // Log that we'll skip old messages on first fetch (prevents processing stale messages after pause/restart)
+  const skipOldMessages = config.skipOldMessagesOnStartup !== false;
+  if (skipOldMessages) {
+    logger.info('Will skip old messages on first fetch after startup', {
+      channel: config.channel,
+      maxMessageAgeMinutes: config.maxMessageAgeMinutes ?? 10
     });
   }
 
@@ -387,11 +436,17 @@ export const startSignalHarvester = async (
 
   const pollInterval = config.pollInterval || 5000;
 
+  // Track if this is the first fetch after startup
+  // This ensures we skip old messages even if the bot was paused and restarted
+  let isFirstFetch = true;
+
   const harvestLoop = async (): Promise<void> => {
     while (running) {
       try {
         if (entity) {
-          lastMessageId = await fetchNewMessages(config, client, entity, db, lastMessageId);
+          const isFirstFetchAfterStartup = isFirstFetch;
+          lastMessageId = await fetchNewMessages(config, client, entity, db, lastMessageId, isFirstFetchAfterStartup);
+          isFirstFetch = false;
         }
         await sleep(pollInterval);
       } catch (error) {

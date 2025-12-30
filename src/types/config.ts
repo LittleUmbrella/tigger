@@ -1,3 +1,10 @@
+/**
+ * Harvester configuration
+ * 
+ * IMPORTANT: For security, use envVarNames to reference environment variables instead of
+ * storing credentials directly in config.json. This allows config.json to be safely
+ * committed to version control.
+ */
 export interface HarvesterConfig {
   name: string;
   channel: string;
@@ -6,12 +13,21 @@ export interface HarvesterConfig {
   apiId?: number; // Required for Telegram
   phone?: string;
   password?: string;
-  accessHash?: string;
-  // Discord-specific fields
-  botToken?: string; // Discord bot token (can also use DISCORD_BOT_TOKEN env var)
+  // Environment variable names that contain sensitive harvester credentials
+  // These should be the names of environment variables (e.g., 'TELEGRAM_ACCESS_HASH'), not the actual values
+  envVarNames?: {
+    accessHash?: string; // Name of environment variable containing Telegram access hash (for private channels)
+    botToken?: string; // Name of environment variable containing Discord bot token
+  };
+  // Deprecated: Direct credentials (for backward compatibility only)
+  // Use envVarNames instead for security
+  accessHash?: string; // @deprecated Use envVarNames.accessHash instead
+  botToken?: string; // @deprecated Use envVarNames.botToken instead
   guildId?: string; // Discord server/guild ID (optional, can be inferred from channel)
   pollInterval?: number; // milliseconds
   downloadImages?: boolean; // Whether to download and store images from messages (default: false)
+  skipOldMessagesOnStartup?: boolean; // Skip messages older than maxMessageAgeMinutes on first startup (default: true)
+  maxMessageAgeMinutes?: number; // Maximum age of messages to process on first startup in minutes (default: 10)
 }
 
 export interface OllamaConfig {
@@ -37,15 +53,28 @@ export interface ParserConfig {
 
 /**
  * Exchange account configuration
+ * 
+ * IMPORTANT: For security, use envVarNames to reference environment variables instead of
+ * storing credentials directly in config.json. This allows config.json to be safely
+ * committed to version control.
  */
 export interface AccountConfig {
   name: string; // Unique name for this account (e.g., 'main', 'account1', 'testnet')
   exchange: 'bybit' | string; // Exchange type
-  apiKey?: string; // API key (can also use environment variables)
-  apiSecret?: string; // API secret (can also use environment variables)
   testnet?: boolean; // Whether to use testnet
-  // Environment variable names to use if apiKey/apiSecret not provided
+  // Environment variable names that contain the API credentials
+  // These should be the names of environment variables (e.g., 'BYBIT_API_KEY'), not the actual values
   // Format: { apiKey: 'BYBIT_API_KEY', apiSecret: 'BYBIT_API_SECRET' }
+  // Using envVarNames allows config.json to be safely committed to version control
+  envVarNames?: {
+    apiKey: string; // Name of environment variable containing the API key
+    apiSecret: string; // Name of environment variable containing the API secret
+  };
+  // Deprecated: Direct API credentials (for backward compatibility only)
+  // Use envVarNames instead for security
+  apiKey?: string; // @deprecated Use envVarNames.apiKey instead
+  apiSecret?: string; // @deprecated Use envVarNames.apiSecret instead
+  // Deprecated: Old field name (for backward compatibility only)
   envVars?: {
     apiKey?: string;
     apiSecret?: string;

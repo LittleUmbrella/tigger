@@ -18,6 +18,32 @@ export const getDecimalPrecision = (price: number): number => {
 };
 
 /**
+ * Round price to exchange tick size/precision
+ * 
+ * @param price - Price to round
+ * @param pricePrecision - Decimal precision for price (from exchange symbol info)
+ * @param tickSize - Optional tick size (if provided, rounds to nearest tick)
+ * @returns Rounded price respecting exchange precision
+ */
+export const roundPrice = (
+  price: number,
+  pricePrecision?: number,
+  tickSize?: number
+): number => {
+  if (!isFinite(price)) return price;
+  
+  // If tick size is provided, round to nearest tick
+  if (tickSize !== undefined && tickSize > 0) {
+    return Math.round(price / tickSize) * tickSize;
+  }
+  
+  // Otherwise, round to specified decimal precision
+  const precision = pricePrecision !== undefined ? pricePrecision : getDecimalPrecision(price);
+  const multiplier = Math.pow(10, precision);
+  return Math.round(price * multiplier) / multiplier;
+};
+
+/**
  * Calculate position size based on risk percentage, accounting for leverage
  * 
  * @param balance - Account balance
@@ -79,7 +105,7 @@ export const calculatePositionSize = (
  * @param positionSize - Position size in quote currency
  * @param entryPrice - Entry price
  * @param decimalPrecision - Decimal precision for rounding (should come from exchange symbol info)
- * @returns Quantity rounded to appropriate precision
+ * @returns Quantity rounded down to appropriate precision (using floor to ensure valid order size)
  */
 export const calculateQuantity = (
   positionSize: number,
@@ -87,7 +113,8 @@ export const calculateQuantity = (
   decimalPrecision: number
 ): number => {
   const rawQuantity = positionSize / entryPrice;
-  const roundedQuantity = Math.floor(rawQuantity * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision);
+  const multiplier = Math.pow(10, decimalPrecision);
+  const roundedQuantity = Math.floor(rawQuantity * multiplier) / multiplier;
   
   // If quantity rounds to 0 but we have a valid position size, log a warning
   // This shouldn't happen if precision is correctly set from exchange
@@ -102,5 +129,28 @@ export const calculateQuantity = (
   }
   
   return roundedQuantity;
+};
+
+/**
+ * Round quantity to exchange precision
+ * 
+ * @param quantity - Quantity to round
+ * @param decimalPrecision - Decimal precision for quantity (from exchange symbol info)
+ * @param roundUp - If true, round up (ceil), otherwise round down (floor). Default: false
+ * @returns Rounded quantity respecting exchange precision
+ */
+export const roundQuantity = (
+  quantity: number,
+  decimalPrecision: number,
+  roundUp: boolean = false
+): number => {
+  if (!isFinite(quantity)) return quantity;
+  
+  const multiplier = Math.pow(10, decimalPrecision);
+  if (roundUp) {
+    return Math.ceil(quantity * multiplier) / multiplier;
+  } else {
+    return Math.floor(quantity * multiplier) / multiplier;
+  }
 };
 

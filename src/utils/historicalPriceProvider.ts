@@ -1,6 +1,6 @@
 import dayjs from 'dayjs';
 import { logger } from './logger.js';
-import { RestClientV5 } from 'bybit-api';
+import { RestClientV5 } from './bybitClient.js';
 import { RateLimiter, createBybitPublicRateLimiter } from './rateLimiter.js';
 import { getCachedResponse, setCachedResponse } from './bybitCache.js';
 

@@ -10,25 +10,53 @@ services:
     environment:
       - CONFIG_PATH=/app/config.json
       - LOG_LEVEL=${LOG_LEVEL:-info}
+      # PostgreSQL connection string (used if database.type is 'postgresql' in config.json)
+      # Format: postgresql://user:password@host:port/database
+      - DATABASE_URL=postgresql://tigger_user:tigger_password@postgres:5432/tigger_db
     env_file:
       - .env
     networks:
       - tigger-network
     depends_on:
-      - ollama  # Optional: only needed if using containerized ollama
+      postgres:
+        condition: service_healthy
+      # ollama:  # Optional: only needed if using containerized ollama
+
+  # PostgreSQL database service
+  postgres:
+    image: postgres:16-alpine
+    container_name: tigger-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: tigger_user
+      POSTGRES_PASSWORD: tigger_password
+      POSTGRES_DB: tigger_db
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    # Port mapping removed - containers communicate via Docker network
+    # Uncomment below if you need external access from host (use a free port):
+    # ports:
+    #   - "15432:5432"
+    networks:
+      - tigger-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tigger_user -d tigger_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   # Ollama service for LLM fallback parser (optional)
   # Comment out if you're running ollama on the host machine
-  ollama:
-    image: ollama/ollama:latest
-    container_name: tigger-ollama
-    restart: unless-stopped
-    volumes:
-      - ollama-data:/root/.ollama
-    ports:
-      - "11434:11434"
-    networks:
-      - tigger-network
+  # ollama:
+  #   image: ollama/ollama:latest
+  #   container_name: tigger-ollama
+  #   restart: unless-stopped
+  #   volumes:
+  #     - ollama-data:/root/.ollama
+  #   ports:
+  #     - "11434:11434"
+  #   networks:
+  #     - tigger-network
     # Uncomment to use GPU (requires nvidia-docker)
     # deploy:
     #   resources:
@@ -39,6 +67,7 @@ services:
     #           capabilities: [gpu]
 
 volumes:
+  postgres-data:
   ollama-data:
 
 networks:

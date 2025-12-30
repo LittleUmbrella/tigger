@@ -100,6 +100,119 @@ If you're running Ollama on your host machine (outside Docker):
    }
    ```
 
+### PostgreSQL Database Configuration
+
+The `docker-compose.yml` includes a PostgreSQL service for testing with PostgreSQL (matching DigitalOcean production setup).
+
+#### Connection String Format
+
+PostgreSQL connection strings follow this format:
+```
+postgresql://[user]:[password]@[host]:[port]/[database]
+```
+
+**Components:**
+- `user`: PostgreSQL username
+- `password`: PostgreSQL password
+- `host`: Database hostname or IP address
+- `port`: PostgreSQL port (default: 5432)
+- `database`: Database name
+
+#### Docker Compose Setup
+
+**IMPORTANT: For security, use environment variables for database connection strings. Never put credentials in `config.json`.**
+
+The `DATABASE_URL` environment variable is already set in `docker-compose.yml`:
+```
+postgresql://tigger_user:tigger_password@postgres:5432/tigger_db
+```
+
+**To use PostgreSQL in docker-compose:**
+
+1. **Update your `config.json`** (safe to commit - no credentials):
+   ```json
+   {
+     "database": {
+       "type": "postgresql"
+     }
+   }
+   ```
+   
+   The bot will automatically read the connection string from the `DATABASE_URL` environment variable.
+
+2. **Start services:**
+   ```bash
+   docker-compose up -d
+   ```
+
+**Note:** 
+- The bot will automatically create all required database tables on first run
+- The `DATABASE_URL` environment variable takes precedence over any `url` field in config.json
+- For production, set `DATABASE_URL` in your hosting platform's environment variables
+
+#### Connection String Examples
+
+**Set these as `DATABASE_URL` environment variable (never in config.json):**
+
+**Docker Compose (local testing):**
+```env
+DATABASE_URL=postgresql://tigger_user:tigger_password@postgres:5432/tigger_db
+```
+
+**Supabase (production):**
+```env
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@db.xxxxx.supabase.co:5432/postgres
+```
+
+**Supabase Connection Pooler (recommended for production):**
+```env
+DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@db.xxxxx.supabase.co:6543/postgres
+```
+
+**Neon (production):**
+```env
+DATABASE_URL=postgresql://user:password@ep-xxxxx.us-east-2.aws.neon.tech:5432/neondb
+```
+
+**DigitalOcean Managed PostgreSQL:**
+```env
+DATABASE_URL=postgresql://doadmin:password@db-postgresql-xxxxx-do-user-xxxxx-0.db.ondigitalocean.com:25060/defaultdb?sslmode=require
+```
+
+**Local PostgreSQL (host machine):**
+```env
+DATABASE_URL=postgresql://postgres:password@host.docker.internal:5432/tigger_db
+```
+
+**Your `config.json` should only specify the database type:**
+```json
+{
+  "database": {
+    "type": "postgresql"
+  }
+}
+```
+
+#### Security Notes
+
+- **Never put connection strings with passwords in `config.json`** - it should be safe to commit to version control
+- **Always use environment variables (`DATABASE_URL`)** for database connection strings
+- The docker-compose credentials (`tigger_user`/`tigger_password`) are fine for local development only
+- For production, use strong passwords and consider connection pooling
+- The `DATABASE_URL` environment variable takes precedence over any `url` field in config.json
+
+#### Accessing PostgreSQL from Host Machine
+
+The PostgreSQL port is exposed on `localhost:5432`, so you can connect from your host machine:
+
+```bash
+# Using psql
+psql -h localhost -p 5432 -U tigger_user -d tigger_db
+
+# Using connection string
+psql "postgresql://tigger_user:tigger_password@localhost:5432/tigger_db"
+```
+
 ### Environment Variables
 
 Create a `.env` file in the project root:
@@ -114,20 +227,23 @@ BYBIT_API_KEY=your_api_key
 BYBIT_API_SECRET=your_api_secret
 
 # Database (optional, defaults to SQLite)
+# For SQLite:
 DATABASE_TYPE=sqlite
 DATABASE_PATH=/app/data/trading_bot.db
 
-# Or for PostgreSQL
-# DATABASE_TYPE=postgresql
-# DATABASE_URL=postgresql://user:password@host:5432/dbname
+# For PostgreSQL (docker-compose):
+# DATABASE_URL is already set in docker-compose.yml
+# Or override it here (NEVER put this in config.json):
+# DATABASE_URL=postgresql://tigger_user:tigger_password@postgres:5432/tigger_db
 ```
 
 ### Volumes
 
 The following directories are mounted as volumes:
 - `./config.json` → `/app/config.json` (read-only)
-- `./data` → `/app/data` (database files)
+- `./data` → `/app/data` (database files, only used for SQLite)
 - `./logs` → `/app/logs` (log files)
+- `postgres-data` → PostgreSQL data (managed by Docker, persists database between restarts)
 
 ### GPU Support (Optional)
 
@@ -154,6 +270,19 @@ If you have an NVIDIA GPU and want to use it for Ollama:
    ```
 
 ### Troubleshooting
+
+**PostgreSQL connection errors:**
+- Check that postgres service is running: `docker-compose ps`
+- Verify the connection string in config.json matches docker-compose setup
+- Check PostgreSQL logs: `docker-compose logs postgres`
+- Verify health check: `docker-compose ps` should show postgres as "healthy"
+- Test connection: `docker exec -it tigger-bot psql "postgresql://tigger_user:tigger_password@postgres:5432/tigger_db" -c "SELECT 1;"`
+
+**Database schema not created:**
+- The bot automatically creates schema on first run
+- Check bot logs: `docker-compose logs -f tigger-bot`
+- Look for "Database initialized" message
+- If schema creation fails, check PostgreSQL logs for errors
 
 **Ollama connection errors:**
 - Check that ollama service is running: `docker-compose ps`
