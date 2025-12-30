@@ -1,6 +1,6 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
-import { RestClientV5 } from '../utils/bybitClient.js';
+import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
 
 /**

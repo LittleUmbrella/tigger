@@ -53,7 +53,7 @@
       "type": "bybit",
       "testnet": true,
       "pollInterval": 3000,
-      "entryTimeoutDays": 7
+      "entryTimeoutDays": 1
     }
   ],
   "channels": [

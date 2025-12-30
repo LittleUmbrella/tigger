@@ -15,7 +15,7 @@ import '../managers/index.js'; // Register built-in managers
 import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
-import { RestClientV5 } from '../utils/bybitClient.js';
+import { RestClientV5 } from 'bybit-api';
 import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 
 // Register built-in parsers

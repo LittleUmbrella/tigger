@@ -2,7 +2,7 @@ import { MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
-import { RestClientV5 } from '../utils/bybitClient.js';
+import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
