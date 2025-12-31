@@ -1,12 +1,12 @@
 {
-  "_comment": "This config file is safe to commit to version control. Sensitive values (accessHash, botToken, API keys) use envVarNames to reference environment variables.",
+  "_comment": "This config file is safe to commit to version control. Sensitive values (apiId, apiHash, accessHash, botToken, API keys) should use environment variables. apiId can be set via TG_API_ID env var or removed from config.",
   "harvesters": [
     {
       "name": "main_harvester",
       "channel": "your_telegram_channel",
       "platform": "telegram",
-      "apiId": 12345678,
       "envVarNames": {
+        "apiId": "TG_API_ID",
         "accessHash": "TELEGRAM_ACCESS_HASH"
       },
       "pollInterval": 5000,

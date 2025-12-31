@@ -805,7 +805,7 @@ async function resolveTelegramEntity(
         const chat = res.chats[0];
         if (chat instanceof Api.Chat || chat instanceof Api.Channel) {
           return new Api.InputPeerChannel({
-            channelId: (chat as Api.Channel).id,
+            channelId: BigInt(String((chat as Api.Channel).id)) as any,
             accessHash: (chat as Api.Channel).accessHash || BigInt(0) as any
           });
         }
@@ -817,7 +817,7 @@ async function resolveTelegramEntity(
     const entity = await client.getEntity(channel);
     if (entity instanceof Api.Channel) {
       return new Api.InputPeerChannel({
-        channelId: entity.id,
+        channelId: BigInt(String(entity.id)) as any,
         accessHash: entity.accessHash || BigInt(0) as any
       });
     }

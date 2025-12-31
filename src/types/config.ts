@@ -16,6 +16,7 @@ export interface HarvesterConfig {
   // Environment variable names that contain sensitive harvester credentials
   // These should be the names of environment variables (e.g., 'TELEGRAM_ACCESS_HASH'), not the actual values
   envVarNames?: {
+    apiId?: string; // Name of environment variable containing Telegram API ID
     accessHash?: string; // Name of environment variable containing Telegram access hash (for private channels)
     botToken?: string; // Name of environment variable containing Discord bot token
   };
