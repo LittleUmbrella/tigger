@@ -12,8 +12,28 @@ await fs.ensureDir('logs');
 // Load configuration
 const configPath = process.env.CONFIG_PATH || 'config.json';
 
+// If CONFIG_JSON environment variable is set, write it to config.json
+// This is useful for cloud deployments (e.g., DigitalOcean App Platform)
+if (process.env.CONFIG_JSON && !fs.existsSync(configPath)) {
+  try {
+    await fs.writeFile(configPath, process.env.CONFIG_JSON, 'utf-8');
+    logger.info('Configuration file created from CONFIG_JSON environment variable', {
+      path: configPath
+    });
+  } catch (error) {
+    logger.error('Failed to write configuration from CONFIG_JSON', {
+      path: configPath,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    process.exit(1);
+  }
+}
+
 if (!fs.existsSync(configPath)) {
-  logger.error('Configuration file not found', { path: configPath });
+  logger.error('Configuration file not found', { 
+    path: configPath,
+    hint: 'Set CONFIG_JSON environment variable or ensure config.json exists'
+  });
   process.exit(1);
 }
 
