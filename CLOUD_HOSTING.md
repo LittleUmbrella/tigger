@@ -308,6 +308,7 @@ services:
     dockerfile_path: Dockerfile
     instance_count: 1
     instance_size_slug: basic-xxs
+    type: web  # Web Service (always-on) - required for continuously running bot
     envs:
       - key: NODE_ENV
         value: production
@@ -315,7 +316,10 @@ services:
       http_path: /
 ```
 
-**Note**: This is optional - DigitalOcean can auto-detect your Dockerfile.
+**Note**: 
+- This is optional - DigitalOcean can auto-detect your Dockerfile
+- The `type: web` ensures this is configured as a Web Service (always-on), not a Worker (short-lived tasks)
+- Even though the bot doesn't serve HTTP requests, Web Service is the correct type for continuously running processes
 
 ---
 
@@ -334,9 +338,9 @@ services:
 
 #### 3.2 Configure App Settings
 
-1. **Resource Type**: Select **Worker** (not Web Service)
-   - ✅ **Worker** is correct because your bot is a long-running background process
-   - ❌ **Web Service** is for HTTP servers/web apps (not applicable here)
+1. **Resource Type**: Select **Web Service** (not Worker)
+   - ✅ **Web Service** is correct because your bot is a continuously running process that needs to stay alive 24/7
+   - ❌ **Worker** is for short-lived tasks (queue processing, scheduled jobs) - not suitable for continuous operation
 2. **App Name**: `tigger-trading-bot` (or your preferred name)
 3. **Region**: Select **Bangalore (bang)** - this is the India region
 4. **Plan**: Select **Basic** plan ($5/month, 512MB RAM)
@@ -508,17 +512,17 @@ Your application should automatically connect to Supabase. Check logs for:
 
 ---
 
-### Step 8: Managing the Worker (Start/Stop/Restart)
+### Step 8: Managing the Web Service (Start/Stop/Restart)
 
-#### 8.1 Stop the Worker
+#### 8.1 Stop the Service
 
 **Via DigitalOcean Dashboard:**
 1. Go to your app in DigitalOcean dashboard
 2. Click on your app name
 3. Go to **"Components"** tab
-4. Find your Worker component
-5. Click the **"..."** (three dots) menu next to the worker
-6. Select **"Suspend"** to stop the worker
+4. Find your Web Service component
+5. Click the **"..."** (three dots) menu next to the service
+6. Select **"Suspend"** to stop the service
 
 **Via DigitalOcean CLI (doctl):**
 ```bash
@@ -531,17 +535,17 @@ doctl apps update <app-id> --spec app.yaml  # With suspended: true in spec
 - Active trades continue to be monitored (if monitor is running elsewhere)
 - No new trades will be initiated
 - Database connections are closed gracefully
-- The worker stops consuming resources (no charges while suspended)
+- The service stops consuming resources (no charges while suspended)
 
-#### 8.2 Start the Worker
+#### 8.2 Start the Service
 
 **Via DigitalOcean Dashboard:**
 1. Go to your app in DigitalOcean dashboard
 2. Click on your app name
 3. Go to **"Components"** tab
-4. Find your Worker component (it will show "Suspended" status)
-5. Click the **"..."** (three dots) menu next to the worker
-6. Select **"Resume"** to start the worker
+4. Find your Web Service component (it will show "Suspended" status)
+5. Click the **"..."** (three dots) menu next to the service
+6. Select **"Resume"** to start the service
 
 **Via DigitalOcean CLI:**
 ```bash
@@ -554,17 +558,17 @@ doctl apps update <app-id> --spec app.yaml  # With suspended: false in spec
 - Harvesters start polling channels
 - Parsers begin processing messages
 - Trade monitoring resumes
-- The worker begins consuming resources again
+- The service begins consuming resources again
 
-#### 8.3 Restart the Worker
+#### 8.3 Restart the Service
 
 **Via DigitalOcean Dashboard:**
 1. Go to your app in DigitalOcean dashboard
 2. Click on your app name
 3. Go to **"Components"** tab
-4. Find your Worker component
-5. Click the **"..."** (three dots) menu next to the worker
-6. Select **"Restart"** to restart the worker
+4. Find your Web Service component
+5. Click the **"..."** (three dots) menu next to the service
+6. Select **"Restart"** to restart the service
 
 **Via DigitalOcean CLI:**
 ```bash
@@ -574,7 +578,7 @@ doctl apps create-deployment <app-id>
 **When to restart:**
 - After changing environment variables
 - After code updates (auto-restarts on git push if auto-deploy is enabled)
-- If the worker becomes unresponsive
+- If the service becomes unresponsive
 - After database connection issues
 
 **Note**: The bot handles graceful shutdown (SIGTERM/SIGINT signals), so it will:

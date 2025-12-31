@@ -2,6 +2,7 @@
 
 import 'dotenv/config';
 import fs from 'fs-extra';
+import http from 'http';
 import { BotConfig } from './types/config.js';
 import { startTradeOrchestrator } from './orchestrator/tradeOrchestrator.js';
 import { logger } from './utils/logger.js';
@@ -62,15 +63,33 @@ logger.info('Configuration loaded', {
 // Start orchestrator
 const stopOrchestrator = await startTradeOrchestrator(config);
 
+const port = process.env.PORT ? Number(process.env.PORT) : 8080;
+
+const server = http.createServer(
+  (req: http.IncomingMessage, res: http.ServerResponse) => {
+    res.end('OK');
+  }
+);
+
+server.listen(port, () => {
+  logger.info('Health check server started', { port });
+});
+
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
   logger.info('Received SIGINT, shutting down gracefully...');
+  server.close(() => {
+    logger.info('HTTP server closed');
+  });
   await stopOrchestrator();
   process.exit(0);
 });
 
 process.on('SIGTERM', async () => {
   logger.info('Received SIGTERM, shutting down gracefully...');
+  server.close(() => {
+    logger.info('HTTP server closed');
+  });
   await stopOrchestrator();
   process.exit(0);
 });
