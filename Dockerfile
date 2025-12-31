@@ -12,6 +12,9 @@ RUN npm ci
 # Copy build configuration
 COPY tsconfig.json ./
 
+# Copy config.json (must exist locally, or use CONFIG_JSON env var at runtime)
+COPY config.json ./
+
 # Copy source code (this will invalidate cache when source changes)
 # Docker uses checksums, so any file change will invalidate this layer
 COPY src/ ./src/
