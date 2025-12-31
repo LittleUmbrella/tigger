@@ -858,12 +858,50 @@ class PostgreSQLAdapter implements DatabaseAdapter {
   private pool: Pool;
 
   constructor(connectionString: string) {
+    // Parse connection string and handle IPv6 addresses
+    // DigitalOcean App Platform doesn't support IPv6, so we need to use hostname or IPv4
+    const connectionConfig = this.parseConnectionString(connectionString);
+    
     this.pool = new Pool({
-      connectionString,
+      ...connectionConfig,
       ssl: connectionString.includes('sslmode=require') || connectionString.includes('ssl=true') 
         ? { rejectUnauthorized: false } 
         : undefined,
     });
+  }
+
+  /**
+   * Parse connection string and handle IPv6 addresses
+   * If hostname is IPv6, we'll use the connectionString as-is but log a warning
+   * The user should use a hostname-based connection string from their database provider
+   */
+  private parseConnectionString(connectionString: string): { connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string } {
+    try {
+      const url = new URL(connectionString);
+      
+      // Check if hostname is an IPv6 address
+      const isIPv6 = url.hostname.includes(':') && !url.hostname.includes('.');
+      
+      if (isIPv6) {
+        logger.warn('Connection string contains IPv6 address. DigitalOcean App Platform may not support IPv6.', {
+          hostname: url.hostname,
+          hint: 'Use a hostname-based connection string (e.g., db.xxxxx.supabase.co) instead of an IP address'
+        });
+        // Still try to use it, but the connection will likely fail
+        // Return connectionString to let pg handle it
+        return { connectionString };
+      }
+      
+      // For hostname-based connections, use connectionString directly
+      // This allows pg to handle DNS resolution which will prefer IPv4 on platforms without IPv6
+      return { connectionString };
+    } catch (error) {
+      // If URL parsing fails, return connectionString as-is
+      logger.warn('Failed to parse connection string', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return { connectionString };
+    }
   }
 
   async initializeSchema(): Promise<void> {
