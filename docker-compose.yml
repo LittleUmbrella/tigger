@@ -7,12 +7,16 @@ services:
       - ./config.json:/app/config.json:ro
       - ./data:/app/data
       - ./logs:/app/logs
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
     environment:
       - CONFIG_PATH=/app/config.json
       - LOG_LEVEL=${LOG_LEVEL:-info}
       # PostgreSQL connection string (used if database.type is 'postgresql' in config.json)
+      # Defaults to local postgres service if DATABASE_URL env var is not set
       # Format: postgresql://user:password@host:port/database
-      - DATABASE_URL=postgresql://tigger_user:tigger_password@postgres:5432/tigger_db
+      - DATABASE_URL=${DATABASE_URL:-postgresql://tigger_user:tigger_password@postgres:5432/tigger_db}
     env_file:
       - .env
     networks:

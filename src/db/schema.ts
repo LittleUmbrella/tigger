@@ -860,32 +860,18 @@ class SQLiteAdapter implements DatabaseAdapter {
 }
 
 class PostgreSQLAdapter implements DatabaseAdapter {
-  private pool: Pool;
+  private pool!: Pool; // Initialized in initializeSchema, which is always called first
+  private connectionString: string;
 
   constructor(connectionString: string) {
-    // Parse connection string into separate components
-    // This allows pg to use IPv4-first DNS resolution (set via dns.setDefaultResultOrder above)
-    const connectionConfig = this.parseConnectionString(connectionString);
-    
-    // Determine SSL settings
-    const needsSSL = connectionString.includes('sslmode=require') || 
-                     connectionString.includes('ssl=true') ||
-                     connectionString.includes('supabase.co') || // Supabase requires SSL
-                     connectionString.includes('neon.tech') || // Neon requires SSL
-                     connectionConfig.sslmode === 'require';
-    
-    this.pool = new Pool({
-      ...connectionConfig,
-      ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
-    });
+    this.connectionString = connectionString;
   }
 
   /**
-   * Parse connection string into separate components
-   * This allows pg to use IPv4-first DNS resolution (via dns.setDefaultResultOrder)
-   * instead of using connectionString which might try IPv6 first
+   * Parse connection string and resolve hostname to IPv4 address
+   * Supabase now uses IPv6 by default, so we explicitly resolve to IPv4
    */
-  private parseConnectionString(connectionString: string): { connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string; sslmode?: string } {
+  private async parseConnectionString(connectionString: string): Promise<{ connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string; sslmode?: string }> {
     try {
       const url = new URL(connectionString);
       
@@ -893,17 +879,96 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       const isIPv6Address = url.hostname.includes(':') && !url.hostname.includes('.');
       
       if (isIPv6Address) {
-        logger.error('Connection string contains IPv6 address which is not supported on DigitalOcean App Platform', {
+        logger.error('Connection string contains IPv6 address which is not supported', {
           hostname: url.hostname,
-          hint: 'Your DATABASE_URL must use a hostname (e.g., db.xxxxx.supabase.co) not an IP address'
+          hint: 'Your DATABASE_URL must use a hostname (e.g., db.xxxxx.supabase.co) not an IP address. For Supabase, use the connection pooler (port 6543) or enable IPv4 add-on.'
         });
         // Return as-is - will fail but at least we logged the error
         return { connectionString };
       }
       
-      // Parse into separate components so pg uses IPv4-first DNS resolution
+      // Check if hostname is an IPv4 address
+      const isIPv4Address = /^\d+\.\d+\.\d+\.\d+$/.test(url.hostname);
+      
+      let host = url.hostname;
+      
+      // If it's a hostname (not an IP address), resolve it to IPv4
+      if (!isIPv4Address && !isIPv6Address) {
+        try {
+          logger.info('Resolving hostname to IPv4 address', { hostname: url.hostname });
+          // Try resolve4 first (direct A record lookup for IPv4)
+          try {
+            const addresses = await dns.promises.resolve4(url.hostname);
+            if (addresses.length > 0) {
+              host = addresses[0];
+              logger.info('Resolved hostname to IPv4 using resolve4', {
+                hostname: url.hostname,
+                ipv4: host
+              });
+            } else {
+              throw new Error('No IPv4 addresses found');
+            }
+          } catch (resolve4Error) {
+            // Fallback to lookup if resolve4 fails
+            logger.debug('resolve4 failed, trying lookup', {
+              hostname: url.hostname,
+              error: resolve4Error instanceof Error ? resolve4Error.message : String(resolve4Error)
+            });
+            const address = await dns.promises.lookup(url.hostname, { family: 4 });
+            host = address.address;
+            logger.info('Resolved hostname to IPv4 using lookup', {
+              hostname: url.hostname,
+              ipv4: host
+            });
+          }
+        } catch (resolveError) {
+          // Check if hostname resolves to IPv6 only
+          let hasIPv6 = false;
+          try {
+            const ipv6Addresses = await dns.promises.resolve6(url.hostname);
+            hasIPv6 = ipv6Addresses.length > 0;
+          } catch {
+            // Ignore IPv6 resolution errors
+          }
+          
+          const isSupabase = url.hostname.includes('supabase.co');
+          const errorMessage = hasIPv6
+            ? `Hostname ${url.hostname} only resolves to IPv6 addresses. Direct connections require IPv6 support, which is not available in this environment.`
+            : `Failed to resolve hostname ${url.hostname} to IPv4.`;
+          
+          logger.error(errorMessage, {
+            hostname: url.hostname,
+            error: resolveError instanceof Error ? resolveError.message : String(resolveError),
+            hasIPv6Only: hasIPv6,
+            isSupabase
+          });
+          
+          // Fail fast - don't let pg try IPv6
+          if (isSupabase) {
+            throw new Error(
+              `${errorMessage}\n\n` +
+              `SOLUTION: Use Supabase Connection Pooler (Recommended - Free)\n` +
+              `The connection pooler resolves to IPv4 addresses and works without IPv6 support.\n\n` +
+              `Steps:\n` +
+              `1. Go to Supabase Dashboard → Settings → Database\n` +
+              `2. Scroll to "Connection Pooling" section\n` +
+              `3. Copy the "Transaction" or "Session" pooler connection string (port 6543)\n` +
+              `4. Update your DATABASE_URL environment variable\n\n` +
+              `Alternative: Enable the dedicated IPv4 add-on in Supabase (paid feature)\n` +
+              `This allows direct connections via IPv4, but the pooler is recommended.`
+            );
+          } else {
+            throw new Error(
+              `${errorMessage}\n` +
+              `Please check your DNS configuration or use a database provider that supports IPv4 connections.`
+            );
+          }
+        }
+      }
+      
+      // Parse into separate components
       const config: any = {
-        host: url.hostname,
+        host: host,
         port: parseInt(url.port || '5432'),
         user: url.username,
         password: url.password,
@@ -919,7 +984,8 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       }
       
       logger.info('Parsed PostgreSQL connection string', {
-        host: config.host,
+        originalHostname: url.hostname,
+        resolvedHost: host,
         port: config.port,
         database: config.database,
         user: config.user || '(none)'
@@ -936,6 +1002,25 @@ class PostgreSQLAdapter implements DatabaseAdapter {
   }
 
   async initializeSchema(): Promise<void> {
+    // Create pool on first use, resolving hostname to IPv4 first
+    if (!this.pool) {
+      // Parse connection string and resolve hostname to IPv4
+      // Supabase now uses IPv6 by default, so we need to explicitly resolve to IPv4
+      const connectionConfig = await this.parseConnectionString(this.connectionString);
+      
+      // Determine SSL settings
+      const needsSSL = this.connectionString.includes('sslmode=require') || 
+                       this.connectionString.includes('ssl=true') ||
+                       this.connectionString.includes('supabase.co') || // Supabase requires SSL
+                       this.connectionString.includes('neon.tech') || // Neon requires SSL
+                       connectionConfig.sslmode === 'require';
+      
+      this.pool = new Pool({
+        ...connectionConfig,
+        ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
+      });
+    }
+    
     const client = await this.pool.connect();
     try {
       // Messages table
