@@ -1,6 +1,11 @@
 import Database from 'better-sqlite3';
 import { Pool, Client } from 'pg';
+import dns from 'dns';
 import { logger } from '../utils/logger.js';
+
+// Force Node.js to prefer IPv4 for DNS resolution
+// Critical for DigitalOcean App Platform which doesn't support IPv6 connections
+dns.setDefaultResultOrder('ipv4first');
 
 export interface Message {
   id: number;
@@ -858,46 +863,72 @@ class PostgreSQLAdapter implements DatabaseAdapter {
   private pool: Pool;
 
   constructor(connectionString: string) {
-    // Parse connection string and handle IPv6 addresses
-    // DigitalOcean App Platform doesn't support IPv6, so we need to use hostname or IPv4
+    // Parse connection string into separate components
+    // This allows pg to use IPv4-first DNS resolution (set via dns.setDefaultResultOrder above)
     const connectionConfig = this.parseConnectionString(connectionString);
+    
+    // Determine SSL settings
+    const needsSSL = connectionString.includes('sslmode=require') || 
+                     connectionString.includes('ssl=true') ||
+                     connectionString.includes('supabase.co') || // Supabase requires SSL
+                     connectionString.includes('neon.tech') || // Neon requires SSL
+                     connectionConfig.sslmode === 'require';
     
     this.pool = new Pool({
       ...connectionConfig,
-      ssl: connectionString.includes('sslmode=require') || connectionString.includes('ssl=true') 
-        ? { rejectUnauthorized: false } 
-        : undefined,
+      ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
     });
   }
 
   /**
-   * Parse connection string and handle IPv6 addresses
-   * If hostname is IPv6, we'll use the connectionString as-is but log a warning
-   * The user should use a hostname-based connection string from their database provider
+   * Parse connection string into separate components
+   * This allows pg to use IPv4-first DNS resolution (via dns.setDefaultResultOrder)
+   * instead of using connectionString which might try IPv6 first
    */
-  private parseConnectionString(connectionString: string): { connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string } {
+  private parseConnectionString(connectionString: string): { connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string; sslmode?: string } {
     try {
       const url = new URL(connectionString);
       
-      // Check if hostname is an IPv6 address
-      const isIPv6 = url.hostname.includes(':') && !url.hostname.includes('.');
+      // Check if hostname is an IPv6 address (not a hostname)
+      const isIPv6Address = url.hostname.includes(':') && !url.hostname.includes('.');
       
-      if (isIPv6) {
-        logger.warn('Connection string contains IPv6 address. DigitalOcean App Platform may not support IPv6.', {
+      if (isIPv6Address) {
+        logger.error('Connection string contains IPv6 address which is not supported on DigitalOcean App Platform', {
           hostname: url.hostname,
-          hint: 'Use a hostname-based connection string (e.g., db.xxxxx.supabase.co) instead of an IP address'
+          hint: 'Your DATABASE_URL must use a hostname (e.g., db.xxxxx.supabase.co) not an IP address'
         });
-        // Still try to use it, but the connection will likely fail
-        // Return connectionString to let pg handle it
+        // Return as-is - will fail but at least we logged the error
         return { connectionString };
       }
       
-      // For hostname-based connections, use connectionString directly
-      // This allows pg to handle DNS resolution which will prefer IPv4 on platforms without IPv6
-      return { connectionString };
+      // Parse into separate components so pg uses IPv4-first DNS resolution
+      const config: any = {
+        host: url.hostname,
+        port: parseInt(url.port || '5432'),
+        user: url.username,
+        password: url.password,
+        database: url.pathname.slice(1), // Remove leading /
+      };
+      
+      // Handle query parameters (like sslmode)
+      if (url.search) {
+        const params = new URLSearchParams(url.search);
+        if (params.has('sslmode')) {
+          config.sslmode = params.get('sslmode');
+        }
+      }
+      
+      logger.info('Parsed PostgreSQL connection string', {
+        host: config.host,
+        port: config.port,
+        database: config.database,
+        user: config.user || '(none)'
+      });
+      
+      return config;
     } catch (error) {
       // If URL parsing fails, return connectionString as-is
-      logger.warn('Failed to parse connection string', {
+      logger.warn('Failed to parse connection string, using as-is', {
         error: error instanceof Error ? error.message : String(error)
       });
       return { connectionString };
