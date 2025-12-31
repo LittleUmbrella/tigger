@@ -305,6 +305,14 @@ const executeTradeForAccount = async (
     let orderId: string | null = null;
     // Collect TP order IDs for storage
     const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
+    
+    // Round TP prices to exchange precision (declare early for use in trade storage)
+    let roundedTPPrices: number[] | undefined = undefined;
+    if (order.takeProfits && order.takeProfits.length > 0) {
+      roundedTPPrices = order.takeProfits.map(tpPrice => 
+        roundPrice(tpPrice, pricePrecision, tickSize)
+      );
+    }
 
     if (isSimulation) {
       // In simulation mode, generate a fake order ID
@@ -396,14 +404,6 @@ const executeTradeForAccount = async (
             });
           }
         }
-      }
-
-      // Round TP prices to exchange precision (declare outside if block for use in trade storage)
-      let roundedTPPrices: number[] | undefined = undefined;
-      if (order.takeProfits && order.takeProfits.length > 0) {
-        roundedTPPrices = order.takeProfits.map(tpPrice => 
-          roundPrice(tpPrice, pricePrecision, tickSize)
-        );
       }
 
       // Place take profit orders using batch placement if available

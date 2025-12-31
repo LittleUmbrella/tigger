@@ -4,8 +4,8 @@
     {
       "name": "main_harvester",
       "channel": "your_telegram_channel",
-      "apiId": 12345678,
       "envVarNames": {
+        "apiId": "TG_API_ID",
         "accessHash": "TELEGRAM_ACCESS_HASH"
       },
       "pollInterval": 5000,

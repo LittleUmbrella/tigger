@@ -76,7 +76,7 @@ const resolveEntity = async (
         const chat = res.chats[0];
         if (chat instanceof Api.Chat || chat instanceof Api.Channel) {
           return new Api.InputPeerChannel({
-            channelId: (chat as Api.Channel).id,
+            channelId: BigInt(String((chat as Api.Channel).id)) as any,
             accessHash: (chat as Api.Channel).accessHash || BigInt(0) as any
           });
         }
@@ -84,23 +84,84 @@ const resolveEntity = async (
       throw new Error('Invite import returned no chats');
     }
     
-    const entity = await client.getEntity(config.channel);
-    if (entity instanceof Api.Channel) {
+    // Try to resolve by username/channel name using getDialogs first (safer for large IDs)
+    // This avoids getEntity which may have issues with large channel IDs
+    const dialogs = await client.getDialogs({ limit: 200 });
+    const foundDialog = dialogs.find(d => {
+      const entity = d.entity;
+      if (entity instanceof Api.Channel) {
+        // Match by username (without @), numeric ID, or title
+        const usernameMatch = entity.username && (
+          entity.username === config.channel || 
+          entity.username === config.channel.replace('@', '')
+        );
+        const idMatch = String(entity.id) === config.channel;
+        const titleMatch = entity.title && entity.title.toLowerCase() === config.channel.toLowerCase();
+        return usernameMatch || idMatch || titleMatch;
+      }
+      return false;
+    });
+    
+    if (foundDialog && foundDialog.entity instanceof Api.Channel) {
+      logger.debug('Found channel in dialogs', {
+        channel: config.channel,
+        channelId: String(foundDialog.entity.id),
+        username: foundDialog.entity.username,
+        title: foundDialog.entity.title
+      });
       return new Api.InputPeerChannel({
-        channelId: entity.id,
-        accessHash: entity.accessHash || BigInt(0) as any
+        channelId: BigInt(String(foundDialog.entity.id)) as any,
+        accessHash: foundDialog.entity.accessHash || BigInt(0) as any
       });
     }
-    if (entity instanceof Api.Chat) {
-      return new Api.InputPeerChat({ chatId: entity.id });
+    
+    logger.debug('Channel not found in dialogs, will try getEntity', {
+      channel: config.channel,
+      dialogsChecked: dialogs.length,
+      availableChannels: dialogs
+        .filter(d => d.entity instanceof Api.Channel)
+        .map(d => ({
+          id: String((d.entity as Api.Channel).id),
+          username: (d.entity as Api.Channel).username,
+          title: (d.entity as Api.Channel).title
+        }))
+    });
+    
+    // Fallback to getEntity if not found in dialogs
+    // Note: getEntity may fail for large channel IDs, so we catch and provide better error
+    try {
+      const entity = await client.getEntity(config.channel);
+      if (entity instanceof Api.Channel) {
+        return new Api.InputPeerChannel({
+          channelId: BigInt(String(entity.id)) as any,
+          accessHash: entity.accessHash || BigInt(0) as any
+        });
+      }
+      if (entity instanceof Api.Chat) {
+        return new Api.InputPeerChat({ chatId: entity.id });
+      }
+      if (entity instanceof Api.User) {
+        return new Api.InputPeerUser({
+          userId: entity.id,
+          accessHash: entity.accessHash || BigInt(0) as any
+        });
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      // If getEntity fails due to large channel ID, provide helpful error
+      if (errorMessage.includes('out of range')) {
+        throw new Error(
+          `Channel ID too large for getEntity. Channel "${config.channel}" not found in dialogs. ` +
+          `Please ensure the channel is accessible or provide channel ID and access hash directly. ` +
+          `Original error: ${errorMessage}`
+        );
+      }
+      // If getEntity fails for other reasons, rethrow
+      throw error;
     }
-    if (entity instanceof Api.User) {
-      return new Api.InputPeerUser({
-        userId: entity.id,
-        accessHash: entity.accessHash || BigInt(0) as any
-      });
-    }
-    throw new Error('Unsupported entity type');
+    
+    // Should not reach here, but TypeScript needs this
+    throw new Error('Failed to resolve channel entity');
   } catch (error) {
     logger.error('Failed to resolve channel entity', {
       channel: config.channel,
@@ -119,6 +180,18 @@ const fetchNewMessages = async (
   isFirstFetchAfterStartup: boolean = false
 ): Promise<number> => {
   try {
+    // Ensure client is connected before making API calls
+    if (!client.connected) {
+      logger.debug('Client not connected, waiting for reconnection', { channel: config.channel });
+      // Wait a bit for automatic reconnection (Telegram library handles this)
+      await sleep(1000);
+      // If still not connected after wait, skip this iteration
+      if (!client.connected) {
+        logger.warn('Client still not connected, skipping fetch', { channel: config.channel });
+        return lastMessageId;
+      }
+    }
+
     // For forward polling (new messages), always get the most recent messages
     // offsetId: 0 means get the newest messages
     // We'll filter out already-processed messages below
@@ -144,7 +217,7 @@ const fetchNewMessages = async (
     let skippedCount = 0;
     let skippedOldCount = 0;
 
-    // On first startup, filter out messages older than threshold
+    // Filter out messages older than maxMessageAgeMinutes (applies to all fetches)
     const maxAgeMinutes = config.maxMessageAgeMinutes ?? 10;
     const skipOldMessages = config.skipOldMessagesOnStartup !== false; // Default to true
     const now = Date.now();
@@ -185,17 +258,20 @@ const fetchNewMessages = async (
         msgDate = new Date();
       }
 
-      // Skip old messages on first fetch after startup (prevents processing stale messages after pause/restart)
-      if (isFirstFetchAfterStartup && skipOldMessages) {
+      // Skip old messages that exceed maxMessageAgeMinutes
+      // This applies to all fetches, not just the first, to prevent inserting stale messages
+      // that may be returned by the Telegram API in subsequent polls (e.g., after reconnection)
+      if (skipOldMessages) {
         const msgAge = now - msgDate.getTime();
         if (msgAge > maxAgeMs) {
           skippedOldCount++;
           skippedCount++;
-          logger.debug('Skipping old message on first fetch after startup', {
+          logger.debug('Skipping old message (exceeds maxMessageAgeMinutes)', {
             channel: config.channel,
             messageId: msgId,
             ageMinutes: Math.round(msgAge / 60000),
-            maxAgeMinutes
+            maxAgeMinutes,
+            isFirstFetch: isFirstFetchAfterStartup
           });
           continue;
         }
@@ -274,7 +350,7 @@ const fetchNewMessages = async (
       });
     } else if (skippedCount > 0) {
       if (skippedOldCount > 0) {
-        logger.info('Skipped old messages on first fetch after startup', {
+        logger.info('Skipped old messages (exceed maxMessageAgeMinutes)', {
           channel: config.channel,
           totalMessages: messages.length,
           skippedOld: skippedOldCount,
@@ -291,10 +367,21 @@ const fetchNewMessages = async (
 
     return newLastMessageId;
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // Don't throw on connection errors - let the library handle reconnection
+    // Just log and return current lastMessageId to continue polling
+    if (errorMessage.includes('Not connected') || errorMessage.includes('Connection')) {
+      logger.debug('Connection error during fetch, will retry on next poll', {
+        channel: config.channel,
+        error: errorMessage
+      });
+      return lastMessageId;
+    }
     logger.error('Failed to fetch messages', {
       channel: config.channel,
-      error: error instanceof Error ? error.message : String(error)
+      error: errorMessage
     });
+    // Only throw for non-connection errors
     throw error;
   }
 };
@@ -305,13 +392,19 @@ export const startSignalHarvester = async (
 ): Promise<() => Promise<void>> => {
   logger.info('Starting signal harvester', { name: config.name, channel: config.channel });
   
-  // Read global settings from environment variables
-  const apiId = config.apiId || parseInt(process.env.TG_API_ID || '', 10);
+  // Read API ID: Priority: envVarNames.apiId > config.apiId > TG_API_ID env var
+  const apiIdEnvVarName = config.envVarNames?.apiId;
+  const apiId = apiIdEnvVarName 
+    ? parseInt(process.env[apiIdEnvVarName] || '', 10)
+    : (config.apiId || parseInt(process.env.TG_API_ID || '', 10));
   const apiHash = process.env.TG_API_HASH;
   const sessionString = process.env.TG_SESSION || '';
   
   if (!apiId) {
-    throw new Error('TG_API_ID environment variable or apiId in config is required for Telegram');
+    const source = apiIdEnvVarName 
+      ? `environment variable ${apiIdEnvVarName}`
+      : (config.apiId ? 'config.apiId' : 'TG_API_ID environment variable');
+    throw new Error(`${source} is required for Telegram but was not found or invalid`);
   }
   if (!apiHash) {
     throw new Error('TG_API_HASH environment variable is required');
@@ -353,10 +446,10 @@ export const startSignalHarvester = async (
     });
   }
   
-  // Log that we'll skip old messages on first fetch (prevents processing stale messages after pause/restart)
+  // Log that we'll skip old messages (prevents processing stale messages after pause/restart or in subsequent polls)
   const skipOldMessages = config.skipOldMessagesOnStartup !== false;
   if (skipOldMessages) {
-    logger.info('Will skip old messages on first fetch after startup', {
+    logger.info('Will skip old messages (exceeding maxMessageAgeMinutes) on all fetches', {
       channel: config.channel,
       maxMessageAgeMinutes: config.maxMessageAgeMinutes ?? 10
     });

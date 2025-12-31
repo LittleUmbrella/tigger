@@ -3,9 +3,9 @@
   "harvesters": [
     {
       "name": "main_harvester",
-      "channel": "vip-future",
-      "apiId": 2427485240,
+      "channel": "2427485240",
       "envVarNames": {
+        "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH"
       },
       "pollInterval": 3000,
@@ -16,8 +16,8 @@
   ],
   "parsers": [
     {
-      "name": "main_parser",
-      "channel": "vip-future"
+      "name": "vip_crypto_signals",
+      "channel": "2427485240"
     }
   ],
   "accounts": [
@@ -60,7 +60,7 @@
     {
       "channel": "vip-future",
       "harvester": "main_harvester",
-      "parser": "main_parser",
+      "parser": "vip_crypto_signals",
       "breakevenAfterTPs": 2,
       "initiator": "bybit",
       "monitor": "bybit"
