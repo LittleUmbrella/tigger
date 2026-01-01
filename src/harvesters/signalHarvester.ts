@@ -198,7 +198,7 @@ const fetchNewMessages = async (
     const history = await client.invoke(new Api.messages.GetHistory({
       peer: entity,
       offsetId: 0,
-      limit: 100,
+      limit: 5,
       addOffset: 0,
       maxId: 0,
       minId: 0,

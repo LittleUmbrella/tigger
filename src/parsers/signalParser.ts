@@ -7,11 +7,13 @@ import { defaultParser } from './defaultParser.js';
 import { parseWithLLMFallback, LLMParserResult } from './llmFallbackParser.js';
 import { parseManagementCommand } from '../managers/managementParser.js';
 import { vipCryptoSignals } from './channels/2427485240/vip-future.js';
+import { ronnieCryptoSignals } from './channels/3241720654/ronnie-crypto-signals.js';
 
 // Register the default parser
 registerParser('default', defaultParser);
 registerParser('default_parser', defaultParser); // Alias for backward compatibility
 registerParser('vip_crypto_signals', vipCryptoSignals);
+registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
 
 /**
  * Parse a message using the specified parser name

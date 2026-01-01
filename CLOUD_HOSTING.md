@@ -402,8 +402,20 @@ Create your `config.json` file using environment variable names (not actual valu
 DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@db.xxxxx.supabase.co:5432/postgres
 
 # Telegram API (if using Telegram harvesters)
-TELEGRAM_API_ID=your_telegram_api_id
-TELEGRAM_API_HASH=your_telegram_api_hash
+TG_API_ID=your_telegram_api_id
+TG_API_HASH=your_telegram_api_hash
+TG_SESSION=your_telegram_session_string
+
+**⚠️ Important: Telegram Session Limitation**
+- Each instance (local, cloud, etc.) needs its own unique `TG_SESSION`
+- Telegram does not allow the same auth key to be used concurrently from multiple instances
+- If you get `AUTH_KEY_DUPLICATED` error, you're using the same session in multiple places
+- To create a new session for your cloud instance:
+  1. Run locally: `npm run list-channels`
+  2. When prompted, authenticate with your phone number
+  3. Copy the generated `TG_SESSION` value (it will be saved to `.env` and displayed)
+  4. Use this unique session string for your cloud deployment
+  5. Keep your local `.env` with a different session string
 
 # Bybit API (if using Bybit exchange)
 BYBIT_API_KEY=your_bybit_api_key
@@ -682,6 +694,30 @@ DigitalOcean App Platform automatically sets up health checks. To customize:
 2. Check variable names match exactly (case-sensitive)
 3. Ensure variables are set at app level, not component level
 4. Restart the app after adding new environment variables
+
+#### Issue: Telegram AUTH_KEY_DUPLICATED Error
+
+**Symptoms**: Logs show `406: AUTH_KEY_DUPLICATED` when connecting to Telegram
+
+**Cause**: The same `TG_SESSION` is being used by multiple instances simultaneously (e.g., local and cloud)
+
+**Solutions**:
+1. **Create separate sessions for each instance:**
+   - Each instance (local, cloud, etc.) needs its own unique `TG_SESSION`
+   - Run `npm run list-channels` locally to create a new session
+   - Authenticate with your phone number when prompted
+   - Copy the generated `TG_SESSION` value (saved to `.env` and displayed)
+   - Use different session strings for each instance
+
+2. **Stop conflicting instances:**
+   - If running locally and in cloud, ensure only one is using a given session at a time
+   - Or create separate sessions for each instance (recommended)
+
+3. **Verify session uniqueness:**
+   - Check that your local `.env` has a different `TG_SESSION` than your cloud environment variables
+   - Each session string should be unique and not shared between instances
+
+**Note**: Telegram's MTProto protocol doesn't allow concurrent use of the same auth key. This is a Telegram limitation, not a bug in the bot.
 
 ---
 
