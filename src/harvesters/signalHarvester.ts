@@ -406,6 +406,29 @@ export const startSignalHarvester = async (
     ? (process.env[sessionEnvVarName] || '')
     : (process.env.TG_SESSION || '');
   
+  // Log which session environment variable is being used (without logging the actual session string)
+  if (sessionEnvVarName) {
+    if (!process.env[sessionEnvVarName]) {
+      logger.warn('Harvester-specific session env var not found, will fail', {
+        harvester: config.name,
+        channel: config.channel,
+        sessionEnvVarName,
+        fallbackAvailable: !!process.env.TG_SESSION
+      });
+    } else {
+      logger.debug('Using harvester-specific session', {
+        harvester: config.name,
+        channel: config.channel,
+        sessionEnvVarName
+      });
+    }
+  } else {
+    logger.debug('Using default TG_SESSION', {
+      harvester: config.name,
+      channel: config.channel
+    });
+  }
+  
   if (!apiId) {
     const source = apiIdEnvVarName 
       ? `environment variable ${apiIdEnvVarName}`
