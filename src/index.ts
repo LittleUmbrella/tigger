@@ -104,24 +104,57 @@ try {
 }
 
 // Handle graceful shutdown
-process.on('SIGINT', async () => {
-  logger.info('Received SIGINT, shutting down gracefully...');
+const gracefulShutdown = async (signal: string): Promise<void> => {
+  logger.info(`Received ${signal}, shutting down gracefully...`);
+  
+  // Close HTTP server first (stops accepting new connections)
   server.close(() => {
     logger.info('HTTP server closed');
   });
+  
+  // Stop orchestrator (which will stop all harvesters and disconnect Telegram clients)
   if (stopOrchestrator) {
-    await stopOrchestrator();
+    try {
+      // Add timeout to ensure shutdown completes even if it hangs
+      await Promise.race([
+        stopOrchestrator(),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            logger.warn('Orchestrator shutdown timeout, forcing exit', {
+              timeout: 15000
+            });
+            resolve();
+          }, 15000); // 15 second timeout for full shutdown
+        })
+      ]);
+      logger.info('Graceful shutdown completed');
+    } catch (error) {
+      logger.error('Error during graceful shutdown', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
   }
+  
+  // Give a small delay to ensure all disconnect operations complete
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  
   process.exit(0);
+};
+
+process.on('SIGINT', () => {
+  gracefulShutdown('SIGINT').catch(error => {
+    logger.error('Error in SIGINT handler', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    process.exit(1);
+  });
 });
 
-process.on('SIGTERM', async () => {
-  logger.info('Received SIGTERM, shutting down gracefully...');
-  server.close(() => {
-    logger.info('HTTP server closed');
+process.on('SIGTERM', () => {
+  gracefulShutdown('SIGTERM').catch(error => {
+    logger.error('Error in SIGTERM handler', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+    process.exit(1);
   });
-  if (stopOrchestrator) {
-    await stopOrchestrator();
-  }
-  process.exit(0);
 });
