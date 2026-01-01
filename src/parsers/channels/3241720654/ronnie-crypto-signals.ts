@@ -180,7 +180,7 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
         // Use a regex to find the earliest stop loss indicator
         const stopLossPattern = /(?:🧨|❌|stop\s*[-]?loss|stoploss)/i;
         const stopLossMatch = targetsSection.match(stopLossPattern);
-        const stopLossIndex = stopLossMatch ? stopLossMatch.index : -1;
+        const stopLossIndex = stopLossMatch && stopLossMatch.index !== undefined ? stopLossMatch.index : -1;
         const relevantSection = stopLossIndex > 0 
           ? targetsSection.substring(0, stopLossIndex)
           : targetsSection;
