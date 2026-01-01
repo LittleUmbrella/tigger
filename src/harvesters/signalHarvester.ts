@@ -28,12 +28,13 @@ const sleep = (ms: number): Promise<void> => {
 
 const connectTelegram = async (
   config: HarvesterConfig,
-  client: TelegramClient
+  client: TelegramClient,
+  sessionString: string
 ): Promise<void> => {
   try {
-    const sessionString = process.env.TG_SESSION;
     if (!sessionString) {
-      throw new Error('TG_SESSION environment variable is required');
+      const sessionEnvVarName = config.envVarNames?.session || 'TG_SESSION';
+      throw new Error(`${sessionEnvVarName} environment variable is required`);
     }
     await client.connect();
     const me = await client.getMe();
@@ -398,7 +399,12 @@ export const startSignalHarvester = async (
     ? parseInt(process.env[apiIdEnvVarName] || '', 10)
     : (config.apiId || parseInt(process.env.TG_API_ID || '', 10));
   const apiHash = process.env.TG_API_HASH;
-  const sessionString = process.env.TG_SESSION || '';
+  
+  // Read Session: Priority: envVarNames.session > TG_SESSION env var
+  const sessionEnvVarName = config.envVarNames?.session;
+  const sessionString = sessionEnvVarName
+    ? (process.env[sessionEnvVarName] || '')
+    : (process.env.TG_SESSION || '');
   
   if (!apiId) {
     const source = apiIdEnvVarName 
@@ -410,7 +416,10 @@ export const startSignalHarvester = async (
     throw new Error('TG_API_HASH environment variable is required');
   }
   if (!sessionString) {
-    throw new Error('TG_SESSION environment variable is required');
+    const source = sessionEnvVarName
+      ? `environment variable ${sessionEnvVarName}`
+      : 'TG_SESSION environment variable';
+    throw new Error(`${source} is required for Telegram but was not found`);
   }
   
   const client = new TelegramClient(
@@ -424,7 +433,7 @@ export const startSignalHarvester = async (
   let lastMessageId = 0;
   let entity: Api.TypeInputPeer | undefined;
 
-  await connectTelegram(config, client);
+  await connectTelegram(config, client, sessionString);
   entity = await resolveEntity(config, client);
   
   logger.info('Resolved channel entity', {
