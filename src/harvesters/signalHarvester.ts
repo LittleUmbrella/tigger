@@ -12,6 +12,131 @@ interface HarvesterState {
   entity?: Api.TypeInputPeer;
 }
 
+/**
+ * Client manager to share TelegramClient instances across harvesters using the same session
+ * This prevents AUTH_KEY_DUPLICATED errors when multiple harvesters use the same Telegram account
+ * 
+ * Uses functional programming with module-level state instead of a class
+ */
+
+// Module-level state for client management
+const clients = new Map<string, TelegramClient>();
+const clientRefCounts = new Map<string, number>();
+const clientConnections = new Map<string, Promise<void>>();
+
+/**
+ * Create a unique session key based on session string, API ID, and hash
+ * This ensures clients are shared only when all three match
+ */
+const getSessionKey = (sessionString: string, apiId: number, apiHash: string): string => {
+  return `${apiId}:${apiHash}:${sessionString.substring(0, 32)}`;
+};
+
+/**
+ * Get or create a TelegramClient for a given session string
+ * If a client already exists for this session, it will be reused
+ */
+const getOrCreateClient = async (
+  sessionString: string,
+  apiId: number,
+  apiHash: string,
+  clientOptions: {
+    deviceModel?: string;
+    appVersion?: string;
+    systemVersion?: string;
+    systemLangCode?: string;
+  }
+): Promise<TelegramClient> => {
+  const sessionKey = getSessionKey(sessionString, apiId, apiHash);
+
+  // If client exists, increment ref count and return it
+  if (clients.has(sessionKey)) {
+    const refCount = clientRefCounts.get(sessionKey) || 0;
+    clientRefCounts.set(sessionKey, refCount + 1);
+    logger.debug('Reusing existing TelegramClient', {
+      sessionKey: sessionKey.substring(0, 16) + '...',
+      refCount: refCount + 1
+    });
+    return clients.get(sessionKey)!;
+  }
+
+  // Create new client
+  const freshSessionString = String(sessionString);
+  const session = new StringSession(freshSessionString);
+  
+  const client = new TelegramClient(
+    session,
+    apiId,
+    apiHash,
+    {
+      connectionRetries: 5,
+      deviceModel: clientOptions.deviceModel || 'Tigger-Harvester',
+      appVersion: clientOptions.appVersion || '1.0.0',
+      systemVersion: clientOptions.systemVersion || '1.0.0',
+      systemLangCode: clientOptions.systemLangCode || 'EN',
+    }
+  );
+
+  // Store client and initialize ref count
+  clients.set(sessionKey, client);
+  clientRefCounts.set(sessionKey, 1);
+
+  // Ensure connection happens only once, even if multiple harvesters request it simultaneously
+  if (!clientConnections.has(sessionKey)) {
+    const connectionPromise = client.connect().then(async () => {
+      const me = await client.getMe();
+      logger.info('Created and connected new shared TelegramClient', {
+        sessionKey: sessionKey.substring(0, 16) + '...',
+        userId: String(me.id),
+        username: me.username || null,
+        phone: me.phone || null
+      });
+    });
+    clientConnections.set(sessionKey, connectionPromise);
+  }
+
+  // Wait for connection to complete
+  await clientConnections.get(sessionKey);
+
+  return client;
+};
+
+/**
+ * Release a reference to a client
+ * When ref count reaches 0, the client will be disconnected
+ */
+const releaseClient = async (
+  sessionString: string,
+  apiId: number,
+  apiHash: string
+): Promise<void> => {
+  const sessionKey = getSessionKey(sessionString, apiId, apiHash);
+  
+  if (!clients.has(sessionKey)) {
+    return;
+  }
+
+  const refCount = clientRefCounts.get(sessionKey) || 0;
+  if (refCount <= 1) {
+    // Last reference, disconnect and remove
+    const client = clients.get(sessionKey)!;
+    await client.disconnect();
+    clients.delete(sessionKey);
+    clientRefCounts.delete(sessionKey);
+    clientConnections.delete(sessionKey);
+    logger.debug('Disconnected and removed TelegramClient', {
+      sessionKey: sessionKey.substring(0, 16) + '...'
+    });
+  } else {
+    // Decrement ref count
+    clientRefCounts.set(sessionKey, refCount - 1);
+    logger.debug('Released reference to TelegramClient', {
+      sessionKey: sessionKey.substring(0, 16) + '...',
+      remainingRefs: refCount - 1
+    });
+  }
+};
+
 const sleep = (ms: number): Promise<void> => {
   return new Promise(resolve => {
     if (typeof setTimeout !== 'undefined') {
@@ -38,14 +163,45 @@ const connectTelegram = async (
     }
     await client.connect();
     const me = await client.getMe();
+    
+    // Log account information to help diagnose if sessions are from the same account
     logger.info('Connected to Telegram', {
+      harvester: config.name,
       channel: config.channel,
-      username: me.username || me.firstName
+      userId: String(me.id),
+      username: me.username || null,
+      firstName: me.firstName || null,
+      phone: me.phone || null
+    });
+    
+    // Warn if we detect potential duplicate account usage
+    // (This is just a warning - the actual error will come from Telegram)
+    logger.debug('Telegram account details', {
+      harvester: config.name,
+      accountId: String(me.id),
+      accountPhone: me.phone || 'unknown'
     });
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Provide more helpful error message for AUTH_KEY_DUPLICATED
+    if (errorMessage.includes('AUTH_KEY_DUPLICATED')) {
+      logger.error('AUTH_KEY_DUPLICATED error - This usually means:', {
+        harvester: config.name,
+        channel: config.channel,
+        possibleCauses: [
+          'Another instance is using the same session',
+          'Both sessions are from the same Telegram account (need different accounts)',
+          'Session is being used elsewhere (local machine, another cloud instance)'
+        ],
+        suggestion: 'Ensure each harvester uses a session from a DIFFERENT Telegram account, not just different sessions from the same account'
+      });
+    }
+    
     logger.error('Failed to connect to Telegram', {
+      harvester: config.name,
       channel: config.channel,
-      error: error instanceof Error ? error.message : String(error)
+      error: errorMessage
     });
     throw error;
   }
@@ -401,9 +557,10 @@ export const startSignalHarvester = async (
   const apiHash = process.env.TG_API_HASH;
   
   // Read Session: Priority: envVarNames.session > TG_SESSION env var
+  // If envVarNames.session is not specified, default to TG_SESSION
   const sessionEnvVarName = config.envVarNames?.session;
   const sessionString = sessionEnvVarName
-    ? (process.env[sessionEnvVarName] || '')
+    ? (process.env[sessionEnvVarName] || process.env.TG_SESSION || '')
     : (process.env.TG_SESSION || '');
   
   // Log which session environment variable is being used (without logging the actual session string)
@@ -413,12 +570,17 @@ export const startSignalHarvester = async (
     : '***';
   
   if (sessionEnvVarName) {
-    if (!process.env[sessionEnvVarName]) {
-      logger.warn('Harvester-specific session env var not found, will fail', {
+    if (!process.env[sessionEnvVarName] && !process.env.TG_SESSION) {
+      logger.warn('Harvester-specific session env var not found and TG_SESSION not available', {
         harvester: config.name,
         channel: config.channel,
-        sessionEnvVarName,
-        fallbackAvailable: !!process.env.TG_SESSION
+        sessionEnvVarName
+      });
+    } else if (!process.env[sessionEnvVarName]) {
+      logger.info('Harvester-specific session env var not found, falling back to TG_SESSION', {
+        harvester: config.name,
+        channel: config.channel,
+        sessionEnvVarName
       });
     } else {
       logger.info('Using harvester-specific session', {
@@ -429,7 +591,7 @@ export const startSignalHarvester = async (
       });
     }
   } else {
-    logger.info('Using default TG_SESSION', {
+    logger.info('Using default TG_SESSION (shared across harvesters)', {
       harvester: config.name,
       channel: config.channel,
       sessionFingerprint
@@ -452,29 +614,21 @@ export const startSignalHarvester = async (
     throw new Error(`${source} is required for Telegram but was not found`);
   }
   
-  // Create a completely fresh StringSession instance to ensure no shared state
-  // Create a new string to avoid any potential reference sharing
-  const freshSessionString = String(sessionString);
-  const session = new StringSession(freshSessionString);
-  
-  // Create a unique client instance with harvester-specific identifiers
-  // This helps Telegram distinguish between multiple clients using the same API ID
-  const client = new TelegramClient(
-    session,
+  // Use shared client manager to avoid AUTH_KEY_DUPLICATED errors
+  // Harvesters using the same session will share the same TelegramClient instance
+  const client = await getOrCreateClient(
+    sessionString,
     apiId,
     apiHash,
     {
-      connectionRetries: 5,
-      // Add unique device/app identifiers to help Telegram distinguish clients
       deviceModel: `Tigger-Harvester-${config.name}`,
       appVersion: '1.0.0',
       systemVersion: '1.0.0',
-      // Use harvester name as a unique identifier
       systemLangCode: config.name.substring(0, 2).toUpperCase() || 'EN',
     }
   );
   
-  logger.debug('Created TelegramClient instance', {
+  logger.debug('Using shared TelegramClient', {
     harvester: config.name,
     channel: config.channel,
     sessionLength: sessionString.length,
@@ -485,19 +639,26 @@ export const startSignalHarvester = async (
   let lastMessageId = 0;
   let entity: Api.TypeInputPeer | undefined;
 
-  // Add a small staggered delay based on harvester name to avoid race conditions
-  // when multiple harvesters start simultaneously
-  const harvesterHash = config.name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
-  const staggerDelay = (harvesterHash % 5) * 200; // 0-800ms delay
-  if (staggerDelay > 0) {
-    logger.debug('Staggering connection to avoid race conditions', {
-      harvester: config.name,
-      delayMs: staggerDelay
-    });
-    await sleep(staggerDelay);
+  // Client is already connected by the manager, just verify connection
+  if (!client.connected) {
+    await client.connect();
   }
-
-  await connectTelegram(config, client, sessionString);
+  
+  // Get account info for logging (client is already connected)
+  try {
+    const me = await client.getMe();
+    logger.info('Using shared TelegramClient', {
+      harvester: config.name,
+      channel: config.channel,
+      userId: String(me.id),
+      username: me.username || null
+    });
+  } catch (error) {
+    logger.warn('Could not get account info', {
+      harvester: config.name,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   entity = await resolveEntity(config, client);
   
   logger.info('Resolved channel entity', {
@@ -635,8 +796,13 @@ export const startSignalHarvester = async (
 
   // Return stop function
   return async (): Promise<void> => {
-    logger.info('Stopping signal harvester', { channel: config.channel });
+    logger.info('Stopping signal harvester', { 
+      harvester: config.name,
+      channel: config.channel 
+    });
     running = false;
-    await client.disconnect();
+    // Release the client reference instead of disconnecting directly
+    // The client manager will disconnect only when all harvesters using it have stopped
+    await releaseClient(sessionString, apiId, apiHash);
   };
 };
