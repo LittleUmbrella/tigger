@@ -35,6 +35,7 @@ const getSessionKey = (sessionString: string, apiId: number, apiHash: string): s
 /**
  * Get or create a TelegramClient for a given session string
  * If a client already exists for this session, it will be reused
+ * Handles race conditions when multiple harvesters start simultaneously
  */
 const getOrCreateClient = async (
   sessionString: string,
@@ -49,7 +50,8 @@ const getOrCreateClient = async (
 ): Promise<TelegramClient> => {
   const sessionKey = getSessionKey(sessionString, apiId, apiHash);
 
-  // If client exists, increment ref count and return it
+  // Check if client already exists or connection is in progress
+  // This prevents race conditions when multiple harvesters start simultaneously
   if (clients.has(sessionKey)) {
     const refCount = clientRefCounts.get(sessionKey) || 0;
     clientRefCounts.set(sessionKey, refCount + 1);
@@ -57,7 +59,55 @@ const getOrCreateClient = async (
       sessionKey: sessionKey.substring(0, 16) + '...',
       refCount: refCount + 1
     });
-    return clients.get(sessionKey)!;
+    
+    // Wait for connection if it's in progress
+    if (clientConnections.has(sessionKey)) {
+      try {
+        await clientConnections.get(sessionKey);
+      } catch (error) {
+        // Connection failed, but client might still exist - check if it's connected
+        if (!clients.get(sessionKey)?.connected) {
+          // Client connection failed, remove it and let it be recreated
+          clients.delete(sessionKey);
+          clientRefCounts.delete(sessionKey);
+          clientConnections.delete(sessionKey);
+          // Retry by falling through to create a new client
+        } else {
+          // Client is connected despite error, return it
+          return clients.get(sessionKey)!;
+        }
+      }
+    }
+    
+    const existingClient = clients.get(sessionKey);
+    if (existingClient && existingClient.connected) {
+      return existingClient;
+    }
+  }
+
+  // If connection is in progress but client doesn't exist yet, wait for it
+  // This handles the race condition where another harvester is creating the client
+  if (clientConnections.has(sessionKey) && !clients.has(sessionKey)) {
+    logger.debug('Connection in progress for session, waiting...', {
+      sessionKey: sessionKey.substring(0, 16) + '...'
+    });
+    try {
+      await clientConnections.get(sessionKey);
+      // After waiting, check if client was created
+      if (clients.has(sessionKey)) {
+        const refCount = clientRefCounts.get(sessionKey) || 0;
+        clientRefCounts.set(sessionKey, refCount + 1);
+        return clients.get(sessionKey)!;
+      }
+    } catch (error) {
+      // Connection failed, continue to create new client
+      logger.debug('Previous connection attempt failed, creating new client', {
+        sessionKey: sessionKey.substring(0, 16) + '...',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Clean up failed connection promise
+      clientConnections.delete(sessionKey);
+    }
   }
 
   // Create new client
@@ -77,11 +127,13 @@ const getOrCreateClient = async (
     }
   );
 
-  // Store client and initialize ref count
+  // Store client and initialize ref count BEFORE starting connection
+  // This ensures other harvesters can find it even if connection is in progress
   clients.set(sessionKey, client);
   clientRefCounts.set(sessionKey, 1);
 
   // Ensure connection happens only once, even if multiple harvesters request it simultaneously
+  // Double-check pattern: check again after storing client to handle race conditions
   if (!clientConnections.has(sessionKey)) {
     const connectionPromise = client.connect()
       .then(async () => {
@@ -116,6 +168,11 @@ const getOrCreateClient = async (
         throw error;
       });
     clientConnections.set(sessionKey, connectionPromise);
+  } else {
+    // Another harvester started the connection, wait for it
+    logger.debug('Another harvester is connecting, waiting for existing connection', {
+      sessionKey: sessionKey.substring(0, 16) + '...'
+    });
   }
 
   // Wait for connection to complete
@@ -375,6 +432,9 @@ const resolveEntity = async (
   }
 };
 
+// Track consecutive AUTH_KEY_DUPLICATED errors per harvester to implement circuit breaker
+const authKeyDuplicateCounts = new Map<string, { count: number; firstErrorTime: number }>();
+
 const fetchNewMessages = async (
   config: HarvesterConfig,
   client: TelegramClient,
@@ -383,7 +443,35 @@ const fetchNewMessages = async (
   lastMessageId: number,
   isFirstFetchAfterStartup: boolean = false
 ): Promise<number> => {
+  const harvesterKey = `${config.name}:${config.channel}`;
+  
   try {
+    // Check if we're in a circuit breaker state (too many consecutive AUTH_KEY_DUPLICATED errors)
+    const duplicateState = authKeyDuplicateCounts.get(harvesterKey);
+    if (duplicateState && duplicateState.count >= 5) {
+      const timeSinceFirstError = Date.now() - duplicateState.firstErrorTime;
+      const backoffMinutes = Math.min(10, Math.floor(duplicateState.count / 5)); // 1 min, 2 min, etc. up to 10 min
+      const backoffMs = backoffMinutes * 60 * 1000;
+      
+      if (timeSinceFirstError < backoffMs) {
+        const remainingSeconds = Math.ceil((backoffMs - timeSinceFirstError) / 1000);
+        logger.warn('Circuit breaker active: Too many AUTH_KEY_DUPLICATED errors, backing off', {
+          channel: config.channel,
+          consecutiveErrors: duplicateState.count,
+          backoffMinutes,
+          remainingSeconds,
+          likelyCause: 'Another instance is still running with the same session',
+          action: 'Waiting for old instance to disconnect or manual intervention required'
+        });
+        // Wait before retrying
+        await sleep(Math.min(30000, backoffMs - timeSinceFirstError)); // Wait up to 30 seconds
+        return lastMessageId;
+      } else {
+        // Reset counter after backoff period
+        authKeyDuplicateCounts.delete(harvesterKey);
+      }
+    }
+    
     // Ensure client is connected before making API calls
     if (!client.connected) {
       logger.debug('Client not connected, waiting for reconnection', { channel: config.channel });
@@ -408,6 +496,9 @@ const fetchNewMessages = async (
       minId: 0,
       hash: BigInt(0) as any,
     }));
+    
+    // Successfully fetched messages - reset AUTH_KEY_DUPLICATED counter
+    authKeyDuplicateCounts.delete(harvesterKey);
 
     const messages = ('messages' in history && history.messages) ? history.messages : [];
     if (messages.length === 0) {
@@ -572,6 +663,59 @@ const fetchNewMessages = async (
     return newLastMessageId;
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    
+    // Handle AUTH_KEY_DUPLICATED errors with circuit breaker pattern
+    if (errorMessage.includes('AUTH_KEY_DUPLICATED')) {
+      const duplicateState = authKeyDuplicateCounts.get(harvesterKey);
+      const now = Date.now();
+      
+      if (duplicateState) {
+        duplicateState.count++;
+        // If first error was more than 5 minutes ago, reset counter (might be a new issue)
+        if (now - duplicateState.firstErrorTime > 5 * 60 * 1000) {
+          duplicateState.count = 1;
+          duplicateState.firstErrorTime = now;
+        }
+      } else {
+        authKeyDuplicateCounts.set(harvesterKey, { count: 1, firstErrorTime: now });
+      }
+      
+      const currentState = authKeyDuplicateCounts.get(harvesterKey)!;
+      
+      if (currentState.count === 1) {
+        logger.error('AUTH_KEY_DUPLICATED: Another instance is using this session', {
+          channel: config.channel,
+          error: errorMessage,
+          action: 'Will back off if errors continue. Check for multiple running instances.',
+          possibleCauses: [
+            'Previous deployment instance is still running',
+            'Another deployment/instance is using the same TG_SESSION',
+            'Local instance is running with the same session'
+          ]
+        });
+      } else if (currentState.count >= 5) {
+        const timeSinceFirstError = Math.floor((now - currentState.firstErrorTime) / 1000);
+        logger.error('AUTH_KEY_DUPLICATED: Circuit breaker activated - persistent duplicate session', {
+          channel: config.channel,
+          consecutiveErrors: currentState.count,
+          timeSinceFirstErrorSeconds: timeSinceFirstError,
+          error: errorMessage,
+          critical: true,
+          action: 'MANUAL INTERVENTION REQUIRED: Stop all other instances using this session',
+          solution: 'Check DigitalOcean for multiple running instances, or wait for old instance to shut down'
+        });
+      } else {
+        logger.warn('AUTH_KEY_DUPLICATED: Continuing to retry (circuit breaker will activate soon)', {
+          channel: config.channel,
+          consecutiveErrors: currentState.count,
+          error: errorMessage
+        });
+      }
+      
+      // Don't throw - return lastMessageId to continue loop, but circuit breaker will back off
+      return lastMessageId;
+    }
+    
     // Don't throw on connection errors - let the library handle reconnection
     // Just log and return current lastMessageId to continue polling
     if (errorMessage.includes('Not connected') || errorMessage.includes('Connection')) {
@@ -581,6 +725,10 @@ const fetchNewMessages = async (
       });
       return lastMessageId;
     }
+    
+    // Reset AUTH_KEY_DUPLICATED counter on other errors (might be transient)
+    authKeyDuplicateCounts.delete(harvesterKey);
+    
     logger.error('Failed to fetch messages', {
       channel: config.channel,
       error: errorMessage
@@ -663,66 +811,107 @@ export const startSignalHarvester = async (
   
   // Use shared client manager to avoid AUTH_KEY_DUPLICATED errors
   // Harvesters using the same session will share the same TelegramClient instance
-  const client = await getOrCreateClient(
-    sessionString,
-    apiId,
-    apiHash,
-    {
-      deviceModel: `Tigger-Harvester-${config.name}`,
-      appVersion: '1.0.0',
-      systemVersion: '1.0.0',
-      systemLangCode: config.name.substring(0, 2).toUpperCase() || 'EN',
-    }
-  );
+  // Retry with exponential backoff for AUTH_KEY_DUPLICATED (common during deployments)
+  let client: TelegramClient | undefined;
+  let retryCount = 0;
+  const maxRetries = 5;
+  const baseDelayMs = 2000; // Start with 2 seconds
   
-  logger.debug('Using shared TelegramClient', {
-    harvester: config.name,
-    channel: config.channel,
-    sessionLength: sessionString.length,
-    sessionFingerprint
-  });
+  while (retryCount <= maxRetries) {
+    try {
+      client = await getOrCreateClient(
+        sessionString,
+        apiId,
+        apiHash,
+        {
+          deviceModel: `Tigger-Harvester-${config.name}`,
+          appVersion: '1.0.0',
+          systemVersion: '1.0.0',
+          systemLangCode: config.name.substring(0, 2).toUpperCase() || 'EN',
+        }
+      );
+      
+      logger.debug('Using shared TelegramClient', {
+        harvester: config.name,
+        channel: config.channel,
+        sessionLength: sessionString.length,
+        sessionFingerprint
+      });
+
+      // Client should already be connected by the manager
+      // Verify connection and handle any connection errors
+      if (!client.connected) {
+        logger.warn('Shared client not connected, attempting to connect', {
+          harvester: config.name,
+          channel: config.channel
+        });
+        await client.connect();
+      }
+      
+      // Successfully connected, break out of retry loop
+      break;
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Retry with exponential backoff for AUTH_KEY_DUPLICATED errors
+      // This handles the case where old instance hasn't disconnected yet during deployment
+      if (errorMessage.includes('AUTH_KEY_DUPLICATED')) {
+        if (retryCount < maxRetries) {
+          const delayMs = baseDelayMs * Math.pow(2, retryCount); // Exponential backoff: 2s, 4s, 8s, 16s, 32s
+          retryCount++;
+          logger.warn('AUTH_KEY_DUPLICATED: Retrying connection (likely old instance still disconnecting)', {
+            harvester: config.name,
+            channel: config.channel,
+            retryAttempt: retryCount,
+            maxRetries,
+            delayMs,
+            possibleCauses: [
+              'Previous deployment instance is still shutting down',
+              'Another instance is using the same session',
+              'Graceful shutdown in progress'
+            ]
+          });
+          await sleep(delayMs);
+          continue; // Retry
+        } else {
+          // Max retries exceeded
+          logger.error('AUTH_KEY_DUPLICATED: Max retries exceeded', {
+            harvester: config.name,
+            channel: config.channel,
+            retryAttempts: retryCount,
+            possibleCauses: [
+              'Another deployment/instance is running with the same TG_SESSION',
+              'A local instance is running with the same session',
+              'Previous deployment did not shut down properly',
+              'Old instance is taking too long to disconnect'
+            ],
+            solution: 'Stop all other instances using this session, wait longer, or use a different session'
+          });
+          throw error;
+        }
+      } else {
+        // Non-AUTH_KEY_DUPLICATED error, don't retry
+        logger.error('Failed to connect shared client', {
+          harvester: config.name,
+          channel: config.channel,
+          error: errorMessage
+        });
+        
+        // Release the client reference since it failed
+        await releaseClient(sessionString, apiId, apiHash);
+        throw error;
+      }
+    }
+  }
+
+  // Ensure client was successfully created
+  if (!client) {
+    throw new Error('Failed to create Telegram client after retries');
+  }
 
   let running = true;
   let lastMessageId = 0;
   let entity: Api.TypeInputPeer | undefined;
-
-  // Client should already be connected by the manager
-  // Verify connection and handle any connection errors
-  if (!client.connected) {
-    logger.warn('Shared client not connected, attempting to connect', {
-      harvester: config.name,
-      channel: config.channel
-    });
-    try {
-      await client.connect();
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      
-      // Provide helpful error message for AUTH_KEY_DUPLICATED
-      if (errorMessage.includes('AUTH_KEY_DUPLICATED')) {
-        logger.error('AUTH_KEY_DUPLICATED: Another instance is using this session', {
-          harvester: config.name,
-          channel: config.channel,
-          possibleCauses: [
-            'Another deployment/instance is running with the same TG_SESSION',
-            'A local instance is running with the same session',
-            'A previous deployment did not shut down properly'
-          ],
-          solution: 'Stop all other instances using this session, or use a different session'
-        });
-      }
-      
-      logger.error('Failed to connect shared client', {
-        harvester: config.name,
-        channel: config.channel,
-        error: errorMessage
-      });
-      
-      // Release the client reference since it failed
-      await releaseClient(sessionString, apiId, apiHash);
-      throw error;
-    }
-  }
   
   // Get account info for logging (client is already connected)
   try {
@@ -897,8 +1086,34 @@ export const startSignalHarvester = async (
       channel: config.channel 
     });
     running = false;
+    
     // Release the client reference instead of disconnecting directly
     // The client manager will disconnect only when all harvesters using it have stopped
-    await releaseClient(sessionString, apiId, apiHash);
+    // Add timeout to ensure shutdown completes even if disconnect hangs
+    try {
+      await Promise.race([
+        releaseClient(sessionString, apiId, apiHash),
+        new Promise<void>((resolve) => {
+          setTimeout(() => {
+            logger.warn('Client release timeout, forcing shutdown', {
+              harvester: config.name,
+              channel: config.channel
+            });
+            resolve();
+          }, 10000); // 10 second timeout
+        })
+      ]);
+      logger.info('Signal harvester stopped', {
+        harvester: config.name,
+        channel: config.channel
+      });
+    } catch (error) {
+      logger.error('Error stopping signal harvester', {
+        harvester: config.name,
+        channel: config.channel,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Don't throw - allow shutdown to continue
+    }
   };
 };

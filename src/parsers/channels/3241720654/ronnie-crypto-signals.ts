@@ -2,35 +2,50 @@ import { ParsedOrder } from '../../../types/order';
 
 export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   // Signal type - check first to determine if we should continue
-  const signalTypeMatch = content.match(/LONG|SHORT/i);
+  // Handle formats: "LONG", "SHORT", "Long SIGNAL", "Short SIGNAL", "LONG SIGNAL", "SHORT SIGNAL"
+  const signalTypeMatch = content.match(/(?:^|\s)(Long|Short|LONG|SHORT)(?:\s+SIGNAL)?/i);
   if (!signalTypeMatch) return null;
-  const signalTypeText = signalTypeMatch[0].toUpperCase();
+  const signalTypeText = signalTypeMatch[1].toUpperCase();
   const signalType: 'long' | 'short' = signalTypeText === 'SHORT' ? 'short' : 'long';
 
-  // Trading pair - handle both "SYMBOL/ USDT" and "SYMBOL/USDT" formats (with or without space)
-  // Also handle "ETHUSDT" format (without slash) - treat as "ETH/USDT"
-  let pairMatch = content.match(/(\w+)\/\s*USDT/i);
+  // Trading pair - handle various formats:
+  // - "SYMBOL/USDT" (no spaces)
+  // - "#SYMBOL/USDT" (with # prefix)
+  // - "SYMBOL/ USDT" (space after slash)
+  // - "SYMBOL / USDT" (space before and after slash)
+  // - "ETHUSDT" (without slash) - treat as "ETH/USDT"
+  let pairMatch = content.match(/#?(\w+)\s*\/\s*USDT/i);
   if (!pairMatch) {
     // Try format without slash: "ETHUSDT" -> "ETH/USDT"
-    pairMatch = content.match(/(\w+)USDT/i);
+    pairMatch = content.match(/#?(\w+)USDT/i);
     if (!pairMatch) return null;
   }
   const tradingPair = pairMatch[1].toUpperCase();
 
   // Leverage - extract number and use lowest value if range (conservative approach)
-  // Handle formats: "10x to 20x", "10x-20x", "20x", "5x-10x"
+  // Handle formats: "10x to 20x", "10x-20x", "20x", "5x-10x", "Cross Full", "Lvrg: full"
   let leverageMatch = content.match(/(\d+(?:\.\d+)?)\s*[Xx]\s*(?:to|-)\s*(\d+(?:\.\d+)?)\s*[Xx]/i);
   if (!leverageMatch) {
     // Try single leverage value
     leverageMatch = content.match(/(\d+(?:\.\d+)?)\s*[Xx]/i);
-    if (!leverageMatch) return null;
   }
   
-  const leverage1 = parseFloat(leverageMatch[1]);
-  const leverage2 = leverageMatch[2] ? parseFloat(leverageMatch[2]) : null;
-  // Use lowest value if range provided (conservative), otherwise use single value
-  const leverage = leverage2 !== null ? Math.min(leverage1, leverage2) : leverage1;
-  if (leverage < 1 || isNaN(leverage)) return null;
+  // If no numeric leverage found, check for "Cross Full" or "Lvrg: full" (use default 50x)
+  let leverage: number;
+  if (!leverageMatch) {
+    const fullMatch = content.match(/(?:Cross\s+)?(?:Full|full)|Lvrg\s*:\s*full/i);
+    if (fullMatch) {
+      leverage = 50; // Default to 50x for "full" leverage
+    } else {
+      return null; // No leverage found
+    }
+  } else {
+    const leverage1 = parseFloat(leverageMatch[1]);
+    const leverage2 = leverageMatch[2] ? parseFloat(leverageMatch[2]) : null;
+    // Use lowest value if range provided (conservative), otherwise use single value
+    leverage = leverage2 !== null ? Math.min(leverage1, leverage2) : leverage1;
+    if (leverage < 1 || isNaN(leverage)) return null;
+  }
 
   // Entry price - handle ranges and use worst value for signal type, or allow "current"/"market"
   // Handle formats: "Entry: 0.3140 - 0.3100", "Buy: 0.08710 - 0.08457", "✅ Entry: 0.48-0.46"
@@ -114,28 +129,30 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   const takeProfits: number[] = [];
   
   // Try multiple patterns for take profits
-  // Pattern 1: "Target: 0.3250 - 0.3400 - 0.3600" or "Targets: 0.3250 - 0.3400" or "🏹 Targets : 0.50-0.55-0.58"
-  let takeProfitMatch = content.match(/Targets?:?\s*[:\-]?\s*([\d.\s\-+$]+)/i);
-  if (!takeProfitMatch) {
-    // Pattern 1b: Allow for emojis before "Targets" (e.g., "🏹 Targets : 0.50-0.55")
-    takeProfitMatch = content.match(/.*?Targets?:?\s*[:\-]?\s*([\d.\s\-+$]+)/i);
+  // Pattern 1: "TP1: 0.3250 TP2: 0.3400" format - check this FIRST as it's most specific
+  // Extract all TP values from the entire content section
+  const tpRegex = /TP\d*:?\s*([\d,]+\.?\d*)\s*\$?/gi;
+  const tpMatches = Array.from(content.matchAll(tpRegex));
+  let takeProfitMatch: RegExpMatchArray | null = null;
+  if (tpMatches.length > 0) {
+    const tpValues: string[] = [];
+    for (const match of tpMatches) {
+      if (match[1]) {
+        tpValues.push(match[1]);
+      }
+    }
+    if (tpValues.length > 0) {
+      // Create a fake match object with all TP values joined
+      takeProfitMatch = ['', tpValues.join(' ')];
+    }
   }
+  
   if (!takeProfitMatch) {
-    // Pattern 2: "TP1: 0.3250 TP2: 0.3400" format or multi-line TP format
-    // Extract all TP values from the entire content section
-    const tpRegex = /TP\d*:?\s*([\d,]+\.?\d*)\s*\$?/gi;
-    const tpMatches = Array.from(content.matchAll(tpRegex));
-    if (tpMatches.length > 0) {
-      const tpValues: string[] = [];
-      for (const match of tpMatches) {
-        if (match[1]) {
-          tpValues.push(match[1]);
-        }
-      }
-      if (tpValues.length > 0) {
-        // Create a fake match object with all TP values joined
-        takeProfitMatch = ['', tpValues.join(' ')];
-      }
+    // Pattern 2: "Target: 0.3250 - 0.3400 - 0.3600" or "Targets: 0.3250 - 0.3400" or "🏹 Targets : 0.50-0.55-0.58"
+    takeProfitMatch = content.match(/Targets?:?\s*[:\-]?\s*([\d.\s\-+$]+)/i);
+    if (!takeProfitMatch) {
+      // Pattern 2b: Allow for emojis before "Targets" (e.g., "🏹 Targets : 0.50-0.55")
+      takeProfitMatch = content.match(/.*?Targets?:?\s*[:\-]?\s*([\d.\s\-+$]+)/i);
     }
   }
   if (!takeProfitMatch) {
@@ -159,8 +176,11 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
       // This handles numbered lists and multi-line formats
       const targetsSection = content.split(/Targets?:?/i)[1];
       if (targetsSection) {
-        // Stop at "Stop Loss" or end of content
-        const stopLossIndex = targetsSection.toLowerCase().indexOf('stop loss');
+        // Stop at stop loss indicators: "Stop Loss", "StopLoss", "🧨", "❌", or "Stop-Loss"
+        // Use a regex to find the earliest stop loss indicator
+        const stopLossPattern = /(?:🧨|❌|stop\s*[-]?loss|stoploss)/i;
+        const stopLossMatch = targetsSection.match(stopLossPattern);
+        const stopLossIndex = stopLossMatch ? stopLossMatch.index : -1;
         const relevantSection = stopLossIndex > 0 
           ? targetsSection.substring(0, stopLossIndex)
           : targetsSection;
@@ -171,10 +191,26 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
         if (targetNumbers) {
           // Filter out numbers that are part of malformed entries and validate
           // Remove commas before parsing, filter out numbers that are too small (likely list numbers like "1", "2")
-          const validTargets = targetNumbers
-            .map(t => parseFloat(t.replace(/,/g, '')))
-            .filter(t => !isNaN(t) && t > 0 && t > 10); // Filter out small numbers (likely list indices)
-          takeProfits.push(...validTargets);
+          // Also filter out numbers that are clearly stop loss values (very large differences from targets)
+          const parsedNumbers = targetNumbers.map(t => parseFloat(t.replace(/,/g, ''))).filter(t => !isNaN(t) && t > 0);
+          
+          // If we have multiple targets, filter out outliers that are likely stop loss values
+          // Stop loss values are typically much different from targets (either much higher for shorts or much lower for longs)
+          if (parsedNumbers.length > 1) {
+            const sorted = [...parsedNumbers].sort((a, b) => a - b);
+            const median = sorted[Math.floor(sorted.length / 2)];
+            const validTargets = parsedNumbers.filter(t => {
+              // Keep numbers that are close to other numbers (likely targets)
+              // Or numbers that are reasonable (not extreme outliers)
+              const isCloseToOthers = parsedNumbers.some(other => other !== t && Math.abs(other - t) / Math.max(other, t) < 0.5);
+              return isCloseToOthers || (t > 10 && Math.abs(t - median) / median < 2); // Within 2x of median
+            });
+            takeProfits.push(...validTargets);
+          } else {
+            // Single number or no clear pattern - use filter > 10
+            const validTargets = parsedNumbers.filter(t => t > 10);
+            takeProfits.push(...validTargets);
+          }
         }
       }
     }
