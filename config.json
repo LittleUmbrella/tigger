@@ -12,12 +12,28 @@
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
+    },
+    {
+      "name": "ronnie_harvester",
+      "channel": "3241720654",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
     }
   ],
   "parsers": [
     {
       "name": "vip_crypto_signals",
       "channel": "2427485240"
+    },
+    {
+      "name": "ronnie_crypto_signals",
+      "channel": "3241720654"
     }
   ],
   "accounts": [
@@ -61,6 +77,14 @@
       "channel": "vip-future",
       "harvester": "main_harvester",
       "parser": "vip_crypto_signals",
+      "breakevenAfterTPs": 2,
+      "initiator": "bybit",
+      "monitor": "bybit"
+    },
+    {
+      "channel": "ronnie-crypto-signals",
+      "harvester": "ronnie_harvester",
+      "parser": "ronnie_crypto_signals",
       "breakevenAfterTPs": 2,
       "initiator": "bybit",
       "monitor": "bybit"

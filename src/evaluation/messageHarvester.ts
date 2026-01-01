@@ -485,7 +485,21 @@ async function harvestTelegramMessages(
           // This tells the API to get messages older than this
           // But only if we haven't already processed all messages in this range
           const nextOffsetId = Math.max(1, minId - 1);
-          if (nextOffsetId >= offsetId) {
+          
+          // Special case: when offsetId is 0 (initial state), we should always continue
+          // because 0 means "get newest messages" and we want to paginate backward
+          if (offsetId === 0) {
+            // First batch - always continue to get older messages
+            offsetId = nextOffsetId;
+            logger.debug('Continuing pagination from initial batch', {
+              channel: options.channel,
+              batch: batchCount,
+              currentOffset: offsetId,
+              nextOffset: nextOffsetId,
+              minId,
+              maxId: Math.max(...messageIds)
+            });
+          } else if (nextOffsetId >= offsetId) {
             // We're not making progress, stop
             logger.info('Reached earliest messages (no progress)', { 
               channel: options.channel,
@@ -493,8 +507,9 @@ async function harvestTelegramMessages(
               nextOffset: nextOffsetId
             });
             break;
+          } else {
+            offsetId = nextOffsetId;
           }
-          offsetId = nextOffsetId;
         }
 
         // Delay between batches

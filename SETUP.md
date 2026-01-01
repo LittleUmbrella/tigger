@@ -98,6 +98,12 @@ To get your Telegram session string, you can use the existing utility script or 
 
 You can also use the existing utility script at `src/utilities/index.js` which will save the session to `.env` automatically after first login.
 
+**⚠️ Important: Multiple Instances**
+- Each instance (local, cloud, etc.) needs its own unique `TG_SESSION`
+- Telegram does not allow the same auth key to be used concurrently from multiple instances
+- If you get `AUTH_KEY_DUPLICATED` error, you're using the same session in multiple places
+- To create a new session, run: `npm run list-channels` and authenticate when prompted
+
 ### Discord
 
 To set up Discord:
