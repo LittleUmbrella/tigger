@@ -18,6 +18,7 @@ export interface HarvesterConfig {
   envVarNames?: {
     apiId?: string; // Name of environment variable containing Telegram API ID
     accessHash?: string; // Name of environment variable containing Telegram access hash (for private channels)
+    session?: string; // Name of environment variable containing Telegram session string (allows multiple harvesters with different sessions)
     botToken?: string; // Name of environment variable containing Discord bot token
   };
   // Deprecated: Direct credentials (for backward compatibility only)

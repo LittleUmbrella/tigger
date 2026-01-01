@@ -6,7 +6,8 @@
       "channel": "2427485240",
       "envVarNames": {
         "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH"
+        "accessHash": "TG_ACCESS_HASH",
+        "session": "TG_SESSION"
       },
       "pollInterval": 3000,
       "downloadImages": false,
@@ -18,7 +19,8 @@
       "channel": "3241720654",
       "envVarNames": {
         "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_RONNIE"
+        "accessHash": "TG_ACCESS_HASH_RONNIE",
+        "session": "TG_SESSION_RONNIE"
       },
       "pollInterval": 3000,
       "downloadImages": false,
