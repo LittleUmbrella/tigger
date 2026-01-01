@@ -407,6 +407,11 @@ export const startSignalHarvester = async (
     : (process.env.TG_SESSION || '');
   
   // Log which session environment variable is being used (without logging the actual session string)
+  // Create a fingerprint of the session (first 8 and last 8 chars) for verification
+  const sessionFingerprint = sessionString.length > 16 
+    ? `${sessionString.substring(0, 8)}...${sessionString.substring(sessionString.length - 8)}`
+    : '***';
+  
   if (sessionEnvVarName) {
     if (!process.env[sessionEnvVarName]) {
       logger.warn('Harvester-specific session env var not found, will fail', {
@@ -416,16 +421,18 @@ export const startSignalHarvester = async (
         fallbackAvailable: !!process.env.TG_SESSION
       });
     } else {
-      logger.debug('Using harvester-specific session', {
+      logger.info('Using harvester-specific session', {
         harvester: config.name,
         channel: config.channel,
-        sessionEnvVarName
+        sessionEnvVarName,
+        sessionFingerprint
       });
     }
   } else {
-    logger.debug('Using default TG_SESSION', {
+    logger.info('Using default TG_SESSION', {
       harvester: config.name,
-      channel: config.channel
+      channel: config.channel,
+      sessionFingerprint
     });
   }
   
@@ -445,16 +452,50 @@ export const startSignalHarvester = async (
     throw new Error(`${source} is required for Telegram but was not found`);
   }
   
+  // Create a completely fresh StringSession instance to ensure no shared state
+  // Create a new string to avoid any potential reference sharing
+  const freshSessionString = String(sessionString);
+  const session = new StringSession(freshSessionString);
+  
+  // Create a unique client instance with harvester-specific identifiers
+  // This helps Telegram distinguish between multiple clients using the same API ID
   const client = new TelegramClient(
-    new StringSession(sessionString),
+    session,
     apiId,
     apiHash,
-    { connectionRetries: 5 }
+    {
+      connectionRetries: 5,
+      // Add unique device/app identifiers to help Telegram distinguish clients
+      deviceModel: `Tigger-Harvester-${config.name}`,
+      appVersion: '1.0.0',
+      systemVersion: '1.0.0',
+      // Use harvester name as a unique identifier
+      systemLangCode: config.name.substring(0, 2).toUpperCase() || 'EN',
+    }
   );
+  
+  logger.debug('Created TelegramClient instance', {
+    harvester: config.name,
+    channel: config.channel,
+    sessionLength: sessionString.length,
+    sessionFingerprint
+  });
 
   let running = true;
   let lastMessageId = 0;
   let entity: Api.TypeInputPeer | undefined;
+
+  // Add a small staggered delay based on harvester name to avoid race conditions
+  // when multiple harvesters start simultaneously
+  const harvesterHash = config.name.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0);
+  const staggerDelay = (harvesterHash % 5) * 200; // 0-800ms delay
+  if (staggerDelay > 0) {
+    logger.debug('Staggering connection to avoid race conditions', {
+      harvester: config.name,
+      delayMs: staggerDelay
+    });
+    await sleep(staggerDelay);
+  }
 
   await connectTelegram(config, client, sessionString);
   entity = await resolveEntity(config, client);
