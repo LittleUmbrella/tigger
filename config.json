@@ -18,7 +18,7 @@
       "channel": "3241720654",
       "envVarNames": {
         "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH"
+        "accessHash": "TG_ACCESS_HASH_RONNIE"
       },
       "pollInterval": 3000,
       "downloadImages": false,
