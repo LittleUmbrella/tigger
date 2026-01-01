@@ -60,9 +60,7 @@ logger.info('Configuration loaded', {
   channels: config.channels.length
 });
 
-// Start orchestrator
-const stopOrchestrator = await startTradeOrchestrator(config);
-
+// Start health check server first so it's available even if orchestrator fails
 const port = process.env.PORT ? Number(process.env.PORT) : 8080;
 
 const server = http.createServer(
@@ -75,13 +73,45 @@ server.listen(port, () => {
   logger.info('Health check server started', { port });
 });
 
+// Handle unhandled promise rejections to prevent crashes
+process.on('unhandledRejection', (reason, promise) => {
+  logger.error('Unhandled promise rejection', {
+    reason: reason instanceof Error ? reason.message : String(reason),
+    stack: reason instanceof Error ? reason.stack : undefined
+  });
+});
+
+process.on('uncaughtException', (error) => {
+  logger.error('Uncaught exception', {
+    error: error.message,
+    stack: error.stack
+  });
+  // Don't exit immediately - let the health check server continue
+});
+
+// Start orchestrator (errors are handled within, so it won't crash the app)
+let stopOrchestrator: (() => Promise<void>) | null = null;
+try {
+  stopOrchestrator = await startTradeOrchestrator(config);
+  logger.info('Orchestrator started successfully');
+} catch (error) {
+  logger.error('Failed to start orchestrator', {
+    error: error instanceof Error ? error.message : String(error),
+    stack: error instanceof Error ? error.stack : undefined
+  });
+  // Don't exit - health check server should continue running
+  // This allows the deployment platform to see the app is running even if harvesters fail
+}
+
 // Handle graceful shutdown
 process.on('SIGINT', async () => {
   logger.info('Received SIGINT, shutting down gracefully...');
   server.close(() => {
     logger.info('HTTP server closed');
   });
-  await stopOrchestrator();
+  if (stopOrchestrator) {
+    await stopOrchestrator();
+  }
   process.exit(0);
 });
 
@@ -90,6 +120,8 @@ process.on('SIGTERM', async () => {
   server.close(() => {
     logger.info('HTTP server closed');
   });
-  await stopOrchestrator();
+  if (stopOrchestrator) {
+    await stopOrchestrator();
+  }
   process.exit(0);
 });
