@@ -83,20 +83,67 @@ const getOrCreateClient = async (
 
   // Ensure connection happens only once, even if multiple harvesters request it simultaneously
   if (!clientConnections.has(sessionKey)) {
-    const connectionPromise = client.connect().then(async () => {
-      const me = await client.getMe();
-      logger.info('Created and connected new shared TelegramClient', {
-        sessionKey: sessionKey.substring(0, 16) + '...',
-        userId: String(me.id),
-        username: me.username || null,
-        phone: me.phone || null
+    const connectionPromise = client.connect()
+      .then(async () => {
+        const me = await client.getMe();
+        logger.info('Created and connected new shared TelegramClient', {
+          sessionKey: sessionKey.substring(0, 16) + '...',
+          userId: String(me.id),
+          username: me.username || null,
+          phone: me.phone || null
+        });
+      })
+      .catch(async (error) => {
+        // If connection fails, remove the client from the map so it can be retried
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        logger.error('Failed to connect shared TelegramClient, removing from cache', {
+          sessionKey: sessionKey.substring(0, 16) + '...',
+          error: errorMessage
+        });
+        
+        // Clean up failed client
+        clients.delete(sessionKey);
+        clientRefCounts.delete(sessionKey);
+        clientConnections.delete(sessionKey);
+        
+        // Disconnect the failed client
+        try {
+          await client.disconnect();
+        } catch (disconnectError) {
+          // Ignore disconnect errors
+        }
+        
+        throw error;
       });
-    });
     clientConnections.set(sessionKey, connectionPromise);
   }
 
   // Wait for connection to complete
-  await clientConnections.get(sessionKey);
+  try {
+    await clientConnections.get(sessionKey);
+  } catch (error) {
+    // Connection failed, remove from cache and rethrow
+    clients.delete(sessionKey);
+    clientRefCounts.delete(sessionKey);
+    clientConnections.delete(sessionKey);
+    throw error;
+  }
+
+  // Verify client is actually connected before returning
+  if (!client.connected) {
+    logger.warn('Client not connected after connection promise resolved, attempting reconnect', {
+      sessionKey: sessionKey.substring(0, 16) + '...'
+    });
+    try {
+      await client.connect();
+    } catch (reconnectError) {
+      // Clean up and rethrow
+      clients.delete(sessionKey);
+      clientRefCounts.delete(sessionKey);
+      clientConnections.delete(sessionKey);
+      throw reconnectError;
+    }
+  }
 
   return client;
 };
@@ -639,9 +686,42 @@ export const startSignalHarvester = async (
   let lastMessageId = 0;
   let entity: Api.TypeInputPeer | undefined;
 
-  // Client is already connected by the manager, just verify connection
+  // Client should already be connected by the manager
+  // Verify connection and handle any connection errors
   if (!client.connected) {
-    await client.connect();
+    logger.warn('Shared client not connected, attempting to connect', {
+      harvester: config.name,
+      channel: config.channel
+    });
+    try {
+      await client.connect();
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Provide helpful error message for AUTH_KEY_DUPLICATED
+      if (errorMessage.includes('AUTH_KEY_DUPLICATED')) {
+        logger.error('AUTH_KEY_DUPLICATED: Another instance is using this session', {
+          harvester: config.name,
+          channel: config.channel,
+          possibleCauses: [
+            'Another deployment/instance is running with the same TG_SESSION',
+            'A local instance is running with the same session',
+            'A previous deployment did not shut down properly'
+          ],
+          solution: 'Stop all other instances using this session, or use a different session'
+        });
+      }
+      
+      logger.error('Failed to connect shared client', {
+        harvester: config.name,
+        channel: config.channel,
+        error: errorMessage
+      });
+      
+      // Release the client reference since it failed
+      await releaseClient(sessionString, apiId, apiHash);
+      throw error;
+    }
   }
   
   // Get account info for logging (client is already connected)
@@ -654,10 +734,26 @@ export const startSignalHarvester = async (
       username: me.username || null
     });
   } catch (error) {
-    logger.warn('Could not get account info', {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.warn('Could not get account info, client may not be properly connected', {
       harvester: config.name,
-      error: error instanceof Error ? error.message : String(error)
+      error: errorMessage
     });
+    
+    // If we can't get account info and client is not connected, try to reconnect
+    if (!client.connected) {
+      try {
+        await client.connect();
+      } catch (reconnectError) {
+        const reconnectErrorMsg = reconnectError instanceof Error ? reconnectError.message : String(reconnectError);
+        logger.error('Failed to reconnect client', {
+          harvester: config.name,
+          error: reconnectErrorMsg
+        });
+        await releaseClient(sessionString, apiId, apiHash);
+        throw reconnectError;
+      }
+    }
   }
   entity = await resolveEntity(config, client);
   
