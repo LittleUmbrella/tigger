@@ -1,5 +1,5 @@
 import { ParsedOrder } from '../../../types/order';
-import { validateParsedOrder } from '../../../utils/tradeValidation';
+import { validateParsedOrder } from '../../../utils/tradeValidation.js';
 
 export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   // Signal type - check first to determine if we should continue
