@@ -22,12 +22,16 @@ if (process.env.NODE_ENV !== 'production') {
 if (!process.env.LOGGLY_TOKEN || !process.env.LOGGLY_SUBDOMAIN) {
   console.error(`LOGGLY_TOKEN and LOGGLY_SUBDOMAIN must be set, got ...${process.env.LOGGLY_TOKEN?.slice(-4) ?? '<no token>' } and ...${process.env.LOGGLY_SUBDOMAIN?.slice(-4) ?? '<no subdomain>' }`);
 } else {
-  transports.push(new Loggly({
-    token: process.env.LOGGLY_TOKEN!,
-    subdomain: process.env.LOGGLY_SUBDOMAIN!,
-    tags: ['tigger-bot', process.env.LOGGLY_SOURCE_TAG || ''],
-    json: true,
-  }));
+  if (process.env.LOGGLY_ENABLED === 'true') {
+    transports.push(new Loggly({
+      token: process.env.LOGGLY_TOKEN!,
+      subdomain: process.env.LOGGLY_SUBDOMAIN!,
+      tags: ['tigger-bot', process.env.LOGGLY_SOURCE_TAG || ''],
+      json: true,
+    }));
+  } else {
+    console.warn('LOGGLY_ENABLED is not set to true, skipping Loggly transport');
+  }
 }
 
 export const logger = winston.createLogger({
