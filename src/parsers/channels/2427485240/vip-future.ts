@@ -1,5 +1,5 @@
 import { ParsedOrder } from '../../../types/order';
-import { validateParsedOrder } from '../../../utils/tradeValidation';
+import { validateParsedOrder } from '../../../utils/tradeValidation.js';
 
 const signalTypeRegex = /(?:🟢\s*)?(?:LONG|Long|long)|(?:🔴\s*)?(?:SHORT|Short|short)/i;
 
