@@ -814,16 +814,52 @@ export function createHistoricalPriceProvider(
       const targetTimestamp = state.currentTime.valueOf();
       
       // Find the closest price point to target time
-      let closest = cachedData[0];
+      // Prefer points <= targetTimestamp (before or at target time)
+      // If no points before target, use the closest point after
+      let closestBefore: PriceDataPoint | null = null;
+      let closestAfter: PriceDataPoint | null = null;
+      let minDiffBefore = Infinity;
+      let minDiffAfter = Infinity;
+      
       for (const point of cachedData) {
-        if (point.timestamp <= targetTimestamp) {
-          closest = point;
+        const diff = targetTimestamp - point.timestamp;
+        if (diff >= 0) {
+          // Point is before or at target time
+          if (diff < minDiffBefore) {
+            closestBefore = point;
+            minDiffBefore = diff;
+          }
         } else {
-          break;
+          // Point is after target time
+          const absDiff = Math.abs(diff);
+          if (absDiff < minDiffAfter) {
+            closestAfter = point;
+            minDiffAfter = absDiff;
+          }
         }
       }
       
-      return closest.price;
+      // Prefer closest point before target time, fallback to closest after
+      const closest = closestBefore || closestAfter || cachedData[0];
+      const selectedTimeDiff = closest ? Math.abs(closest.timestamp - targetTimestamp) : Infinity;
+      
+      // Log warning if selected price is far from target time (more than 1 minute)
+      if (selectedTimeDiff > 60000) {
+        logger.warn('Selected price point is far from target time', {
+          symbol: normalizedSymbol,
+          targetTime: state.currentTime.toISOString(),
+          selectedTime: closest ? new Date(closest.timestamp).toISOString() : 'none',
+          timeDiffSeconds: Math.round(selectedTimeDiff / 1000),
+          selectedPrice: closest?.price,
+          usedBeforeTarget: closestBefore !== null,
+          usedAfterTarget: closestAfter !== null && closestBefore === null,
+          dataPointsAvailable: cachedData.length,
+          firstDataPoint: cachedData[0] ? new Date(cachedData[0].timestamp).toISOString() : 'none',
+          lastDataPoint: cachedData[cachedData.length - 1] ? new Date(cachedData[cachedData.length - 1].timestamp).toISOString() : 'none'
+        });
+      }
+      
+      return closest?.price || null;
     },
     
     getPriceAtTime: async (symbol: string, time: dayjs.Dayjs): Promise<number | null> => {

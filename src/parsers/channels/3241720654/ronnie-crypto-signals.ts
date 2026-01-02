@@ -1,4 +1,5 @@
 import { ParsedOrder } from '../../../types/order';
+import { validateParsedOrder } from '../../../utils/tradeValidation';
 
 export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   // Signal type - check first to determine if we should continue
@@ -56,12 +57,13 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
     entryPrice = undefined;
   } else {
     // Try range format: "Entry: 0.3140 - 0.3100" or "Buy: 0.08710 - 0.08457" or "✅ Entry: 0.48-0.46"
+    // Also handle underscore separator: "Entry Zone: 0.076 _ 0.070"
     // Handle numbers with commas: "Entry: 3,148.60" -> "3148.60"
     // Handle parentheses: "Entry (Limit Order) : 3,148.60"
-    let entryPriceRangeMatch = content.match(/(?:Entry|ENTRY|Buy|BUY)[^:]*:\s*-?\s*([\d,]+\.?\d*)\s*-\s*([\d,]+\.?\d*)/i);
+    let entryPriceRangeMatch = content.match(/(?:Entry|ENTRY|Buy|BUY)[^:]*:\s*-?\s*([\d,]+\.?\d*)\s*[_\s-]+\s*([\d,]+\.?\d*)/i);
     if (!entryPriceRangeMatch) {
       // Try with optional characters before (e.g., emojis)
-      entryPriceRangeMatch = content.match(/.*?(?:Entry|ENTRY|Buy|BUY)[^:]*:\s*-?\s*([\d,]+\.?\d*)\s*-\s*([\d,]+\.?\d*)/i);
+      entryPriceRangeMatch = content.match(/.*?(?:Entry|ENTRY|Buy|BUY)[^:]*:\s*-?\s*([\d,]+\.?\d*)\s*[_\s-]+\s*([\d,]+\.?\d*)/i);
     }
     if (entryPriceRangeMatch) {
       // Remove commas from numbers before parsing
@@ -251,7 +253,7 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   
   if (takeProfits.length === 0) return null;
 
-  return {
+  const parsedOrder: ParsedOrder = {
     tradingPair: `${tradingPair}/USDT`,
     entryPrice,
     stopLoss,
@@ -259,4 +261,12 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
     leverage,
     signalType,
   };
+
+  // Validate parsed order (only if entryPrice is provided)
+  // If validation fails, return null to indicate parsing failure
+  if (!validateParsedOrder(parsedOrder, { message: content })) {
+    return null;
+  }
+
+  return parsedOrder;
 };

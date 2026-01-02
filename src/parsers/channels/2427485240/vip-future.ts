@@ -1,4 +1,5 @@
 import { ParsedOrder } from '../../../types/order';
+import { validateParsedOrder } from '../../../utils/tradeValidation';
 
 const signalTypeRegex = /(?:🟢\s*)?(?:LONG|Long|long)|(?:🔴\s*)?(?:SHORT|Short|short)/i;
 
@@ -162,6 +163,12 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
     leverage,
     signalType,
   };
+
+  // Validate parsed order (only if entryPrice is provided)
+  // If validation fails, return null to indicate parsing failure
+  if (!validateParsedOrder(parsedOrder, { message: content })) {
+    return null;
+  }
 
   return parsedOrder;
 };

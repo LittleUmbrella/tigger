@@ -18,6 +18,70 @@ export const getDecimalPrecision = (price: number): number => {
 };
 
 /**
+ * Get quantity precision based on risk amount in asset's base currency: 
+ * 2 decimal places lower (more precise) than the position of the first significant digit
+ * 
+ * Examples:
+ * - Risk 100 USDT, BTC at 100,000: risk in BTC = 0.001, first sig at position 3 -> precision = 5
+ * - Risk 50 USDT, ETH at 3,000: risk in ETH = 0.0167, first sig at position 2 -> precision = 4
+ * - Risk 10 USDT, token at 0.05: risk in token = 200, first sig in integer -> precision = 2
+ * 
+ * @param riskAmountInAsset - Risk amount in the asset's base currency (positionSize / entryPrice)
+ * @returns Quantity precision (number of decimal places)
+ */
+export const getQuantityPrecisionFromRiskAmount = (riskAmountInAsset: number): number => {
+  if (!isFinite(riskAmountInAsset) || riskAmountInAsset <= 0) return 2;
+  
+  const riskStr = riskAmountInAsset.toString();
+  
+  // Handle scientific notation (e.g., 1.23e-5)
+  if (riskStr.includes('e') || riskStr.includes('E')) {
+    const num = parseFloat(riskStr);
+    if (num < 1) {
+      // For numbers < 1, find first significant digit position
+      const decimalStr = num.toFixed(20).split('.')[1];
+      let firstSigPos = 0;
+      for (let i = 0; i < decimalStr.length; i++) {
+        if (decimalStr[i] !== '0') {
+          firstSigPos = i + 1; // Position (1-indexed for decimal places)
+          break;
+        }
+      }
+      // "2 decimal places lower" means more precision: add 2
+      return firstSigPos + 2;
+    } else {
+      // For numbers >= 1, use default precision
+      return 2;
+    }
+  }
+  
+  // Handle normal decimal notation
+  if (riskStr.includes('.')) {
+    const [integerPart, decimalPart] = riskStr.split('.');
+    
+    // If integer part is non-zero, first significant digit is in integer part
+    if (integerPart && parseInt(integerPart) > 0) {
+      return 2; // Default to 2 decimal places for risk amounts >= 1 asset
+    }
+    
+    // Find first non-zero digit in decimal part
+    let firstSigPos = 0;
+    for (let i = 0; i < decimalPart.length; i++) {
+      if (decimalPart[i] !== '0') {
+        firstSigPos = i + 1; // Position (1-indexed for decimal places)
+        break;
+      }
+    }
+    
+    // "2 decimal places lower" means more precision: add 2 to the position
+    return firstSigPos + 2;
+  }
+  
+  // No decimal point (integer) - risk amount is >= 1 asset
+  return 2; // Default to 2 decimal places
+};
+
+/**
  * Round price to exchange tick size/precision
  * 
  * @param price - Price to round

@@ -9,6 +9,7 @@ import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo } from './symbolValidator.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
+import { validateTradePrices } from '../utils/tradeValidation.js';
 import dayjs from 'dayjs';
 
 
@@ -115,6 +116,18 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   const roundedTPPrices = order.takeProfits && order.takeProfits.length > 0
     ? order.takeProfits.map(tpPrice => roundPrice(tpPrice, pricePrecision))
     : order.takeProfits;
+
+  // Validate trade prices before proceeding (safety net - parsers should have validated already)
+  // This is especially important for market orders where entry price is fetched from price provider
+  if (!validateTradePrices(
+    order.signalType,
+    roundedEntryPrice,
+    roundedStopLoss,
+    roundedTPPrices,
+    { channel, symbol: normalizedTradingPair, messageId: message.message_id }
+  )) {
+    throw new Error(`Trade validation failed for ${normalizedTradingPair}: Invalid price relationships detected`);
+  }
 
   // In evaluation mode, set quantity to 0 initially
   // Quantities will be recalculated after mock exchanges process trades

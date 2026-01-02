@@ -17,7 +17,7 @@ import { EvaluationConfig } from '../types/config.js';
 import { EvaluationResultRecord } from '../db/schema.js';
 import { createMockExchange } from './mockExchange.js';
 import { createBybitPublicRateLimiter } from '../utils/rateLimiter.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision } from '../utils/positionSizing.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount } from '../utils/positionSizing.js';
 import { getSymbolInfo } from '../initiators/symbolValidator.js';
 import dayjs from 'dayjs';
 
@@ -539,7 +539,9 @@ async function recalculateQuantitiesHistorically(
     }
     
     if (decimalPrecision === undefined) {
-      decimalPrecision = getDecimalPrecision(trade.entry_price);
+      // Calculate risk amount in asset's base currency
+      const riskAmountInAsset = positionSize / trade.entry_price;
+      decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
     }
 
     const newQuantity = calculateQuantity(positionSize, trade.entry_price, decimalPrecision);

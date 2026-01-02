@@ -47,6 +47,7 @@ export interface Trade {
   account_name?: string; // Account name that executed this trade (from accounts config)
   order_id?: string;
   position_id?: string; // Bybit position ID after entry is filled
+  entry_order_type?: 'market' | 'limit'; // Type of entry order (market or limit)
   status: 'pending' | 'active' | 'filled' | 'cancelled' | 'stopped' | 'completed' | 'closed';
   entry_filled_at?: string;
   exit_price?: number;
@@ -232,6 +233,7 @@ class SQLiteAdapter implements DatabaseAdapter {
         account_name TEXT,
         order_id TEXT,
         position_id TEXT,
+        entry_order_type TEXT,
         status TEXT NOT NULL DEFAULT 'pending',
         entry_filled_at TEXT,
         exit_price REAL,
@@ -255,6 +257,13 @@ class SQLiteAdapter implements DatabaseAdapter {
     // Add quantity column if it doesn't exist (migration)
     try {
       this.db.exec(`ALTER TABLE trades ADD COLUMN quantity REAL`);
+    } catch (error) {
+      // Column already exists, ignore
+    }
+
+    // Add entry_order_type column if it doesn't exist (migration)
+    try {
+      this.db.exec(`ALTER TABLE trades ADD COLUMN entry_order_type TEXT`);
     } catch (error) {
       // Column already exists, ignore
     }
@@ -463,11 +472,11 @@ class SQLiteAdapter implements DatabaseAdapter {
     const stmt = this.db.prepare(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
-        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, status,
+        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, entry_order_type, status,
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
     `);
     const params = [
       trade.message_id,
@@ -483,6 +492,7 @@ class SQLiteAdapter implements DatabaseAdapter {
       trade.account_name || null,
       trade.order_id || null,
       trade.position_id || null,
+      trade.entry_order_type || null,
       trade.status,
       trade.entry_filled_at || null,
       trade.exit_price || null,
@@ -1116,6 +1126,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           account_name TEXT,
           order_id TEXT,
           position_id TEXT,
+          entry_order_type TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
           entry_filled_at TIMESTAMP,
           exit_price REAL,
@@ -1142,6 +1153,16 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       // Add quantity column if it doesn't exist (migration)
       try {
         await client.query(`ALTER TABLE trades ADD COLUMN quantity REAL`);
+      } catch (error: any) {
+        // Column already exists, ignore
+        if (!error.message?.includes('already exists')) {
+          throw error;
+        }
+      }
+
+      // Add entry_order_type column if it doesn't exist (migration)
+      try {
+        await client.query(`ALTER TABLE trades ADD COLUMN entry_order_type TEXT`);
       } catch (error: any) {
         // Column already exists, ignore
         if (!error.message?.includes('already exists')) {
@@ -1478,11 +1499,11 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     const result = await this.pool.query(`
       INSERT INTO trades (
         message_id, channel, trading_pair, leverage, entry_price, stop_loss,
-        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, status,
+        take_profits, risk_percentage, quantity, exchange, account_name, order_id, position_id, entry_order_type, status,
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, ${created_at ? '$22' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, ${created_at ? '$23' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
       RETURNING id
     `, [
       trade.message_id,
@@ -1498,6 +1519,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       trade.account_name || null,
       trade.order_id || null,
       trade.position_id || null,
+      trade.entry_order_type || null,
       trade.status,
       trade.entry_filled_at || null,
       trade.exit_price || null,
