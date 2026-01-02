@@ -2,8 +2,6 @@ import winston from 'winston';
 import { Loggly } from 'winston-loggly-bulk';
 
 const transports: (winston.transports.FileTransportInstance | Loggly | winston.transports.ConsoleTransportInstance)[] = [
-  new winston.transports.File({ filename: 'logs/error.log', level: 'error' }),
-  new winston.transports.File({ filename: 'logs/combined.log' }),
   new winston.transports.Console({
     format: winston.format.combine(
       winston.format.colorize(),
@@ -15,6 +13,11 @@ const transports: (winston.transports.FileTransportInstance | Loggly | winston.t
     )
   })
 ];
+
+if (process.env.NODE_ENV !== 'production') {
+  transports.push(new winston.transports.File({ filename: 'logs/error.log', level: 'error' }));
+  transports.push(new winston.transports.File({ filename: 'logs/combined.log' }));
+}
 
 if (!process.env.LOGGLY_TOKEN || !process.env.LOGGLY_SUBDOMAIN) {
   console.error(`LOGGLY_TOKEN and LOGGLY_SUBDOMAIN must be set, got ...${process.env.LOGGLY_TOKEN?.slice(-4) ?? '<no token>' } and ...${process.env.LOGGLY_SUBDOMAIN?.slice(-4) ?? '<no subdomain>' }`);
