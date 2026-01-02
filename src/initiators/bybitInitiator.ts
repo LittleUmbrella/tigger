@@ -3,7 +3,8 @@ import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision, roundPrice, roundQuantity } from '../utils/positionSizing.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity } from '../utils/positionSizing.js';
+import { validateTradePrices } from '../utils/tradeValidation.js';
 import dayjs from 'dayjs';
 
 /**
@@ -214,6 +215,17 @@ const executeTradeForAccount = async (
       }
     }
 
+    // Validate trade prices before proceeding (safety net - parsers should have validated already)
+    if (!validateTradePrices(
+      order.signalType,
+      entryPrice,
+      order.stopLoss,
+      order.takeProfits,
+      { channel, symbol, messageId: message.message_id }
+    )) {
+      throw new Error(`Trade validation failed for ${symbol}: Invalid price relationships detected`);
+    }
+
     // Use baseLeverage as default if leverage is not specified in order
     const baseLeverage = context.config.baseLeverage;
     const effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
@@ -237,15 +249,17 @@ const executeTradeForAccount = async (
       const symbolInfo = await getSymbolInfo(bybitClient, symbol);
       if (symbolInfo?.qtyPrecision !== undefined) {
         decimalPrecision = symbolInfo.qtyPrecision;
-      } else if (entryPrice && entryPrice > 0) {
-        // Fallback to inferring from entry price if symbol info not available
-        decimalPrecision = getDecimalPrecision(entryPrice);
+      } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
+        // Fallback: 2 decimal places lower than first significant digit of risk amount in asset
+        const riskAmountInAsset = positionSize / entryPrice;
+        decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       }
       pricePrecision = symbolInfo?.pricePrecision;
       // Note: tickSize would need to be extracted from symbolInfo if available
       // For now, we'll use pricePrecision for rounding
-    } else if (entryPrice && entryPrice > 0) {
-      decimalPrecision = getDecimalPrecision(entryPrice);
+    } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
+      const riskAmountInAsset = positionSize / entryPrice;
+      decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       pricePrecision = getDecimalPrecision(entryPrice);
     }
     
@@ -605,6 +619,7 @@ const executeTradeForAccount = async (
       exchange: 'bybit',
       account_name: accountName || undefined,
       order_id: orderId,
+      entry_order_type: isMarketOrder ? 'market' : 'limit',
       status: 'pending',
       stop_loss_breakeven: false,
       expires_at: expiresAt

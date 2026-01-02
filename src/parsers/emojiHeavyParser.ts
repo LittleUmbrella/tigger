@@ -1,5 +1,6 @@
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
+import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 /**
  * Parser for emoji-heavy signal format like:
@@ -58,7 +59,7 @@ export const emojiHeavyParser = (content: string): ParsedOrder | null => {
       takeProfits.sort((a, b) => b - a); // Descending for short
     }
 
-    return {
+    const parsedOrder: ParsedOrder = {
       tradingPair,
       leverage,
       entryPrice,
@@ -67,6 +68,14 @@ export const emojiHeavyParser = (content: string): ParsedOrder | null => {
       signalType,
       entryTargets: entryPrices.length > 1 ? entryPrices : undefined
     };
+
+    // Validate parsed order (only if entryPrice is provided)
+    // If validation fails, return null to indicate parsing failure
+    if (!validateParsedOrder(parsedOrder, { message: content })) {
+      return null;
+    }
+
+    return parsedOrder;
   } catch (error) {
     logger.error('Error in emojiHeavyParser', {
       error: error instanceof Error ? error.message : String(error)

@@ -8,6 +8,7 @@ import { parseWithLLMFallback, LLMParserResult } from './llmFallbackParser.js';
 import { parseManagementCommand } from '../managers/managementParser.js';
 import { vipCryptoSignals } from './channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from './channels/3241720654/ronnie-crypto-signals.js';
+import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
 registerParser('default', defaultParser);
@@ -138,6 +139,21 @@ export const parseUnparsedMessages = async (
             messageId: message.message_id,
             error: error instanceof Error ? error.message : String(error),
           });
+        }
+      }
+
+      if (parsed) {
+        // Final validation check (safety net for parsers that don't validate internally)
+        // This is especially important for market orders where entryPrice might be set later
+        if (!validateParsedOrder(parsed, { channel: config.channel, messageId: message.message_id, message: message.content })) {
+          logger.warn('Parsed order failed validation, rejecting', {
+            channel: config.channel,
+            parserName: config.name,
+            messageId: message.message_id,
+            tradingPair: parsed.tradingPair,
+            signalType: parsed.signalType,
+          });
+          parsed = null; // Reject invalid order
         }
       }
 
