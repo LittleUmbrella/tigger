@@ -194,21 +194,54 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
           // Also filter out numbers that are clearly stop loss values (very large differences from targets)
           const parsedNumbers = targetNumbers.map(t => parseFloat(t.replace(/,/g, ''))).filter(t => !isNaN(t) && t > 0);
           
+          // Filter out sequential small integers that are likely list indices (1, 2, 3, 4, etc.)
+          // These appear in formats like "1) 🎯 0.3970$ 2) 🎯 0.4040$"
+          const sortedNumbers = [...parsedNumbers].sort((a, b) => a - b);
+          const isSequentialInteger = (num: number, allNumbers: number[]): boolean => {
+            // Check if this number is a small integer (1-20) and part of a sequence
+            if (num >= 1 && num <= 20 && Number.isInteger(num)) {
+              // Check if there are other sequential integers nearby
+              const nearbyIntegers = allNumbers.filter(n => 
+                Number.isInteger(n) && n >= 1 && n <= 20 && Math.abs(n - num) <= 2
+              );
+              return nearbyIntegers.length >= 2; // At least 2 sequential integers suggests list indices
+            }
+            return false;
+          };
+          
+          // First pass: filter out sequential small integers (list indices)
+          const withoutListIndices = parsedNumbers.filter(t => !isSequentialInteger(t, parsedNumbers));
+          
+          // If we filtered out list indices, use the cleaned list; otherwise use original
+          const numbersToProcess = withoutListIndices.length > 0 ? withoutListIndices : parsedNumbers;
+          
           // If we have multiple targets, filter out outliers that are likely stop loss values
           // Stop loss values are typically much different from targets (either much higher for shorts or much lower for longs)
-          if (parsedNumbers.length > 1) {
-            const sorted = [...parsedNumbers].sort((a, b) => a - b);
+          if (numbersToProcess.length > 1) {
+            const sorted = [...numbersToProcess].sort((a, b) => a - b);
             const median = sorted[Math.floor(sorted.length / 2)];
-            const validTargets = parsedNumbers.filter(t => {
+            const validTargets = numbersToProcess.filter(t => {
               // Keep numbers that are close to other numbers (likely targets)
               // Or numbers that are reasonable (not extreme outliers)
-              const isCloseToOthers = parsedNumbers.some(other => other !== t && Math.abs(other - t) / Math.max(other, t) < 0.5);
+              const isCloseToOthers = numbersToProcess.some(other => other !== t && Math.abs(other - t) / Math.max(other, t) < 0.5);
+              // For small values (< 1), be more lenient; for larger values, use median check
+              if (t < 1) {
+                return isCloseToOthers || Math.abs(t - median) / Math.max(median, 0.001) < 2;
+              }
               return isCloseToOthers || (t > 10 && Math.abs(t - median) / median < 2); // Within 2x of median
             });
             takeProfits.push(...validTargets);
           } else {
-            // Single number or no clear pattern - use filter > 10
-            const validTargets = parsedNumbers.filter(t => t > 10);
+            // Single number or no clear pattern - filter out small integers that are likely list indices
+            const validTargets = numbersToProcess.filter(t => {
+              // Filter out small integers (1-20) that are likely list indices
+              if (t >= 1 && t <= 20 && Number.isInteger(t)) {
+                return false;
+              }
+              // For very small values, accept them (they might be valid targets)
+              // For larger values, use the > 10 filter
+              return t < 1 || t > 10;
+            });
             takeProfits.push(...validTargets);
           }
         }
