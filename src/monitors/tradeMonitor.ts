@@ -4,6 +4,9 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
+import { getSymbolInfo } from '../initiators/symbolValidator.js';
+import { roundPrice, getDecimalPrecision } from '../utils/positionSizing.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
@@ -87,21 +90,25 @@ const checkEntryFilled = async (
       });
       
       if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list) {
-            const order = orderInfo.result.list.find((o: any) => o.orderId === trade.order_id);
+            const order = orderInfo.result.list.find((o: any) => 
+              getBybitField<string>(o, 'orderId', 'order_id') === trade.order_id
+            );
         if (!order) {
           // Order not found in active orders, likely filled
           // Get position ID from open positions
           const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
         const position = positions.retCode === 0 && positions.result && positions.result.list 
           ? positions.result.list.find((p: any) => 
-          p.symbol === symbol && parseFloat(p.size || '0') !== 0
+          p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
         ) : null;
             if (position) {
-              return { filled: true, positionId: position.positionIdx?.toString() };
+              const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+              return { filled: true, positionId: positionIdx?.toString() };
             }
           return { filled: false };
         }
-        return { filled: (order as any).orderStatus === 'Filled' };
+        const orderStatus = getBybitField<string>(order, 'orderStatus', 'order_status');
+        return { filled: orderStatus === 'Filled' };
       }
     }
     return { filled: false };
@@ -172,12 +179,13 @@ const checkPositionClosed = async (
       const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
       
       if (positions.retCode === 0 && positions.result && positions.result.list) {
-        const position = positions.result.list.find((p: any) => 
-          p.symbol === symbol && p.positionIdx?.toString() === trade.position_id
-        );
+        const position = positions.result.list.find((p: any) => {
+          const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+          return p.symbol === symbol && positionIdx?.toString() === trade.position_id;
+        });
         
         // If position doesn't exist or size is 0, it's closed
-        if (!position || parseFloat(position.size || '0') === 0) {
+        if (!position || parseFloat(getBybitField<string>(position, 'size') || '0') === 0) {
           // Get closed PNL from position history
           const positionHistory = await bybitClient.getClosedPnL({
             category: 'linear',
@@ -192,8 +200,8 @@ const checkPositionClosed = async (
             );
             
             if (closedPosition) {
-              const exitPrice = parseFloat(closedPosition.avgExitPrice || '0');
-              const pnl = parseFloat(closedPosition.closedPnl || '0');
+              const exitPrice = parseFloat(getBybitField<string>(closedPosition, 'avgExitPrice', 'avg_exit_price') || '0');
+              const pnl = parseFloat(getBybitField<string>(closedPosition, 'closedPnl', 'closed_pnl') || '0');
               return { closed: true, exitPrice, pnl };
             }
           }
@@ -210,20 +218,22 @@ const checkPositionClosed = async (
             // For a long position, we look for sell trades
             // For a short position, we look for buy trades
             const closingTrades = tradeHistory.result.list.filter((t: any) => {
-              const tradeTime = parseFloat(t.execTime || '0');
+              const tradeTime = parseFloat(getBybitField<string>(t, 'execTime', 'exec_time') || '0');
               const entryTime = trade.entry_filled_at ? new Date(trade.entry_filled_at).getTime() : 0;
               return tradeTime > entryTime;
             });
             
             if (closingTrades.length > 0) {
               // Get average exit price from closing trades
-              const totalQty = closingTrades.reduce((sum: number, t: any) => sum + parseFloat(t.execQty || '0'), 0);
+              const totalQty = closingTrades.reduce((sum: number, t: any) => 
+                sum + parseFloat(getBybitField<string>(t, 'execQty', 'exec_qty') || '0'), 0);
               const weightedPrice = closingTrades.reduce((sum: number, t: any) => {
-                const qty = parseFloat(t.execQty || '0');
-                const price = parseFloat(t.execPrice || '0');
+                const qty = parseFloat(getBybitField<string>(t, 'execQty', 'exec_qty') || '0');
+                const price = parseFloat(getBybitField<string>(t, 'execPrice', 'exec_price') || '0');
                 return sum + (price * qty);
               }, 0);
-              const exitPrice = totalQty > 0 ? weightedPrice / totalQty : parseFloat(closingTrades[0].execPrice || '0');
+              const firstExecPrice = getBybitField<string>(closingTrades[0], 'execPrice', 'exec_price');
+              const exitPrice = totalQty > 0 ? weightedPrice / totalQty : parseFloat(firstExecPrice || '0');
               
               // Try to get actual PNL from position history one more time with more parameters
               const detailedHistory = await bybitClient.getClosedPnL({
@@ -234,13 +244,13 @@ const checkPositionClosed = async (
               
               if (detailedHistory.retCode === 0 && detailedHistory.result && detailedHistory.result.list) {
             const recentClosed = detailedHistory.result.list.find((p: any) => 
-              p.symbol === symbol && parseFloat(p.closedPnl || '0') !== 0
+              p.symbol === symbol && parseFloat(getBybitField<string>(p, 'closedPnl', 'closed_pnl') || '0') !== 0
             );
                 if (recentClosed) {
                   return { 
                     closed: true, 
-                    exitPrice: parseFloat(recentClosed.avgExitPrice || exitPrice.toString()),
-                    pnl: parseFloat(recentClosed.closedPnl || '0')
+                    exitPrice: parseFloat(getBybitField<string>(recentClosed, 'avgExitPrice', 'avg_exit_price') || exitPrice.toString()),
+                    pnl: parseFloat(getBybitField<string>(recentClosed, 'closedPnl', 'closed_pnl') || '0')
                   };
                 }
               }
@@ -314,6 +324,225 @@ const updateStopLoss = async (
   }
 };
 
+/**
+ * Distribute quantity evenly across take profit orders
+ */
+const distributeQuantityAcrossTPs = (
+  totalQty: number,
+  numTPs: number,
+  decimalPrecision: number
+): number[] => {
+  if (numTPs === 0) return [];
+  if (numTPs === 1) return [Math.round(totalQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision)];
+  
+  const baseQty = totalQty / numTPs;
+  const roundedQuantities: number[] = [];
+  
+  for (let i = 0; i < numTPs - 1; i++) {
+    roundedQuantities.push(Math.floor(baseQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision));
+  }
+  
+  const allocatedQty = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
+  const remainingQty = totalQty - allocatedQty;
+  roundedQuantities.push(Math.ceil(remainingQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision));
+  
+  return roundedQuantities;
+};
+
+/**
+ * Format quantity string with proper precision (remove trailing zeros)
+ */
+const formatQuantity = (quantity: number, precision: number): string => {
+  const formatted = quantity.toFixed(precision);
+  return formatted.replace(/\.?0+$/, '');
+};
+
+/**
+ * Place take profit orders after entry fills
+ */
+const placeTakeProfitOrders = async (
+  trade: Trade,
+  bybitClient: RestClientV5 | undefined,
+  db: DatabaseManager
+): Promise<void> => {
+  try {
+    if (!bybitClient || trade.exchange !== 'bybit' || !trade.entry_filled_at) {
+      return;
+    }
+
+    // Check if TP orders already exist
+    const existingOrders = await db.getOrdersByTradeId(trade.id);
+    const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
+    if (existingTPOrders.length > 0) {
+      logger.debug('Take profit orders already exist, skipping placement', {
+        tradeId: trade.id,
+        existingTPCount: existingTPOrders.length
+      });
+      return;
+    }
+
+    const takeProfits = JSON.parse(trade.take_profits) as number[];
+    if (!takeProfits || takeProfits.length === 0) {
+      return;
+    }
+
+    const symbol = trade.trading_pair.replace('/', '');
+    
+    // Get position info to determine side and quantity
+    const positionResponse = await bybitClient.getPositionInfo({
+      category: 'linear',
+      symbol: symbol
+    });
+
+    if (positionResponse.retCode !== 0 || !positionResponse.result || !positionResponse.result.list) {
+      logger.warn('Could not get position info for TP order placement', {
+        tradeId: trade.id,
+        symbol
+      });
+      return;
+    }
+
+    const positions = positionResponse.result.list.filter((p: any) => {
+      const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+      return size !== 0 && p.symbol === symbol;
+    });
+
+    if (positions.length === 0) {
+      logger.warn('No position found for TP order placement', {
+        tradeId: trade.id,
+        symbol
+      });
+      return;
+    }
+
+    const position = positions[0];
+    const positionSize = Math.abs(parseFloat(getBybitField<string>(position, 'size') || '0'));
+    const positionSizeStr = getBybitField<string>(position, 'size') || '0';
+    const positionSide = parseFloat(positionSizeStr) > 0 ? 'Buy' : 'Sell';
+    const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+
+    // Get symbol info for precision and qtyStep
+    const symbolInfo = await getSymbolInfo(bybitClient, symbol);
+    let decimalPrecision = 2;
+    let pricePrecision: number | undefined = undefined;
+    let qtyStep: number | undefined = undefined;
+
+    if (symbolInfo) {
+      decimalPrecision = symbolInfo.qtyPrecision ?? 2;
+      pricePrecision = symbolInfo.pricePrecision;
+      qtyStep = symbolInfo.qtyStep;
+    }
+
+    // Round TP prices
+    const roundedTPPrices = takeProfits.map(tpPrice => 
+      roundPrice(tpPrice, pricePrecision, undefined)
+    );
+
+    // Distribute quantity across TPs
+    const tpQuantities = distributeQuantityAcrossTPs(
+      positionSize,
+      takeProfits.length,
+      decimalPrecision
+    );
+
+    // Round quantities to qtyStep if specified
+    const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+    const roundedTPQuantities = tpQuantities.map(qty => {
+      if (effectiveQtyStep > 0) {
+        return Math.floor(qty / effectiveQtyStep) * effectiveQtyStep;
+      }
+      return qty;
+    });
+
+    // Place TP orders
+    const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
+
+    for (let i = 0; i < roundedTPPrices.length; i++) {
+      try {
+        const tpOrderParams = {
+          category: 'linear' as const,
+          symbol: symbol,
+          side: tpSide as 'Buy' | 'Sell',
+          orderType: 'Limit' as const,
+          qty: formatQuantity(roundedTPQuantities[i], decimalPrecision),
+          price: roundedTPPrices[i].toString(),
+          timeInForce: 'GTC' as const,
+          reduceOnly: true,
+          closeOnTrigger: false,
+          positionIdx: 0 as 0 | 1 | 2,
+        };
+
+        logger.debug('Placing take profit order from monitor', {
+          tradeId: trade.id,
+          symbol,
+          tpIndex: i + 1,
+          tpPrice: roundedTPPrices[i],
+          tpQty: roundedTPQuantities[i],
+          positionSide,
+          tpSide
+        });
+
+        const tpOrderResponse = await bybitClient.submitOrder(tpOrderParams);
+
+        const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
+        if (tpOrderResponse.retCode === 0 && tpOrderResponse.result && tpOrderId) {
+          tpOrderIds.push({
+            index: i + 1,
+            orderId: tpOrderId,
+            price: roundedTPPrices[i],
+            quantity: roundedTPQuantities[i]
+          });
+
+          // Store TP order in database
+          await db.insertOrder({
+            trade_id: trade.id,
+            order_type: 'take_profit',
+            order_id: tpOrderId,
+            price: roundedTPPrices[i],
+            tp_index: i + 1,
+            quantity: roundedTPQuantities[i],
+            status: 'pending'
+          });
+
+          logger.info('Take profit order placed by monitor', {
+            tradeId: trade.id,
+            tpIndex: i + 1,
+            tpPrice: roundedTPPrices[i],
+            tpQty: roundedTPQuantities[i],
+            tpOrderId
+          });
+        } else {
+          logger.warn('Failed to place take profit order from monitor', {
+            tradeId: trade.id,
+            tpIndex: i + 1,
+            error: JSON.stringify(tpOrderResponse)
+          });
+        }
+      } catch (error) {
+        logger.error('Error placing take profit order from monitor', {
+          tradeId: trade.id,
+          tpIndex: i + 1,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    if (tpOrderIds.length > 0) {
+      logger.info('Take profit orders placed by monitor', {
+        tradeId: trade.id,
+        symbol,
+        numTPs: tpOrderIds.length,
+        totalTPs: takeProfits.length
+      });
+    }
+  } catch (error) {
+    logger.error('Error placing take profit orders from monitor', {
+      tradeId: trade.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+};
+
 const checkOrderFilled = async (
   order: Order,
   trade: Trade,
@@ -357,13 +586,22 @@ const checkOrderFilled = async (
       });
 
       if (openOrders.retCode === 0 && openOrders.result && openOrders.result.list) {
-        const foundOrder = openOrders.result.list.find((o: any) => o.orderId === order.order_id);
+        const foundOrder = openOrders.result.list.find((o: any) => 
+          getBybitField<string>(o, 'orderId', 'order_id') === order.order_id
+        );
         if (!foundOrder) {
           // Order not in open orders, likely filled
           return { filled: true, filledPrice: order.price };
-        } else if (foundOrder.orderStatus === 'Filled') {
-          const filledPrice = parseFloat(foundOrder.avgPrice || foundOrder.price || '0');
-          return { filled: true, filledPrice };
+        } else {
+          const orderStatus = getBybitField<string>(foundOrder, 'orderStatus', 'order_status');
+          if (orderStatus === 'Filled') {
+            const filledPrice = parseFloat(
+              getBybitField<string>(foundOrder, 'avgPrice', 'avg_price') || 
+              getBybitField<string>(foundOrder, 'price') || 
+              '0'
+            );
+            return { filled: true, filledPrice };
+          }
         }
       }
     }
@@ -484,6 +722,9 @@ const monitorTrade = async (
             tradeId: trade.id
           });
         }
+
+        // Place take profit orders now that entry has filled
+        await placeTakeProfitOrders(trade, bybitClient, db);
       }
     }
 

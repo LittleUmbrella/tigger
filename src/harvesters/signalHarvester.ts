@@ -435,6 +435,9 @@ const resolveEntity = async (
 // Track consecutive AUTH_KEY_DUPLICATED errors per harvester to implement circuit breaker
 const authKeyDuplicateCounts = new Map<string, { count: number; firstErrorTime: number }>();
 
+// Track last info log time for skipped old messages (to limit info logging to every 10 minutes)
+const lastSkippedOldInfoLogTime = new Map<string, number>();
+
 const fetchNewMessages = async (
   config: HarvesterConfig,
   client: TelegramClient,
@@ -645,12 +648,27 @@ const fetchNewMessages = async (
       });
     } else if (skippedCount > 0) {
       if (skippedOldCount > 0) {
-        logger.info('Skipped old messages (exceed maxMessageAgeMinutes)', {
+        logger.debug('Skipped old messages (exceed maxMessageAgeMinutes)', {
           channel: config.channel,
           totalMessages: messages.length,
           skippedOld: skippedOldCount,
           maxAgeMinutes
         });
+        
+        // Log at info level every 10 minutes
+        const now = Date.now();
+        const lastInfoLogTime = lastSkippedOldInfoLogTime.get(harvesterKey) || 0;
+        const tenMinutesMs = 10 * 60 * 1000;
+        
+        if (now - lastInfoLogTime >= tenMinutesMs) {
+          logger.info('Skipped old messages (exceed maxMessageAgeMinutes)', {
+            channel: config.channel,
+            totalMessages: messages.length,
+            skippedOld: skippedOldCount,
+            maxAgeMinutes
+          });
+          lastSkippedOldInfoLogTime.set(harvesterKey, now);
+        }
       } else {
         logger.debug('All messages in batch were skipped', {
           channel: config.channel,

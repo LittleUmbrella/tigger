@@ -38,43 +38,47 @@
   ],
   "accounts": [
     {
-      "name": "testnet2",
+      "name": "demo2",
       "exchange": "bybit",
-      "testnet": true,
+      "demo": true,
+      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
       "envVarNames": {
-        "apiKey": "BYBIT_TESTNET_API_KEY2",
-        "apiSecret": "BYBIT_TESTNET_API_SECRET2"
+        "apiKey": "BYBIT_DEMO_API_KEY2",
+        "apiSecret": "BYBIT_DEMO_API_SECRET2"
       }
     },
     {
-      "name": "testnet",
+      "name": "demo",
       "exchange": "bybit",
-      "testnet": true,
+      "demo": true,
+      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
       "envVarNames": {
-        "apiKey": "BYBIT_TESTNET_API_KEY",
-        "apiSecret": "BYBIT_TESTNET_API_SECRET"
+        "apiKey": "BYBIT_DEMO_API_KEY",
+        "apiSecret": "BYBIT_DEMO_API_SECRET"
       }
     }
   ],
   "initiators": [
     {
       "name": "bybit",
-      "testnet": true,
+      "testnet": false,
+      "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "riskPercentage": 1,
-      "accounts": ["testnet", "testnet2"]
+      "accounts": ["demo", "demo2"]
     }
   ],
   "monitors": [
     {
       "type": "bybit",
-      "testnet": true,
+      "testnet": false,
+      "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "pollInterval": 3000,
       "entryTimeoutDays": 1
     }
   ],
   "channels": [
     {
-      "channel": "vip-future",
+      "channel": "2427485240",
       "harvester": "main_harvester",
       "parser": "vip_crypto_signals",
       "breakevenAfterTPs": 2,
@@ -82,7 +86,7 @@
       "monitor": "bybit"
     },
     {
-      "channel": "ronnie-crypto-signals",
+      "channel": "3241720654",
       "harvester": "ronnie_harvester",
       "parser": "ronnie_crypto_signals",
       "breakevenAfterTPs": 2,

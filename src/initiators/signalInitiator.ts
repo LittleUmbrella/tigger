@@ -24,6 +24,13 @@ export const processUnparsedMessages = async (
     ? await db.getMessagesByChannel(channel)
     : await db.getUnparsedMessages(channel);
   
+  logger.debug('Retrieved messages for processing', {
+    channel,
+    isSimulation,
+    messageCount: messages.length,
+    messageIds: messages.map(m => m.message_id).slice(0, 10)
+  });
+  
   // Filter messages by startDate if provided
   let filteredMessages = messages;
   if (startDate) {
@@ -126,6 +133,26 @@ export const processUnparsedMessages = async (
     }
   };
 
+  if (sortedMessages.length === 0) {
+    logger.info('No messages to process', {
+      channel,
+      isSimulation,
+      initiatorName
+    });
+    return;
+  }
+
+  logger.debug('Processing messages', {
+    channel,
+    messageCount: sortedMessages.length,
+    isSimulation
+  });
+
   // Process all messages in parallel
   await Promise.all(sortedMessages.map(processMessage));
+  
+  logger.debug('Finished processing messages', {
+    channel,
+    messageCount: sortedMessages.length
+  });
 };

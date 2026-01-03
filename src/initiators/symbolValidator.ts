@@ -12,6 +12,8 @@ import { getDecimalPrecision } from '../utils/positionSizing.js';
 export interface SymbolInfo {
   qtyPrecision?: number;
   pricePrecision?: number;
+  minOrderQty?: number;
+  qtyStep?: number;
 }
 
 /**
@@ -25,22 +27,125 @@ export async function getSymbolInfo(
     // Try linear first (futures), then spot
     const categories = ['linear', 'spot'] as const;
     
+    // Extract base asset from symbol (e.g., XPLUSDT -> XPL)
+    // This might be needed for some API calls
+    const baseAsset = symbol.replace(/USDT$|USDC$/, '');
+    
     for (const category of categories) {
       try {
-        const instruments = await bybitClient.getInstrumentsInfo({ category, symbol });
+        // First try with the full symbol
+        let instruments = await bybitClient.getInstrumentsInfo({ category, symbol });
+        
+        // If that fails or returns empty, try without symbol parameter to get all instruments
+        if (instruments.retCode !== 0 || !instruments.result?.list || instruments.result.list.length === 0) {
+          logger.debug('Trying to get all instruments without symbol filter', {
+            symbol,
+            category,
+            retCode: instruments.retCode
+          });
+          instruments = await bybitClient.getInstrumentsInfo({ category });
+        }
         
         if (instruments.retCode === 0 && instruments.result && instruments.result.list) {
-          const instrument = instruments.result.list.find((s: any) => s.symbol === symbol);
-          if (!instrument) continue;
+          // Try multiple matching strategies
+          let instrument = instruments.result.list.find((s: any) => s.symbol === symbol);
           
-          return {
-            qtyPrecision: (instrument as any).lot_size_filter?.qty_precision 
-              ? parseInt((instrument as any).lot_size_filter.qty_precision) 
-              : undefined,
-            pricePrecision: (instrument as any).price_filter?.tick_size
-              ? getDecimalPrecision(parseFloat((instrument as any).price_filter.tick_size))
-              : undefined
-          };
+          // If not found, try case-insensitive match
+          if (!instrument) {
+            instrument = instruments.result.list.find((s: any) => s.symbol?.toUpperCase() === symbol.toUpperCase());
+          }
+          
+          // If still not found, try matching by base asset
+          if (!instrument && baseAsset) {
+            instrument = instruments.result.list.find((s: any) => 
+              s.symbol?.startsWith(baseAsset) && (s.symbol?.endsWith('USDT') || s.symbol?.endsWith('USDC'))
+            );
+          }
+          
+          if (!instrument) {
+            logger.debug('Symbol not found in instruments list', {
+              symbol,
+              baseAsset,
+              category,
+              availableSymbols: instruments.result.list.map((s: any) => s.symbol).slice(0, 20),
+              totalInstruments: instruments.result.list.length
+            });
+            continue;
+          }
+          
+          // Try both snake_case (API format) and camelCase (possible SDK transformation)
+          const lotSizeFilter = (instrument as any).lot_size_filter || (instrument as any).lotSizeFilter;
+          const priceFilter = (instrument as any).price_filter || (instrument as any).priceFilter;
+          
+          // Log the actual structure for debugging
+          logger.debug('Inspecting instrument structure', {
+            symbol,
+            category,
+            instrumentKeys: Object.keys(instrument as any).slice(0, 20),
+            hasLotSizeFilterSnake: !!(instrument as any).lot_size_filter,
+            hasLotSizeFilterCamel: !!(instrument as any).lotSizeFilter,
+            hasPriceFilterSnake: !!(instrument as any).price_filter,
+            hasPriceFilterCamel: !!(instrument as any).priceFilter,
+            lotSizeFilterKeys: lotSizeFilter ? Object.keys(lotSizeFilter) : [],
+            priceFilterKeys: priceFilter ? Object.keys(priceFilter) : []
+          });
+          
+          const symbolInfo: SymbolInfo = {};
+          
+          // Extract qty_precision (might be a string or number, try both formats)
+          const qtyPrecision = lotSizeFilter?.qty_precision ?? lotSizeFilter?.qtyPrecision;
+          if (qtyPrecision !== undefined && qtyPrecision !== null) {
+            symbolInfo.qtyPrecision = parseInt(String(qtyPrecision));
+          }
+          
+          // Extract price precision from tick_size (try both formats)
+          const tickSize = priceFilter?.tick_size ?? priceFilter?.tickSize;
+          if (tickSize !== undefined && tickSize !== null) {
+            symbolInfo.pricePrecision = getDecimalPrecision(parseFloat(String(tickSize)));
+          }
+          
+          // Extract min order quantity (try both formats)
+          const minQty = lotSizeFilter?.min_qty ?? lotSizeFilter?.minQty;
+          if (minQty !== undefined && minQty !== null) {
+            symbolInfo.minOrderQty = parseFloat(String(minQty));
+          }
+          
+          // Extract qty_step (CRITICAL - this determines if quantities must be whole numbers)
+          // Try both snake_case and camelCase formats
+          const qtyStep = lotSizeFilter?.qty_step ?? lotSizeFilter?.qtyStep;
+          if (qtyStep !== undefined && qtyStep !== null) {
+            symbolInfo.qtyStep = parseFloat(String(qtyStep));
+          }
+          
+          // Return symbol info if we got at least qtyStep or qtyPrecision (most important fields)
+          if (symbolInfo.qtyStep !== undefined || symbolInfo.qtyPrecision !== undefined || symbolInfo.minOrderQty !== undefined) {
+            logger.debug('Extracted symbol info from Bybit API', {
+              symbol,
+              category,
+              lotSizeFilter: JSON.stringify(lotSizeFilter),
+              priceFilter: JSON.stringify(priceFilter),
+              symbolInfo
+            });
+            
+            return symbolInfo;
+          } else {
+            logger.debug('No valid symbol info extracted from instrument', {
+              symbol,
+              category,
+              hasLotSizeFilter: !!lotSizeFilter,
+              hasPriceFilter: !!priceFilter,
+              lotSizeFilterKeys: lotSizeFilter ? Object.keys(lotSizeFilter) : [],
+              priceFilterKeys: priceFilter ? Object.keys(priceFilter) : [],
+              instrumentSample: JSON.stringify(instrument).substring(0, 500)
+            });
+          }
+        } else {
+          logger.debug('Failed to get instruments info', {
+            symbol,
+            category,
+            retCode: instruments.retCode,
+            retMsg: instruments.retMsg
+          });
         }
       } catch (error) {
         // Continue to next category
