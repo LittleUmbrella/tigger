@@ -40,11 +40,47 @@ const getCurrentPrice = async (
       }
       return price;
     } else if (exchange === 'bybit' && bybitClient) {
-      const symbol = tradingPair.replace('/', '');
-      const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
-      if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0 && ticker.result.list[0]?.lastPrice) {
-        return parseFloat(ticker.result.list[0].lastPrice);
+      // Normalize symbol similar to validateBybitSymbol
+      let normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
+      
+      // Ensure symbol ends with USDT or USDC
+      const baseSymbol = normalizedSymbol.replace(/USDT$|USDC$/, '');
+      const quoteCurrency = normalizedSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
+      
+      // Try USDT first (most common), then USDC as fallback
+      const symbolsToTry = quoteCurrency === 'USDC' 
+        ? [`${baseSymbol}USDC`, `${baseSymbol}USDT`]
+        : [`${baseSymbol}USDT`, `${baseSymbol}USDC`];
+      
+      for (const symbolToCheck of symbolsToTry) {
+        // Try linear category first (futures)
+        try {
+          const linearTicker = await bybitClient.getTickers({ category: 'linear', symbol: symbolToCheck });
+          if (linearTicker.retCode === 0 && linearTicker.result && linearTicker.result.list && linearTicker.result.list.length > 0 && linearTicker.result.list[0]?.lastPrice) {
+            return parseFloat(linearTicker.result.list[0].lastPrice);
+          }
+        } catch (error) {
+          // Continue to spot
+        }
+        
+        // Try spot category
+        try {
+          const spotTicker = await bybitClient.getTickers({ category: 'spot', symbol: symbolToCheck });
+          if (spotTicker.retCode === 0 && spotTicker.result && spotTicker.result.list && spotTicker.result.list.length > 0 && spotTicker.result.list[0]?.lastPrice) {
+            return parseFloat(spotTicker.result.list[0].lastPrice);
+          }
+        } catch (error) {
+          // Continue to next symbol
+          continue;
+        }
       }
+      
+      // If we get here, no price was found
+      logger.warn('Could not get current price from Bybit', {
+        tradingPair,
+        normalizedSymbol,
+        symbolsTried: symbolsToTry
+      });
     }
     return null;
   } catch (error) {
