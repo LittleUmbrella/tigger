@@ -5,7 +5,29 @@ import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 import dayjs from 'dayjs';
+
+/**
+ * Serialize error for logging - handles Error instances, objects, and primitives
+ */
+const serializeError = (error: unknown): { error: string; stack?: string } => {
+  if (error instanceof Error) {
+    return {
+      error: error.message,
+      ...(error.stack && { stack: error.stack })
+    };
+  } else if (error && typeof error === 'object') {
+    // Try to stringify object errors
+    try {
+      return { error: JSON.stringify(error) };
+    } catch {
+      return { error: String(error) };
+    }
+  } else {
+    return { error: String(error) };
+  }
+};
 
 /**
  * Bybit-specific initiator configuration
@@ -19,7 +41,7 @@ export interface BybitInitiatorConfig {
 /**
  * Get account credentials from account config or environment variables
  */
-const getAccountCredentials = (account: AccountConfig | null, fallbackTestnet: boolean = false): { apiKey: string | undefined; apiSecret: string | undefined; testnet: boolean } => {
+const getAccountCredentials = (account: AccountConfig | null, fallbackTestnet: boolean = false): { apiKey: string | undefined; apiSecret: string | undefined; testnet: boolean; demo: boolean } => {
   if (account) {
     // Priority: envVarNames > envVars (backward compat) > apiKey/apiSecret (deprecated) > default env vars
     const envVarNameForKey = account.envVarNames?.apiKey || account.envVars?.apiKey;
@@ -29,14 +51,16 @@ const getAccountCredentials = (account: AccountConfig | null, fallbackTestnet: b
     return {
       apiKey,
       apiSecret,
-      testnet: account.testnet || false
+      testnet: account.testnet || false,
+      demo: account.demo || false
     };
   } else {
     // Fallback to environment variables
     return {
       apiKey: process.env.BYBIT_API_KEY,
       apiSecret: process.env.BYBIT_API_SECRET,
-      testnet: fallbackTestnet
+      testnet: fallbackTestnet,
+      demo: false
     };
   }
 };
@@ -120,24 +144,51 @@ const executeTradeForAccount = async (
     // Get API credentials for this account
     // For backward compatibility, use testnet from config if account is null
     const fallbackTestnet = account === null ? ((config as any).testnet || false) : false;
-    const { apiKey, apiSecret, testnet } = getAccountCredentials(account, fallbackTestnet);
+    const { apiKey, apiSecret, testnet, demo } = getAccountCredentials(account, fallbackTestnet);
     
     if (!isSimulation && (!apiKey || !apiSecret)) {
       logger.error('Bybit API credentials not found', {
         channel,
         accountName: accountName || 'default',
-        missing: !apiKey ? 'apiKey' : 'apiSecret'
+        missing: !apiKey ? 'apiKey' : 'apiSecret',
+        accountConfig: account ? {
+          name: account.name,
+          testnet: account.testnet,
+          envVarNames: account.envVarNames
+        } : null
       });
       return;
     }
 
     let bybitClient: RestClientV5 | undefined;
     if (!isSimulation && apiKey && apiSecret) {
-      bybitClient = new RestClientV5({ key: apiKey, secret: apiSecret, testnet: testnet });
+      // Log API key info (first 8 chars for debugging, but don't log full key)
+      const apiKeyPreview = apiKey.length > 8 ? `${apiKey.substring(0, 8)}...` : '***';
+      
+      // Demo trading uses api-demo.bybit.com endpoint (different from testnet)
+      const baseUrl = demo ? 'https://api-demo.bybit.com' : undefined;
+      const effectiveTestnet = testnet && !demo; // Don't use testnet if demo is enabled
+      
       logger.info('Bybit client initialized', { 
         channel,
         accountName: accountName || 'default',
-        testnet: testnet 
+        testnet: effectiveTestnet,
+        demo: demo,
+        baseUrl: baseUrl || (effectiveTestnet ? 'api-testnet.bybit.com' : 'api.bybit.com'),
+        apiKeyPreview,
+        accountConfig: account ? {
+          name: account.name,
+          testnet: account.testnet,
+          demo: account.demo,
+          envVarNames: account.envVarNames
+        } : null
+      });
+      
+      bybitClient = new RestClientV5({ 
+        key: apiKey, 
+        secret: apiSecret, 
+        testnet: effectiveTestnet,
+        ...(baseUrl && { baseUrl }) // Use demo endpoint if demo mode
       });
     }
 
@@ -186,7 +237,7 @@ const executeTradeForAccount = async (
           actualSymbol: symbol
         });
       }
-      logger.debug('Symbol validated', { symbol, tradingPair: order.tradingPair });
+      logger.debug('Symbol validated', { tradingPair: order.tradingPair, symbol });
     }
     
     // Determine side (Buy for long, Sell for short)
@@ -205,7 +256,7 @@ const executeTradeForAccount = async (
         } catch (error) {
           logger.warn('Failed to get market price', {
             symbol,
-            error: error instanceof Error ? error.message : String(error)
+            ...serializeError(error)
           });
         }
       }
@@ -244,9 +295,16 @@ const executeTradeForAccount = async (
     let decimalPrecision = 2; // default fallback for quantity
     let pricePrecision: number | undefined = undefined;
     let tickSize: number | undefined = undefined;
+    let minOrderQty: number | undefined = undefined;
+    let qtyStep: number | undefined = undefined;
     
     if (bybitClient) {
       const symbolInfo = await getSymbolInfo(bybitClient, symbol);
+      logger.debug('Retrieved symbol info from Bybit', {
+        channel,
+        symbol,
+        symbolInfo
+      });
       if (symbolInfo?.qtyPrecision !== undefined) {
         decimalPrecision = symbolInfo.qtyPrecision;
       } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
@@ -255,6 +313,8 @@ const executeTradeForAccount = async (
         decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       }
       pricePrecision = symbolInfo?.pricePrecision;
+      minOrderQty = symbolInfo?.minOrderQty;
+      qtyStep = symbolInfo?.qtyStep;
       // Note: tickSize would need to be extracted from symbolInfo if available
       // For now, we'll use pricePrecision for rounding
     } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
@@ -267,31 +327,89 @@ const executeTradeForAccount = async (
     const roundedEntryPrice = roundPrice(entryPrice, pricePrecision, tickSize);
     
     // Calculate quantity with exchange-provided precision (using rounded entry price)
-    const qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
+    let qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
+    
+    // Round quantity to nearest qty_step if specified (required by Bybit)
+    // If qtyStep is not available, infer it from decimalPrecision (e.g., precision 2 -> step 0.01)
+    const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 
+      ? qtyStep 
+      : Math.pow(10, -decimalPrecision);
+    
+    if (effectiveQtyStep > 0) {
+      const qtyBeforeStep = qty;
+      qty = Math.floor(qty / effectiveQtyStep) * effectiveQtyStep;
+      // Ensure we don't round to zero
+      if (qty === 0 && positionSize > 0) {
+        qty = effectiveQtyStep;
+      }
+      logger.debug('Rounded quantity to qty_step', {
+        channel,
+        symbol,
+        qtyBeforeStep,
+        qtyAfterStep: qty,
+        qtyStep: effectiveQtyStep,
+        qtyStepFromAPI: qtyStep
+      });
+    }
+    
+    // Ensure quantity meets minimum order size requirement
+    if (minOrderQty !== undefined && qty < minOrderQty) {
+      logger.warn('Quantity below minimum order size, adjusting', {
+        channel,
+        symbol,
+        calculatedQty: qty,
+        minOrderQty,
+        positionSize,
+        qtyStep: effectiveQtyStep
+      });
+      // Round up to nearest qty_step above minOrderQty
+      qty = Math.ceil(minOrderQty / effectiveQtyStep) * effectiveQtyStep;
+    }
+    
+    // Final validation: ensure quantity is valid (positive and non-zero)
+    if (qty <= 0) {
+      throw new Error(`Invalid quantity calculated: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice}, qtyStep: ${effectiveQtyStep})`);
+    }
+
+    // Format quantity string with proper precision (remove trailing zeros, ensure correct decimal places)
+    const formatQuantity = (quantity: number, precision: number): string => {
+      // If qtyStep is specified, quantity should already be rounded to qtyStep
+      // Just format it with the correct precision without additional rounding
+      // Format to string with exact precision, removing trailing zeros
+      const formatted = quantity.toFixed(precision);
+      // Remove trailing zeros after decimal point
+      return formatted.replace(/\.?0+$/, '');
+    };
 
     // Round stop loss to exchange precision
     const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
       ? roundPrice(order.stopLoss, pricePrecision, tickSize)
       : order.stopLoss;
 
+    const qtyString = formatQuantity(qty, decimalPrecision);
+    
     logger.info('Calculated trade parameters', {
       channel,
       symbol,
       side,
       qty,
+      qtyString,
       entryPrice: roundedEntryPrice,
       originalEntryPrice: entryPrice,
       stopLoss: roundedStopLoss,
       leverage: effectiveLeverage,
       baseLeverage,
       decimalPrecision,
-      pricePrecision
+      pricePrecision,
+      minOrderQty,
+      qtyStep,
+      positionSize
     });
 
     // Determine order type - use Market if original entry price was 0 or not provided
     const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
     const orderType = isMarketOrder ? 'Market' : 'Limit';
-
+    
     // Using Bybit Futures API (linear perpetuals)
     // Create order at entry price (or market)
     const orderParams: any = {
@@ -299,13 +417,13 @@ const executeTradeForAccount = async (
       symbol: symbol,
       side: side,
       orderType: orderType,
-      qty: qty.toString(),
+      qty: qtyString,
       timeInForce: isMarketOrder ? 'IOC' : 'GTC',
       reduceOnly: false,
       closeOnTrigger: false,
       positionIdx: 0,
     };
-
+    
     // Only add price for limit orders (use rounded price)
     if (!isMarketOrder) {
       orderParams.price = roundedEntryPrice.toString();
@@ -315,6 +433,14 @@ const executeTradeForAccount = async (
     if (roundedStopLoss && roundedStopLoss > 0) {
       orderParams.stopLoss = roundedStopLoss.toString();
     }
+    
+    // Log entry order parameters before sending to Bybit
+    logger.debug('Entry order parameters being sent to Bybit', {
+      channel,
+      symbol,
+      orderParams: JSON.stringify(orderParams, null, 2),
+      orderParamsFormatted: orderParams
+    });
 
     let orderId: string | null = null;
     // Collect TP order IDs for storage
@@ -353,14 +479,14 @@ const executeTradeForAccount = async (
         logger.warn('Failed to set leverage', {
           symbol,
           leverage: order.leverage,
-          error: error instanceof Error ? error.message : String(error)
+          ...serializeError(error)
         });
       }
 
       // Place the entry order with stop loss (if supported in initial order)
       const orderResponse = await bybitClient.submitOrder(orderParams);
       orderId = orderResponse.retCode === 0 && orderResponse.result
-        ? orderResponse.result.orderId || 'unknown'
+        ? getBybitField<string>(orderResponse.result, 'orderId', 'order_id') || 'unknown'
         : null;
 
       if (!orderId) {
@@ -368,102 +494,200 @@ const executeTradeForAccount = async (
       }
 
       // Verify stop loss was set, or set it separately if initial order didn't support it
-      // (Some order types may not support stopLoss in initial order)
+      // Note: If Bybit accepted the stop loss in the initial order, it will be set when the position opens
+      // For limit orders, we can't verify until position exists, so we'll set it separately if needed
       if (order.stopLoss && order.stopLoss > 0) {
-        // Try to verify if stop loss was set by checking position or setting it explicitly
-        // If the initial order included stopLoss but it wasn't accepted, set it separately
+        // Check if entry order has already filled (market orders or fast-filling limit orders)
+        let entryFilled = false;
         try {
-          await bybitClient.setTradingStop({
+          const orderStatus = await bybitClient.getActiveOrders({
             category: 'linear',
             symbol: symbol,
-            stopLoss: roundedStopLoss.toString(),
-            positionIdx: 0
+            orderId: orderId
           });
-          logger.info('Stop loss verified/set', {
-            symbol,
-            stopLoss: roundedStopLoss
-          });
+          
+          if (orderStatus.retCode === 0 && orderStatus.result) {
+            const activeOrders = orderStatus.result.list || [];
+            const isStillActive = activeOrders.some((o: any) => 
+              getBybitField<string>(o, 'orderId', 'order_id') === orderId
+            );
+            entryFilled = !isStillActive;
+          }
         } catch (error) {
-          logger.warn('Failed to set/verify stop loss', {
+          logger.debug('Could not check order status for stop loss verification', {
             symbol,
-            stopLoss: order.stopLoss,
+            orderId,
             error: error instanceof Error ? error.message : String(error)
           });
-          // If stop loss fails and order is still pending, cancel it for safety
-          // But only if it's still pending (not filled)
+        }
+
+        // Only try to set stop loss if entry has filled (position exists)
+        // If entry hasn't filled, Bybit will apply the stop loss from the initial order when position opens
+        if (entryFilled) {
           try {
-            const orderStatus = await bybitClient.getActiveOrders({
-              category: 'linear',
+            const stopLossParams = {
+              category: 'linear' as const,
               symbol: symbol,
-              orderId: orderId
-            });
-            if (orderStatus.retCode === 0 && orderStatus.result && orderStatus.result.list && orderStatus.result.list.length > 0) {
-              await bybitClient.cancelOrder({
-                category: 'linear',
-                symbol: symbol,
-                orderId: orderId
-              });
-              logger.warn('Cancelled entry order due to stop loss setup failure', {
-                symbol,
-                orderId
-              });
-              throw new Error('Entry order cancelled: failed to set stop loss');
-            }
-          } catch (cancelError) {
-            // Order may already be filled, which is okay - we'll log but continue
-            logger.warn('Could not cancel entry order (may already be filled)', {
+              stopLoss: roundedStopLoss.toString(),
+              positionIdx: 0 as 0 | 1 | 2
+            };
+            
+            logger.debug('Stop loss parameters being sent to Bybit (entry already filled)', {
+              channel,
               symbol,
-              orderId,
-              error: cancelError instanceof Error ? cancelError.message : String(cancelError)
+              stopLossParams: JSON.stringify(stopLossParams, null, 2),
+              stopLossParamsFormatted: stopLossParams,
+              roundedStopLoss,
+              originalStopLoss: order.stopLoss
+            });
+            
+            await bybitClient.setTradingStop(stopLossParams);
+            logger.info('Stop loss verified/set', {
+              symbol,
+              stopLoss: roundedStopLoss
+            });
+          } catch (error) {
+            // If stop loss fails but entry is filled, log warning but don't cancel
+            // The monitor will handle setting stop loss if needed
+            logger.warn('Failed to set stop loss after entry fill, monitor will retry', {
+              symbol,
+              stopLoss: order.stopLoss,
+              ...serializeError(error)
             });
           }
+        } else {
+          // Entry hasn't filled yet - Bybit should apply stop loss from initial order when position opens
+          // If it doesn't, the monitor will set it after entry fills
+          logger.debug('Entry order pending, stop loss will be applied when position opens', {
+            symbol,
+            orderId,
+            stopLoss: roundedStopLoss
+          });
         }
       }
 
       // Place take profit orders using batch placement if available
-      if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices) {
-        // Distribute quantity evenly across TPs (last TP rounded up)
-        const tpQuantities = distributeQuantityAcrossTPs(
-          qty,
-          order.takeProfits.length,
-          decimalPrecision
-        );
+      // NOTE: For limit orders that may take hours/days to fill, TP orders are placed by the trade monitor
+      // after the entry order fills. This prevents TP orders from being placed before a position exists.
+      // Only place TP orders immediately if this is a market order (which fills instantly)
+      const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
+      
+      if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder) {
+        // For market orders, check if we have a position immediately
+        let positionSide: 'Buy' | 'Sell' | null = null;
+        try {
+          const positionResponse = await bybitClient.getPositionInfo({
+            category: 'linear',
+            symbol: symbol
+          });
+          
+          if (positionResponse.retCode === 0 && positionResponse.result && positionResponse.result.list) {
+            const positions = positionResponse.result.list.filter((p: any) => {
+              const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+              return size !== 0;
+            });
+            
+            if (positions.length > 0) {
+              const position = positions[0];
+              const size = parseFloat(getBybitField<string>(position, 'size') || '0');
+              positionSide = size > 0 ? 'Buy' : 'Sell';
+            }
+          }
+        } catch (error) {
+          logger.debug('Could not check position for market order TP placement', {
+            channel,
+            symbol,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        
+        if (positionSide) {
+          // Only place TP orders if entry order has filled and we have position side
+        
+          // Verify position side matches expected side
+          const expectedPositionSide = order.signalType === 'long' ? 'Buy' : 'Sell';
+        if (positionSide !== expectedPositionSide) {
+          logger.error('Position side mismatch', {
+            channel,
+            symbol,
+            orderId,
+            expectedPositionSide,
+            actualPositionSide: positionSide,
+            note: 'TP orders may fail due to side mismatch'
+          });
+        }
 
-        // Determine opposite side for TP orders (reduceOnly)
-        const tpSide = order.signalType === 'long' ? 'Sell' : 'Buy';
+          // Distribute quantity evenly across TPs (last TP rounded up)
+          const tpQuantities = distributeQuantityAcrossTPs(
+            qty,
+            order.takeProfits.length,
+            decimalPrecision
+          );
 
-        // Prepare batch order requests
-        const batchOrders = roundedTPPrices.map((tpPrice, i) => ({
+          // Determine opposite side for TP orders based on actual position side
+          // For a Long position (Buy side), TP is Sell
+          // For a Short position (Sell side), TP is Buy
+          const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+
+          // Prepare batch order requests
+          // Always use reduceOnly=true since we have a confirmed position
+          const batchOrders = roundedTPPrices.map((tpPrice, i) => ({
           category: 'linear' as const,
           symbol: symbol,
           side: tpSide as 'Buy' | 'Sell',
           orderType: 'Limit' as const,
-          qty: tpQuantities[i].toString(),
+          qty: formatQuantity(tpQuantities[i], decimalPrecision),
           price: tpPrice.toString(),
           timeInForce: 'GTC' as const,
-          reduceOnly: true, // TP orders should reduce position
-          closeOnTrigger: false,
-          positionIdx: 0 as 0 | 1 | 2,
-        }));
+          reduceOnly: true, // Always reduce-only since we have a position
+            closeOnTrigger: false,
+            positionIdx: 0 as 0 | 1 | 2,
+          }));
 
-        // Try batch placement first (more atomic)
-        let batchSuccess = false;
-        try {
-          // Check if batchPlaceOrder method exists
-          if (typeof (bybitClient as any).batchPlaceOrder === 'function') {
-            const batchResponse = await (bybitClient as any).batchPlaceOrder({
+          // Log TP order parameters before sending to Bybit
+          logger.debug('Take profit orders parameters being sent to Bybit', {
+          channel,
+          symbol,
+          positionSide,
+          tpSide,
+          numTPs: batchOrders.length,
+          batchOrders: JSON.stringify(batchOrders, null, 2),
+          batchOrdersFormatted: batchOrders.map((order, i) => ({
+            index: i + 1,
+            ...order,
+              tpPrice: roundedTPPrices[i],
+              tpQty: tpQuantities[i]
+            }))
+          });
+
+          // Try batch placement first (more atomic)
+          let batchSuccess = false;
+          try {
+            // Check if batchPlaceOrder method exists
+            if (typeof (bybitClient as any).batchPlaceOrder === 'function') {
+            const batchRequestParams = {
               category: 'linear',
               request: batchOrders
+            };
+            
+            logger.debug('Batch take profit orders request parameters being sent to Bybit', {
+              channel,
+              symbol,
+              batchRequestParams: JSON.stringify(batchRequestParams, null, 2),
+              batchRequestParamsFormatted: batchRequestParams
             });
+            
+            const batchResponse = await (bybitClient as any).batchPlaceOrder(batchRequestParams);
 
             if (batchResponse.retCode === 0 && batchResponse.result && batchResponse.result.list && Array.isArray(batchResponse.result.list)) {
               batchSuccess = true;
               // Collect order IDs from batch response
               batchResponse.result.list.forEach((result: any, i: number) => {
-                if (result.orderId) {
+                const orderId = getBybitField<string>(result, 'orderId', 'order_id');
+                if (orderId) {
                   tpOrderIds.push({
                     index: i,
-                    orderId: result.orderId,
+                    orderId: orderId,
                     price: roundedTPPrices[i],
                     quantity: tpQuantities[i]
                   });
@@ -486,10 +710,10 @@ const executeTradeForAccount = async (
             symbol,
             error: batchError instanceof Error ? batchError.message : String(batchError)
           });
-        }
+          }
 
-        // Fallback to individual orders if batch failed or not available
-        if (!batchSuccess) {
+          // Fallback to individual orders if batch failed or not available
+          if (!batchSuccess) {
           let tpSuccessCount = 0;
           const tpErrors: Array<{ index: number; error: string }> = [];
 
@@ -498,11 +722,22 @@ const executeTradeForAccount = async (
             const tpQty = tpQuantities[i];
 
             try {
+              // Log individual TP order parameters before sending
+              logger.debug('Individual take profit order parameters being sent to Bybit', {
+                channel,
+                symbol,
+                tpIndex: i + 1,
+                orderParams: JSON.stringify(batchOrders[i], null, 2),
+                orderParamsFormatted: batchOrders[i],
+                tpPrice,
+                tpQty
+              });
+              
               const tpOrderResponse = await bybitClient.submitOrder(batchOrders[i]);
 
               if (tpOrderResponse.retCode === 0 && tpOrderResponse.result) {
                 tpSuccessCount++;
-                const tpOrderId = tpOrderResponse.result.orderId;
+                const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
                 if (tpOrderId) {
                   tpOrderIds.push({
                     index: i,
@@ -531,17 +766,18 @@ const executeTradeForAccount = async (
                   error: JSON.stringify(tpOrderResponse)
                 });
               }
-            } catch (error) {
+              } catch (error) {
+              const serialized = serializeError(error);
               tpErrors.push({
                 index: i + 1,
-                error: error instanceof Error ? error.message : String(error)
+                error: serialized.error
               });
               logger.warn('Error placing take profit order', {
                 symbol,
                 tpIndex: i + 1,
                 tpPrice,
                 tpQty,
-                error: error instanceof Error ? error.message : String(error)
+                ...serializeError(error)
               });
             }
           }
@@ -589,8 +825,23 @@ const executeTradeForAccount = async (
               errors: tpErrors
             });
           }
+          }
+        } else {
+          logger.info('Market order placed but no position detected yet, TP orders will be placed by monitor', {
+            channel,
+            symbol,
+            orderId
+          });
         }
-      }
+      } else if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && !isMarketOrder) {
+        // For limit orders, skip TP placement - monitor will handle it after entry fills
+        logger.info('Limit order placed, TP orders will be placed by trade monitor after entry fills', {
+          channel,
+          symbol,
+          orderId,
+          entryPrice: order.entryPrice
+        });
+      } // End of takeProfits check
     } else {
       throw new Error('No Bybit client available and not in simulation mode');
     }
@@ -638,7 +889,7 @@ const executeTradeForAccount = async (
     } catch (error) {
       logger.warn('Failed to store entry order', {
         tradeId,
-        error: error instanceof Error ? error.message : String(error)
+        ...serializeError(error)
       });
     }
 
@@ -654,7 +905,7 @@ const executeTradeForAccount = async (
       } catch (error) {
         logger.warn('Failed to store stop loss order', {
           tradeId,
-          error: error instanceof Error ? error.message : String(error)
+          ...serializeError(error)
         });
       }
     }
@@ -676,7 +927,7 @@ const executeTradeForAccount = async (
           logger.warn('Failed to store take profit order', {
             tradeId,
             tpIndex: tpOrder.index,
-            error: error instanceof Error ? error.message : String(error)
+            ...serializeError(error)
           });
         }
       }
@@ -689,7 +940,7 @@ const executeTradeForAccount = async (
       priceProvider.prefetchPriceData(order.tradingPair, messageTime, maxDuration).catch(error => {
         logger.warn('Failed to pre-fetch price data', {
           tradingPair: order.tradingPair,
-          error: error instanceof Error ? error.message : String(error)
+          ...serializeError(error)
         });
       });
     }
@@ -704,7 +955,7 @@ const executeTradeForAccount = async (
     logger.error('Error initiating Bybit trade for account', {
       channel,
       accountName: accountName || 'default',
-      error: error instanceof Error ? error.message : String(error)
+      ...serializeError(error)
     });
     throw error;
   }
@@ -749,7 +1000,7 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
         logger.error('Failed to execute trade for account', {
           channel,
           accountName,
-          error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+          ...serializeError(result.reason)
         });
       }
     });
@@ -763,7 +1014,7 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
   } catch (error) {
     logger.error('Error in bybitInitiator', {
       channel,
-      error: error instanceof Error ? error.message : String(error)
+      ...serializeError(error)
     });
     throw error;
   }

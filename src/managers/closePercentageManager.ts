@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 /**
  * Manager to close a percentage of a position
@@ -138,12 +139,14 @@ async function closePercentageOfPosition(
     const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
 
     if (positions.retCode === 0 && positions.result && positions.result.list) {
-      const position = positions.result.list.find((p: any) => 
-        p.symbol === symbol && String(p.positionIdx || '0') === String(trade.position_id || '0')
-      );
+      const position = positions.result.list.find((p: any) => {
+        const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+        return p.symbol === symbol && String(positionIdx || '0') === String(trade.position_id || '0');
+      });
 
-      if (position && parseFloat(String(position.size || '0')) !== 0) {
-        const currentSize = parseFloat(String(position.size || '0'));
+      const positionSize = getBybitField<string>(position, 'size');
+      if (position && parseFloat(String(positionSize || '0')) !== 0) {
+        const currentSize = parseFloat(String(positionSize || '0'));
         const closeQty = (currentSize * percentage) / 100;
         const side = position.side === 'Buy' ? 'Sell' : 'Buy';
 
@@ -165,7 +168,7 @@ async function closePercentageOfPosition(
             tradeId: trade.id,
             tradingPair: trade.trading_pair,
             percentage,
-            orderId: closeOrder.result.orderId
+            orderId: getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown'
           });
 
           // If moving stop loss to entry, update it

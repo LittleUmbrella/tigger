@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import { closePosition } from './positionUtils.js';
 import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 /**
  * Manager to close all short positions
@@ -45,11 +46,13 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
           const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
           
           if (positions.retCode === 0 && positions.result && positions.result.list) {
-            const position = positions.result.list.find((p: any) => 
-              p.symbol === symbol && 
-              p.positionIdx?.toString() === trade.position_id &&
-              parseFloat(p.size || '0') !== 0
-            );
+            const position = positions.result.list.find((p: any) => {
+              const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+              const positionSize = getBybitField<string>(p, 'size');
+              return p.symbol === symbol && 
+                positionIdx?.toString() === trade.position_id &&
+                parseFloat(positionSize || '0') !== 0;
+            });
             
             // Only include if it's a short position (Sell side)
             if (position && position.side === 'Sell') {

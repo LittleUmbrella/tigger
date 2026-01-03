@@ -2,6 +2,7 @@ import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
 import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 /**
  * Manager to update entry price of an existing trade
@@ -87,15 +88,16 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
       });
 
       if (orderResponse.retCode === 0 && orderResponse.result) {
+        const newOrderId = getBybitField<string>(orderResponse.result, 'orderId', 'order_id') || 'unknown';
         await db.updateTrade(trade.id, {
           entry_price: newEntryPrice,
-          order_id: orderResponse.result.orderId
+          order_id: newOrderId
         });
         logger.info('Entry price updated and new order placed', {
           tradeId: trade.id,
           oldEntryPrice: trade.entry_price,
           newEntryPrice,
-          newOrderId: orderResponse.result.orderId
+          newOrderId
         });
       } else {
         throw new Error(`Failed to place new order: ${JSON.stringify(orderResponse)}`);

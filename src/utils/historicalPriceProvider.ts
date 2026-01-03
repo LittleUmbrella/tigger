@@ -178,14 +178,14 @@ async function tryFetchWithCategory(
           
           if (executionResponse.retCode === 0 && executionResponse.result?.list) {
             const validTrades = executionResponse.result.list.filter((execution: any) => {
-              const execTime = parseFloat(execution.execTime || '0');
-              const execPrice = parseFloat(execution.execPrice || '0');
+              const execTime = parseFloat((execution.execTime || execution.exec_time || '0') as string);
+              const execPrice = parseFloat((execution.execPrice || execution.exec_price || '0') as string);
               return execPrice > 0 && execTime >= startTimestamp && execTime <= endTimestamp;
             });
             
             for (const execution of validTrades) {
-              const execTime = parseFloat(execution.execTime || '0');
-              const execPrice = parseFloat(execution.execPrice || '0');
+              const execTime = parseFloat((execution.execTime || execution.exec_time || '0') as string);
+              const execPrice = parseFloat((execution.execPrice || execution.exec_price || '0') as string);
               pricePoints.push({
                 timestamp: execTime,
                 price: execPrice
@@ -275,8 +275,8 @@ async function tryFetchWithCategory(
               tradePrice = parseFloat(trade[4] || trade[3] || '0'); // price might be at index 3 or 4
             } else {
               // Object format: {time, price, ...}
-              tradeTime = parseFloat(trade.time || trade.execTime || '0');
-              tradePrice = parseFloat(trade.price || trade.execPrice || '0');
+              tradeTime = parseFloat((trade.time || trade.execTime || trade.exec_time || '0') as string);
+              tradePrice = parseFloat((trade.price || trade.execPrice || trade.exec_price || '0') as string);
             }
             
             // Filter trades within our time range

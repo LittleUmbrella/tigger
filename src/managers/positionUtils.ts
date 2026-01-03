@@ -2,6 +2,7 @@ import { DatabaseManager, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 /**
  * Helper function to close a position
@@ -29,14 +30,16 @@ export async function closePosition(
     const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
 
     if (positions.retCode === 0 && positions.result && positions.result.list) {
-      const position = positions.result.list.find((p: any) => 
-        p.symbol === symbol && p.positionIdx?.toString() === trade.position_id
-      );
+      const position = positions.result.list.find((p: any) => {
+        const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+        return p.symbol === symbol && positionIdx?.toString() === trade.position_id;
+      });
 
-      if (position && parseFloat(position.size || '0') !== 0) {
+      const positionSize = getBybitField<string>(position, 'size');
+      if (position && parseFloat(positionSize || '0') !== 0) {
         // Close the position by placing an opposite order
         const side = position.side === 'Buy' ? 'Sell' : 'Buy';
-        const qty = parseFloat(position.size || '0');
+        const qty = parseFloat(positionSize || '0');
 
         const closeOrder = await bybitClient.submitOrder({
           category: 'linear',
@@ -54,7 +57,7 @@ export async function closePosition(
           logger.info('Position closed on exchange', {
             tradeId: trade.id,
             tradingPair: trade.trading_pair,
-            orderId: closeOrder.result.orderId
+            orderId: getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown'
           });
 
           // Update trade status - the monitor will detect the closure and update with PNL

@@ -63,7 +63,8 @@ export interface ParserConfig {
 export interface AccountConfig {
   name: string; // Unique name for this account (e.g., 'main', 'account1', 'testnet')
   exchange: 'bybit' | string; // Exchange type
-  testnet?: boolean; // Whether to use testnet
+  testnet?: boolean; // Whether to use testnet (deprecated: use demo for demo trading)
+  demo?: boolean; // Whether to use demo trading (uses api-demo.bybit.com endpoint)
   // Environment variable names that contain the API credentials
   // These should be the names of environment variables (e.g., 'BYBIT_API_KEY'), not the actual values
   // Format: { apiKey: 'BYBIT_API_KEY', apiSecret: 'BYBIT_API_SECRET' }
