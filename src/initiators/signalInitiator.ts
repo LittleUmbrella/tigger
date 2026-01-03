@@ -134,7 +134,7 @@ export const processUnparsedMessages = async (
   };
 
   if (sortedMessages.length === 0) {
-    logger.info('No messages to process', {
+    logger.debug('No messages to process', {
       channel,
       isSimulation,
       initiatorName
