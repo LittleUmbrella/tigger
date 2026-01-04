@@ -6,6 +6,77 @@ import { parseMessage } from '../parsers/signalParser.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
 
+/**
+ * Determine if an error is retryable (should not mark message as parsed)
+ * Non-retryable errors are permanent failures that won't succeed on retry:
+ * - Invalid symbol (not supported on exchange)
+ * - Trade validation failures (invalid price relationships)
+ * - Configuration errors (missing credentials, invalid config)
+ * - Calculation errors (invalid quantity, missing required data)
+ * 
+ * Retryable errors are temporary failures that might succeed on retry:
+ * - Network errors
+ * - API rate limits
+ * - API server errors (5xx)
+ * - Timeout errors
+ */
+const isRetryableError = (error: unknown): boolean => {
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorString = errorMessage.toLowerCase();
+
+  // Non-retryable error patterns (permanent failures)
+  const nonRetryablePatterns = [
+    'invalid symbol',
+    'symbol not found',
+    'symbol does not exist',
+    'trade validation failed',
+    'invalid quantity calculated',
+    'cannot calculate position size',
+    'no bybit client available',
+    'api credentials not found',
+    'credentials not found',
+    'missing api',
+    'entry price is required',
+    'invalid price relationships',
+    'entry order cancelled',
+    'all take profit orders failed'
+  ];
+
+  // Check if error matches any non-retryable pattern
+  for (const pattern of nonRetryablePatterns) {
+    if (errorString.includes(pattern)) {
+      return false; // Non-retryable
+    }
+  }
+
+  // Retryable error patterns (temporary failures)
+  const retryablePatterns = [
+    'network',
+    'timeout',
+    'rate limit',
+    'too many requests',
+    'server error',
+    'service unavailable',
+    'internal server error',
+    'bad gateway',
+    'gateway timeout',
+    'econnreset',
+    'enotfound',
+    'etimedout'
+  ];
+
+  // Check if error matches any retryable pattern
+  for (const pattern of retryablePatterns) {
+    if (errorString.includes(pattern)) {
+      return true; // Retryable
+    }
+  }
+
+  // Default: assume non-retryable for unknown errors (safer to mark as parsed than retry forever)
+  // This prevents infinite retries for unexpected error types
+  return false;
+};
+
 export const processUnparsedMessages = async (
   initiatorConfig: InitiatorConfig,
   channel: string,
@@ -16,13 +87,14 @@ export const processUnparsedMessages = async (
   parserName?: string,
   accounts?: AccountConfig[],
   startDate?: string,
-  channelBaseLeverage?: number // Per-channel override for baseLeverage
+  channelBaseLeverage?: number, // Per-channel override for baseLeverage
+  maxStalenessMinutes?: number // Maximum age of messages to process in minutes
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
   const messages = isSimulation 
     ? await db.getMessagesByChannel(channel)
-    : await db.getUnparsedMessages(channel);
+    : await db.getUnparsedMessages(channel, maxStalenessMinutes);
   
   logger.debug('Retrieved messages for processing', {
     channel,
@@ -85,6 +157,65 @@ export const processUnparsedMessages = async (
 
   // Process messages in parallel - trade creation is independent
   // Quantities will be set to 0 initially and recalculated after mock exchanges complete
+  await processMessages(
+    sortedMessages,
+    initiatorConfig,
+    channel,
+    entryTimeoutDays,
+    db,
+    isSimulation,
+    priceProvider,
+    parserName,
+    accounts,
+    channelBaseLeverage,
+    initiatorFunction,
+    initiatorName
+  );
+  
+  logger.debug('Finished processing messages', {
+    channel,
+    messageCount: sortedMessages.length
+  });
+};
+
+/**
+ * Process a list of messages through parsing and initiation
+ * This is a reusable function that can be used by both the orchestrator and scripts
+ */
+export const processMessages = async (
+  messages: Message[],
+  initiatorConfig: InitiatorConfig,
+  channel: string,
+  entryTimeoutDays: number,
+  db: DatabaseManager,
+  isSimulation: boolean = false,
+  priceProvider?: HistoricalPriceProvider,
+  parserName?: string,
+  accounts?: AccountConfig[],
+  channelBaseLeverage?: number,
+  initiatorFunction?: (context: InitiatorContext) => Promise<void>,
+  initiatorName?: string
+): Promise<void> => {
+  // Get initiator function if not provided
+  if (!initiatorFunction) {
+    const actualInitiatorName = initiatorName || initiatorConfig.name || initiatorConfig.type;
+    if (!actualInitiatorName) {
+      logger.error('Initiator name not specified', { channel });
+      return;
+    }
+    initiatorFunction = getInitiator(actualInitiatorName);
+    if (!initiatorFunction) {
+      const availableInitiators = getRegisteredInitiators();
+      logger.error('Initiator not found in registry', {
+        channel,
+        initiatorName: actualInitiatorName,
+        availableInitiators
+      });
+      return;
+    }
+    initiatorName = actualInitiatorName;
+  }
+
   const processMessage = async (message: Message): Promise<void> => {
     try {
       // In simulation mode, set price provider time to message time
@@ -117,10 +248,40 @@ export const processUnparsedMessages = async (
           accounts
         };
 
-        // Call the registered initiator function
-        await initiatorFunction(context);
-        
-        // Mark message as parsed after successful initiation
+        try {
+          // Call the registered initiator function
+          await initiatorFunction(context);
+          
+          // Mark message as parsed after successful initiation
+          await db.markMessageParsed(message.id);
+        } catch (initiatorError) {
+          const isRetryable = isRetryableError(initiatorError);
+          
+          logger.error('Error initiating trade', {
+            channel,
+            messageId: message.message_id,
+            initiatorName,
+            tradingPair: parsed.tradingPair,
+            signalType: parsed.signalType,
+            isRetryable,
+            error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError)
+          });
+
+          // Mark message as parsed for non-retryable errors to prevent infinite retries
+          // (e.g., unsupported symbols, validation failures, configuration errors)
+          if (!isRetryable) {
+            await db.markMessageParsed(message.id);
+            logger.info('Marked message as parsed due to non-retryable error', {
+              channel,
+              messageId: message.message_id,
+              tradingPair: parsed.tradingPair,
+              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError)
+            });
+          }
+          // For retryable errors, don't mark as parsed - allow retry on next iteration
+        }
+      } else {
+        // Message couldn't be parsed - mark as parsed to avoid reprocessing
         await db.markMessageParsed(message.id);
       }
     } catch (error) {
@@ -130,10 +291,11 @@ export const processUnparsedMessages = async (
         initiatorName,
         error: error instanceof Error ? error.message : String(error)
       });
+      // Don't mark as parsed on unexpected errors - allow retry
     }
   };
 
-  if (sortedMessages.length === 0) {
+  if (messages.length === 0) {
     logger.debug('No messages to process', {
       channel,
       isSimulation,
@@ -144,15 +306,15 @@ export const processUnparsedMessages = async (
 
   logger.debug('Processing messages', {
     channel,
-    messageCount: sortedMessages.length,
+    messageCount: messages.length,
     isSimulation
   });
 
   // Process all messages in parallel
-  await Promise.all(sortedMessages.map(processMessage));
+  await Promise.all(messages.map(processMessage));
   
   logger.debug('Finished processing messages', {
     channel,
-    messageCount: sortedMessages.length
+    messageCount: messages.length
   });
 };

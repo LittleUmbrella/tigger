@@ -78,9 +78,10 @@ export const parseMessageWithFallback = async (
 
 export const parseUnparsedMessages = async (
   config: ParserConfig,
-  db: DatabaseManager
+  db: DatabaseManager,
+  maxStalenessMinutes?: number
 ): Promise<void> => {
-  const messages = await db.getUnparsedMessages(config.channel);
+  const messages = await db.getUnparsedMessages(config.channel, maxStalenessMinutes);
   
   // Get the parser function for this parser config
   const parser = getParserSync(config.name);
@@ -158,8 +159,8 @@ export const parseUnparsedMessages = async (
       }
 
       if (parsed) {
-        // Store parsed order data - will be used by initiator
-        await db.markMessageParsed(message.id);
+        // Don't mark as parsed here - let the initiator mark it after successfully initiating a trade
+        // This ensures the initiator can process the message even if parser runs first
         logger.info('Successfully parsed message', {
           channel: config.channel,
           parserName: config.name,
@@ -174,7 +175,7 @@ export const parseUnparsedMessages = async (
           parserName: config.name,
           messageId: message.message_id
         });
-        // Mark as parsed even if we couldn't extract order data (to avoid reprocessing)
+        // Mark as parsed even if we couldn't extract order data (to avoid reprocessing unparseable messages)
         await db.markMessageParsed(message.id);
       }
     } catch (error) {

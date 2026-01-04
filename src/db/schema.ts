@@ -110,7 +110,8 @@ type DatabaseType = 'sqlite' | 'postgresql';
 interface DatabaseAdapter {
   initializeSchema(): Promise<void>;
   insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number>;
-  getUnparsedMessages(channel?: string): Promise<Message[]>;
+  getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]>;
+  getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]>;
   getUnanalyzedMessages(channel?: string): Promise<Message[]>;
   getMessagesByChannel(channel: string, limit?: number): Promise<Message[]>;
   markMessageParsed(id: number): Promise<void>;
@@ -355,11 +356,64 @@ class SQLiteAdapter implements DatabaseAdapter {
     return result.lastInsertRowid as number;
   }
 
-  async getUnparsedMessages(channel?: string): Promise<Message[]> {
-    const stmt = channel
-      ? this.db.prepare('SELECT * FROM messages WHERE parsed = 0 AND channel = ? ORDER BY id ASC')
-      : this.db.prepare('SELECT * FROM messages WHERE parsed = 0 ORDER BY id ASC');
-    return (channel ? stmt.all(channel) : stmt.all()) as Message[];
+  async getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    let query: string;
+    let params: any[];
+
+    if (maxStalenessMinutes !== undefined && maxStalenessMinutes > 0) {
+      // Calculate cutoff timestamp (current time minus staleness minutes)
+      const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
+      
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE parsed = 0 AND channel = ? AND date >= ? ORDER BY id ASC';
+        params = [channel, cutoffTime];
+      } else {
+        query = 'SELECT * FROM messages WHERE parsed = 0 AND date >= ? ORDER BY id ASC';
+        params = [cutoffTime];
+      }
+    } else {
+      // No staleness filter
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE parsed = 0 AND channel = ? ORDER BY id ASC';
+        params = [channel];
+      } else {
+        query = 'SELECT * FROM messages WHERE parsed = 0 ORDER BY id ASC';
+        params = [];
+      }
+    }
+
+    const stmt = this.db.prepare(query);
+    return (params.length > 0 ? stmt.all(...params) : stmt.all()) as Message[];
+  }
+
+  async getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    let query: string;
+    let params: any[];
+
+    if (maxStalenessMinutes !== undefined && maxStalenessMinutes > 0) {
+      // Calculate cutoff timestamp (current time minus staleness minutes)
+      const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
+      
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = ? AND date >= ? ORDER BY id ASC';
+        params = [channel, cutoffTime];
+      } else {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND date >= ? ORDER BY id ASC';
+        params = [cutoffTime];
+      }
+    } else {
+      // No staleness filter
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = ? ORDER BY id ASC';
+        params = [channel];
+      } else {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL ORDER BY id ASC';
+        params = [];
+      }
+    }
+
+    const stmt = this.db.prepare(query);
+    return (params.length > 0 ? stmt.all(...params) : stmt.all()) as Message[];
   }
 
   async getUnanalyzedMessages(channel?: string): Promise<Message[]> {
@@ -1260,11 +1314,68 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return result.rows[0].id;
   }
 
-  async getUnparsedMessages(channel?: string): Promise<Message[]> {
-    const query = channel
-      ? 'SELECT * FROM messages WHERE parsed = FALSE AND channel = $1 ORDER BY id ASC'
-      : 'SELECT * FROM messages WHERE parsed = FALSE ORDER BY id ASC';
-    const params = channel ? [channel] : [];
+  async getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    let query: string;
+    let params: any[];
+
+    if (maxStalenessMinutes !== undefined && maxStalenessMinutes > 0) {
+      // Calculate cutoff timestamp (current time minus staleness minutes)
+      const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
+      
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE parsed = FALSE AND channel = $1 AND date >= $2 ORDER BY id ASC';
+        params = [channel, cutoffTime];
+      } else {
+        query = 'SELECT * FROM messages WHERE parsed = FALSE AND date >= $1 ORDER BY id ASC';
+        params = [cutoffTime];
+      }
+    } else {
+      // No staleness filter
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE parsed = FALSE AND channel = $1 ORDER BY id ASC';
+        params = [channel];
+      } else {
+        query = 'SELECT * FROM messages WHERE parsed = FALSE ORDER BY id ASC';
+        params = [];
+      }
+    }
+
+    const result = await this.pool.query(query, params);
+    return result.rows.map(row => ({
+      ...row,
+      parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      date: row.date instanceof Date ? row.date.toISOString() : row.date
+    })) as Message[];
+  }
+
+  async getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    let query: string;
+    let params: any[];
+
+    if (maxStalenessMinutes !== undefined && maxStalenessMinutes > 0) {
+      // Calculate cutoff timestamp (current time minus staleness minutes)
+      const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
+      
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = $1 AND date >= $2 ORDER BY id ASC';
+        params = [channel, cutoffTime];
+      } else {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND date >= $1 ORDER BY id ASC';
+        params = [cutoffTime];
+      }
+    } else {
+      // No staleness filter
+      if (channel) {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = $1 ORDER BY id ASC';
+        params = [channel];
+      } else {
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL ORDER BY id ASC';
+        params = [];
+      }
+    }
+
     const result = await this.pool.query(query, params);
     return result.rows.map(row => ({
       ...row,
@@ -1875,8 +1986,12 @@ export class DatabaseManager {
     return this.adapter.insertMessage(message);
   }
 
-  getUnparsedMessages(channel?: string): Promise<Message[]> {
-    return this.adapter.getUnparsedMessages(channel);
+  getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    return this.adapter.getUnparsedMessages(channel, maxStalenessMinutes);
+  }
+
+  getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
+    return this.adapter.getEditedMessages(channel, maxStalenessMinutes);
   }
 
   getUnanalyzedMessages(channel?: string): Promise<Message[]> {
