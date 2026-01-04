@@ -227,10 +227,11 @@ export const startTradeOrchestrator = async (
   const processEditedMessages = async (
     channel: string,
     monitorType: string,
-    parserName: string
+    parserName: string,
+    maxStalenessMinutes?: number
   ): Promise<void> => {
-    const messages = await db.getUnparsedMessages(channel);
-    const editedMessages = messages.filter(m => m.old_content !== undefined && m.old_content !== null);
+    // Get edited messages directly (they may already be parsed, so we can't use getUnparsedMessages)
+    const editedMessages = await db.getEditedMessages(channel, maxStalenessMinutes);
     
     if (editedMessages.length === 0) {
       return;
@@ -379,8 +380,12 @@ export const startTradeOrchestrator = async (
   };
 
   // Process management messages
-  const processManagementMessages = async (channel: string, monitorType: string): Promise<void> => {
-    const messages = await db.getUnparsedMessages(channel);
+  const processManagementMessages = async (
+    channel: string,
+    monitorType: string,
+    maxStalenessMinutes?: number
+  ): Promise<void> => {
+    const messages = await db.getUnparsedMessages(channel, maxStalenessMinutes);
     
     // Get parser config for this channel to check for LLM fallback
     const channelConfig = config.channels.find(c => c.channel === channel);
@@ -670,7 +675,11 @@ export const startTradeOrchestrator = async (
         const parser = parserMap.get(channelConfig.parser);
         if (parser) {
           // First check for management messages
-          processManagementMessages(channelConfig.channel, channelConfig.monitor).catch(error => {
+          processManagementMessages(
+            channelConfig.channel,
+            channelConfig.monitor,
+            channelConfig.maxMessageStalenessMinutes
+          ).catch(error => {
             logger.error('Manager error', {
               channel: channelConfig.channel,
               error: error instanceof Error ? error.message : String(error)
@@ -681,7 +690,8 @@ export const startTradeOrchestrator = async (
           processEditedMessages(
             channelConfig.channel,
             channelConfig.monitor,
-            parser.name
+            parser.name,
+            channelConfig.maxMessageStalenessMinutes
           ).catch(error => {
             logger.error('Edited message processing error', {
               channel: channelConfig.channel,
@@ -690,7 +700,7 @@ export const startTradeOrchestrator = async (
           });
 
           // Then parse signal messages
-          parseUnparsedMessages(parser, db).catch(error => {
+          parseUnparsedMessages(parser, db, channelConfig.maxMessageStalenessMinutes).catch(error => {
             logger.error('Parser error', {
               channel: channelConfig.channel,
               parserName: parser.name,
@@ -747,7 +757,8 @@ export const startTradeOrchestrator = async (
           channelConfig.parser, // Pass parser name to initiator
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
-          channelConfig.baseLeverage // Pass channel-specific baseLeverage
+          channelConfig.baseLeverage, // Pass channel-specific baseLeverage
+          channelConfig.maxMessageStalenessMinutes // Pass channel-specific message staleness limit
         );
       }
     };
@@ -797,7 +808,8 @@ export const startTradeOrchestrator = async (
           channelConfig.parser, // Pass parser name to initiator
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
-          channelConfig.baseLeverage // Pass channel-specific baseLeverage
+          channelConfig.baseLeverage, // Pass channel-specific baseLeverage
+          channelConfig.maxMessageStalenessMinutes // Pass channel-specific message staleness limit
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

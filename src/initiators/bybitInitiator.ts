@@ -237,7 +237,7 @@ const executeTradeForAccount = async (
           actualSymbol: symbol
         });
       }
-      logger.debug('Symbol validated', { tradingPair: order.tradingPair, symbol });
+      logger.debug('Symbol validated', { originalTradingPair: order.tradingPair, normalizedSymbol: symbol });
     }
     
     // Determine side (Buy for long, Sell for short)

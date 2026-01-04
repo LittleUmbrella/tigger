@@ -83,7 +83,9 @@
       "parser": "vip_crypto_signals",
       "breakevenAfterTPs": 2,
       "initiator": "bybit",
-      "monitor": "bybit"
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 20
     },
     {
       "channel": "3241720654",
@@ -91,10 +93,13 @@
       "parser": "ronnie_crypto_signals",
       "breakevenAfterTPs": 2,
       "initiator": "bybit",
-      "monitor": "bybit"
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 25
     }
   ],
   "database": {
+    "_comment": "Database type: sqlite or postgresql, path is only used for sqlite: 'data/tigger.db'",
     "type": "postgresql"
   }
 }
