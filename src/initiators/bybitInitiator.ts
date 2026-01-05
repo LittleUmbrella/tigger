@@ -229,12 +229,15 @@ const executeTradeForAccount = async (
         });
         throw new Error(`Invalid symbol: ${validation.error}`);
       }
-      // Use the actual symbol found (might be USDC if USDT doesn't exist)
+      // Use the actual symbol found (might be USDC if USDT doesn't exist, or asset variant like SHIB1000 instead of 1000SHIB)
       if (validation.actualSymbol && validation.actualSymbol !== symbol) {
         symbol = validation.actualSymbol;
-        logger.info('Using alternative quote currency', {
+        logger.info('Using alternative symbol format', {
           originalSymbol: order.tradingPair.replace('/', ''),
-          actualSymbol: symbol
+          actualSymbol: symbol,
+          reason: symbol.endsWith('USDC') && !order.tradingPair.includes('USDC') 
+            ? 'alternative quote currency' 
+            : 'asset variant'
         });
       }
       logger.debug('Symbol validated', { originalTradingPair: order.tradingPair, normalizedSymbol: symbol });
