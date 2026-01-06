@@ -14,6 +14,7 @@ export interface SymbolInfo {
   qtyPrecision?: number;
   pricePrecision?: number;
   minOrderQty?: number;
+  maxOrderQty?: number;
   qtyStep?: number;
 }
 
@@ -109,6 +110,12 @@ export async function getSymbolInfo(
           const minQty = lotSizeFilter?.min_qty ?? lotSizeFilter?.minQty;
           if (minQty !== undefined && minQty !== null) {
             symbolInfo.minOrderQty = parseFloat(String(minQty));
+          }
+          
+          // Extract max order quantity (try both formats)
+          const maxQty = lotSizeFilter?.max_qty ?? lotSizeFilter?.maxQty;
+          if (maxQty !== undefined && maxQty !== null) {
+            symbolInfo.maxOrderQty = parseFloat(String(maxQty));
           }
           
           // Extract qty_step (CRITICAL - this determines if quantities must be whole numbers)

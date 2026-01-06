@@ -299,6 +299,7 @@ const executeTradeForAccount = async (
     let pricePrecision: number | undefined = undefined;
     let tickSize: number | undefined = undefined;
     let minOrderQty: number | undefined = undefined;
+    let maxOrderQty: number | undefined = undefined;
     let qtyStep: number | undefined = undefined;
     
     if (bybitClient) {
@@ -317,6 +318,7 @@ const executeTradeForAccount = async (
       }
       pricePrecision = symbolInfo?.pricePrecision;
       minOrderQty = symbolInfo?.minOrderQty;
+      maxOrderQty = symbolInfo?.maxOrderQty;
       qtyStep = symbolInfo?.qtyStep;
       // Note: tickSize would need to be extracted from symbolInfo if available
       // For now, we'll use pricePrecision for rounding
@@ -369,6 +371,28 @@ const executeTradeForAccount = async (
       qty = Math.ceil(minOrderQty / effectiveQtyStep) * effectiveQtyStep;
     }
     
+    // Cap quantity to maximum order size if it exceeds the limit
+    if (maxOrderQty !== undefined && qty > maxOrderQty) {
+      const qtyBeforeCap = qty;
+      // Round down to nearest qty_step below maxOrderQty
+      qty = Math.floor(maxOrderQty / effectiveQtyStep) * effectiveQtyStep;
+      
+      // Recalculate position size based on capped quantity for accurate logging
+      const cappedPositionSize = qty * roundedEntryPrice;
+      
+      logger.warn('Quantity exceeds maximum order size, capping to max', {
+        channel,
+        symbol,
+        qtyBeforeCap,
+        qtyAfterCap: qty,
+        maxOrderQty,
+        originalPositionSize: positionSize,
+        cappedPositionSize,
+        qtyStep: effectiveQtyStep,
+        note: 'Stop loss and take profit prices remain unchanged, but quantities are based on capped quantity'
+      });
+    }
+    
     // Final validation: ensure quantity is valid (positive and non-zero)
     if (qty <= 0) {
       throw new Error(`Invalid quantity calculated: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice}, qtyStep: ${effectiveQtyStep})`);
@@ -405,6 +429,7 @@ const executeTradeForAccount = async (
       decimalPrecision,
       pricePrecision,
       minOrderQty,
+      maxOrderQty,
       qtyStep,
       positionSize
     });
@@ -874,6 +899,7 @@ const executeTradeForAccount = async (
       account_name: accountName || undefined,
       order_id: orderId,
       entry_order_type: isMarketOrder ? 'market' : 'limit',
+      direction: order.signalType, // Store direction: 'long' or 'short'
       status: 'pending',
       stop_loss_breakeven: false,
       expires_at: expiresAt

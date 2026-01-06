@@ -166,14 +166,26 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
     // Check if this was from TP pattern (Pattern 2) - values are already extracted and joined
     // TP pattern creates a match with space-separated values like "0.104 0.106 0.108 0.120"
     const matchValue = takeProfitMatch[1];
-    if (matchValue && matchValue.includes(' ') && !matchValue.includes('-') && !matchValue.includes(')')) {
+    
+    // Check if match value looks like an incomplete list index (e.g., "1. ", "2. ")
+    // This happens when Pattern 2 matches numbered lists with emojis - skip TP pattern branch
+    const looksLikeListIndex = matchValue && /^\d+\.?\s*$/.test(matchValue.trim());
+    
+    // Skip TP pattern branch if it looks like a list index, or if it doesn't match TP pattern criteria
+    if (!looksLikeListIndex && matchValue && matchValue.includes(' ') && !matchValue.includes('-') && !matchValue.includes(')')) {
       // This is from TP pattern - values are space-separated
       const tpValues = matchValue.split(/\s+/).filter(v => v.trim());
       const validTargets = tpValues
         .map(t => parseFloat(t.replace(/,/g, '')))
         .filter(t => !isNaN(t) && t > 0);
-      takeProfits.push(...validTargets);
-    } else {
+      // Only use this branch if we found valid targets (not just list indices)
+      if (validTargets.length > 0) {
+        takeProfits.push(...validTargets);
+      }
+    }
+    
+    // If we didn't successfully parse from TP pattern (or it looked like a list index), use targetsSection approach
+    if (takeProfits.length === 0) {
       // Extract everything after "Targets:" until stop loss or end of content
       // This handles numbered lists and multi-line formats
       const targetsSection = content.split(/Targets?:?/i)[1];

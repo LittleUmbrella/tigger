@@ -10,6 +10,24 @@ import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
+/**
+ * Get signal type (long/short) from trade's direction field
+ * Falls back to inferring from price relationships if direction is not set (for backward compatibility)
+ */
+const getIsLong = (trade: Trade): boolean => {
+  if (trade.direction) {
+    return trade.direction === 'long';
+  }
+  
+  // Fallback: infer from price relationships for old trades without direction
+  // For long: TP > entry > SL, for short: SL > entry > TP
+  const takeProfits = JSON.parse(trade.take_profits) as number[];
+  const firstTP = takeProfits[0];
+  const tpHigherThanEntry = firstTP > trade.entry_price;
+  const slLowerThanEntry = trade.stop_loss < trade.entry_price;
+  return tpHigherThanEntry && slLowerThanEntry;
+};
+
 const sleep = (ms: number): Promise<void> => {
   return new Promise(resolve => {
     if (typeof setTimeout !== 'undefined') {
@@ -697,7 +715,21 @@ const monitorTrade = async (
       const takeProfits = JSON.parse(trade.take_profits) as number[];
       const firstTP = takeProfits[0];
       
-      const isLong = currentPrice > trade.entry_price;
+      // Get signal type from trade's direction field
+      // The buggy logic `currentPrice > trade.entry_price` incorrectly assumes
+      // that if price is below entry, it's a short trade, which is wrong.
+      const isLong = getIsLong(trade);
+      
+      if (!trade.direction) {
+        logger.debug('Trade direction not set, inferred from price relationships', {
+          tradeId: trade.id,
+          inferredIsLong: isLong,
+          entryPrice: trade.entry_price,
+          stopLoss: trade.stop_loss,
+          firstTP
+        });
+      }
+      
       const hitSLBeforeEntry = isLong 
         ? currentPrice <= trade.stop_loss
         : currentPrice >= trade.stop_loss;
@@ -705,18 +737,29 @@ const monitorTrade = async (
         ? currentPrice >= firstTP
         : currentPrice <= firstTP;
 
-      if (hitSLBeforeEntry || hitTPBeforeEntry) {
-        logger.info('Price hit SL or TP before entry - cancelling order', {
+      // Only cancel if stop loss is hit before entry
+      // If TP is hit before entry, that's fine - we'll book the profit when entry fills
+      if (hitSLBeforeEntry) {
+        logger.info('Price hit SL before entry - cancelling order', {
           tradeId: trade.id,
           currentPrice,
           stopLoss: trade.stop_loss,
-          firstTP,
-          hitSL: hitSLBeforeEntry,
-          hitTP: hitTPBeforeEntry
+          entryPrice: trade.entry_price
         });
         await cancelOrder(trade, bybitClient);
         await db.updateTrade(trade.id, { status: 'cancelled' });
         return;
+      }
+
+      // Log if TP is hit before entry, but don't cancel - let it fill and book profit
+      if (hitTPBeforeEntry) {
+        logger.info('Price hit TP before entry - TP orders will fill and book profit', {
+          tradeId: trade.id,
+          currentPrice,
+          entryPrice: trade.entry_price,
+          firstTP,
+          note: 'Relevant TP Orders will fill at current price and profit will be booked immediately'
+        });
       }
 
       // Check if entry is filled
@@ -833,8 +876,8 @@ const monitorTrade = async (
           const priceDiff = positionResult.exitPrice - trade.entry_price;
           const priceChangePercent = (priceDiff / trade.entry_price) * 100;
           // For futures, PNL percentage is price change * leverage
-          // Adjust for long/short direction
-          const isLong = positionResult.exitPrice > trade.entry_price;
+          // Adjust for long/short direction - get from trade's direction field
+          const isLong = getIsLong(trade);
           pnlPercentage = isLong 
             ? priceChangePercent * trade.leverage
             : -priceChangePercent * trade.leverage;
@@ -851,7 +894,8 @@ const monitorTrade = async (
       }
       
       const takeProfits = JSON.parse(trade.take_profits) as number[];
-      const isLong = currentPrice > trade.entry_price;
+      // Get signal type from trade's direction field
+      const isLong = getIsLong(trade);
 
       // Count how many take profits have been filled
       const tradeOrders = await db.getOrdersByTradeId(trade.id);
@@ -893,7 +937,8 @@ const monitorTrade = async (
           if (stopLossResult.pnl !== undefined && stopLossResult.exitPrice && trade.entry_price) {
             const priceDiff = stopLossResult.exitPrice - trade.entry_price;
             const priceChangePercent = (priceDiff / trade.entry_price) * 100;
-            const isLong = stopLossResult.exitPrice > trade.entry_price;
+            // Get signal type from trade's direction field to correctly calculate PNL
+            const isLong = getIsLong(trade);
             pnlPercentage = isLong 
               ? priceChangePercent * trade.leverage
               : -priceChangePercent * trade.leverage;
