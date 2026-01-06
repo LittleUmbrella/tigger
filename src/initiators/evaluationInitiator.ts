@@ -176,6 +176,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     quantity: qty,
     exchange: 'bybit', // Keep as bybit for compatibility
     order_id: orderId,
+    direction: order.signalType, // Store direction: 'long' or 'short'
     status: 'pending',
     stop_loss_breakeven: false,
     expires_at: expiresAt,
