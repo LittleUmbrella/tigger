@@ -261,196 +261,222 @@ const checkEntryFilled = async (
         });
       }
       
-      // If we have an order_id, check order status
+      // If we have an order_id, query the order directly by ID first
+      // Note: getHistoricOrders is more reliable for filled orders, so we try it first
       if (trade.order_id) {
-        // Check active orders first
-        logger.debug('Checking active orders', {
+        // Step 1: Query order history directly by orderId (works for both active and filled orders)
+        logger.debug('Querying order directly by orderId (history endpoint)', {
           tradeId: trade.id,
           symbol,
           orderId: trade.order_id
         });
         
-        const orderInfo = await bybitClient.getActiveOrders({
-          category: 'linear',
-          symbol: symbol,
-          orderId: trade.order_id
-        });
-        
-        logger.debug('Active orders API response', {
-          tradeId: trade.id,
-          symbol,
-          orderId: trade.order_id,
-          retCode: orderInfo.retCode,
-          retMsg: orderInfo.retMsg,
-          hasResult: !!orderInfo.result,
-          hasList: !!(orderInfo.result && orderInfo.result.list),
-          listLength: orderInfo.result?.list?.length || 0
-        });
-        
-        if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list) {
-          logger.debug('Active orders list', {
-            tradeId: trade.id,
-            symbol,
-            orders: orderInfo.result.list.map((o: any) => ({
-              orderId: getBybitField<string>(o, 'orderId', 'order_id'),
-              orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
-              symbol: o.symbol
-            }))
+        try {
+          const orderHistory = await bybitClient.getHistoricOrders({
+            category: 'linear',
+            symbol: symbol,
+            orderId: trade.order_id,
+            limit: 10
           });
           
-          const order = orderInfo.result.list.find((o: any) => {
-            const oId = getBybitField<string>(o, 'orderId', 'order_id');
-            const matches = oId === trade.order_id;
-            logger.debug('Checking active order', {
-              tradeId: trade.id,
-              orderId: oId,
-              expectedOrderId: trade.order_id,
-              matches
-            });
-            return matches;
-          });
-          
-          if (order) {
-            // Order is still active, check its status
-            const orderStatus = getBybitField<string>(order, 'orderStatus', 'order_status');
-            logger.debug('Entry order found in active orders', {
-              tradeId: trade.id,
-              symbol,
-              orderId: trade.order_id,
-              orderStatus
-            });
-            return { filled: orderStatus === 'Filled' };
-          } else {
-            // Order not found in active orders, check order history
-            logger.debug('Entry order not found in active orders, checking order history', {
-              tradeId: trade.id,
-              symbol,
-              orderId: trade.order_id
+          if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list && orderHistory.result.list.length > 0) {
+            const historicalOrder = orderHistory.result.list.find((o: any) => {
+              const oId = getBybitField<string>(o, 'orderId', 'order_id');
+              return oId === trade.order_id;
             });
             
-            try {
-              logger.debug('Querying order history', {
-                tradeId: trade.id,
-                symbol,
-                orderId: trade.order_id
-              });
-              
-              const orderHistory = await bybitClient.getHistoricOrders({
-                category: 'linear',
-                symbol: symbol,
-                orderId: trade.order_id,
-                limit: 10
-              });
-              
-              logger.debug('Order history API response', {
+            if (historicalOrder) {
+              const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
+              logger.debug('Order found in order history by orderId', {
                 tradeId: trade.id,
                 symbol,
                 orderId: trade.order_id,
-                retCode: orderHistory.retCode,
-                retMsg: orderHistory.retMsg,
-                hasResult: !!orderHistory.result,
-                hasList: !!(orderHistory.result && orderHistory.result.list),
-                listLength: orderHistory.result?.list?.length || 0
+                orderStatus
               });
               
-              if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list) {
-                logger.debug('Order history list', {
-                  tradeId: trade.id,
-                  symbol,
-                  orders: orderHistory.result.list.map((o: any) => ({
-                    orderId: getBybitField<string>(o, 'orderId', 'order_id'),
-                    orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
-                    symbol: o.symbol
-                  }))
-                });
-                
-                const historicalOrder = orderHistory.result.list.find((o: any) => {
-                  const oId = getBybitField<string>(o, 'orderId', 'order_id');
-                  const matches = oId === trade.order_id;
-                  logger.debug('Checking historical order', {
-                    tradeId: trade.id,
-                    orderId: oId,
-                    expectedOrderId: trade.order_id,
-                    matches
-                  });
-                  return matches;
-                });
-                
-                if (historicalOrder) {
-                  const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
-                  logger.debug('Entry order found in order history', {
-                    tradeId: trade.id,
-                    symbol,
-                    orderId: trade.order_id,
-                    orderStatus
-                  });
-                  
-                  if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
-                    // Try to get position ID again now that we know it's filled
-                    logger.debug('Order is filled, checking for position', {
-                      tradeId: trade.id,
-                      symbol
-                    });
-                    const positionsAfterFill = await bybitClient.getPositionInfo({ category: 'linear', symbol });
-                    if (positionsAfterFill.retCode === 0 && positionsAfterFill.result && positionsAfterFill.result.list) {
-                      const positionAfterFill = positionsAfterFill.result.list.find((p: any) => 
-                        p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
-                      );
-                      if (positionAfterFill) {
-                        const positionIdx = getBybitField<string | number>(positionAfterFill, 'positionIdx', 'position_idx');
-                        logger.debug('Found position after order fill check', {
-                          tradeId: trade.id,
-                          symbol,
-                          positionIdx: positionIdx?.toString()
-                        });
-                        return { filled: true, positionId: positionIdx?.toString() };
-                      }
-                    }
-                    logger.debug('Order is filled but no position found', {
-                      tradeId: trade.id,
-                      symbol
-                    });
-                    return { filled: true };
-                  } else {
-                    logger.debug('Order found in history but not filled', {
-                      tradeId: trade.id,
-                      symbol,
-                      orderStatus
-                    });
+              if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
+                // Get position ID if available
+                const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+                if (positions.retCode === 0 && positions.result && positions.result.list) {
+                  const position = positions.result.list.find((p: any) => 
+                    p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
+                  );
+                  if (position) {
+                    const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+                    return { filled: true, positionId: positionIdx?.toString() };
                   }
-                } else {
-                  logger.debug('Order not found in order history', {
-                    tradeId: trade.id,
-                    symbol,
-                    orderId: trade.order_id,
-                    checkedOrders: orderHistory.result.list.length
-                  });
                 }
-              } else {
-                logger.debug('Order history API returned error or empty result', {
-                  tradeId: trade.id,
-                  symbol,
-                  orderId: trade.order_id,
-                  retCode: orderHistory.retCode,
-                  retMsg: orderHistory.retMsg
-                });
+                return { filled: true };
               }
-            } catch (historyError) {
-              logger.error('Error checking order history', {
-                tradeId: trade.id,
-                symbol,
-                orderId: trade.order_id,
-                error: historyError instanceof Error ? historyError.message : String(historyError),
-                stack: historyError instanceof Error ? historyError.stack : undefined
-              });
+              // Order found but not filled
+              return { filled: false };
             }
           }
-        } else {
-          logger.debug('No active orders found or API error', {
+        } catch (error) {
+          logger.debug('Error querying order history by orderId', {
             tradeId: trade.id,
-            symbol,
-            orderId: trade.order_id,
-            retCode: orderInfo.retCode
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        
+        // Step 2: Try querying active orders (may include recently closed orders when querying by orderId)
+        logger.debug('Order not found in history, trying active orders', {
+          tradeId: trade.id,
+          symbol,
+          orderId: trade.order_id
+        });
+        
+        try {
+          const orderInfo = await bybitClient.getActiveOrders({
+            category: 'linear',
+            symbol: symbol,
+            orderId: trade.order_id
+          });
+          
+          if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list && orderInfo.result.list.length > 0) {
+            const order = orderInfo.result.list.find((o: any) => {
+              const oId = getBybitField<string>(o, 'orderId', 'order_id');
+              return oId === trade.order_id;
+            });
+            
+            if (order) {
+              const orderStatus = getBybitField<string>(order, 'orderStatus', 'order_status');
+              logger.debug('Order found in active orders', {
+                tradeId: trade.id,
+                symbol,
+                orderId: trade.order_id,
+                orderStatus
+              });
+              
+              if (orderStatus === 'Filled') {
+                // Get position ID if available
+                const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+                if (positions.retCode === 0 && positions.result && positions.result.list) {
+                  const position = positions.result.list.find((p: any) => 
+                    p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
+                  );
+                  if (position) {
+                    const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+                    return { filled: true, positionId: positionIdx?.toString() };
+                  }
+                }
+                return { filled: true };
+              }
+              // Order is active but not filled
+              return { filled: false };
+            }
+          }
+        } catch (error) {
+          logger.debug('Error querying active orders', {
+            tradeId: trade.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        
+        // Step 3: Try querying order history by orderLinkId (in case stored ID is actually a link ID)
+        logger.debug('Order not found by orderId, trying orderLinkId', {
+          tradeId: trade.id,
+          symbol,
+          orderLinkId: trade.order_id
+        });
+        
+        try {
+          const orderHistoryByLink = await bybitClient.getHistoricOrders({
+            category: 'linear',
+            symbol: symbol,
+            orderLinkId: trade.order_id,
+            limit: 10
+          });
+          
+          if (orderHistoryByLink.retCode === 0 && orderHistoryByLink.result && orderHistoryByLink.result.list && orderHistoryByLink.result.list.length > 0) {
+            const historicalOrder = orderHistoryByLink.result.list.find((o: any) => {
+              const oLinkId = getBybitField<string>(o, 'orderLinkId', 'order_link_id');
+              return oLinkId === trade.order_id;
+            });
+            
+            if (historicalOrder) {
+              const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
+              logger.debug('Order found in order history by orderLinkId', {
+                tradeId: trade.id,
+                symbol,
+                orderLinkId: trade.order_id,
+                orderStatus
+              });
+              
+              if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
+                // Get position ID if available
+                const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+                if (positions.retCode === 0 && positions.result && positions.result.list) {
+                  const position = positions.result.list.find((p: any) => 
+                    p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
+                  );
+                  if (position) {
+                    const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+                    return { filled: true, positionId: positionIdx?.toString() };
+                  }
+                }
+                return { filled: true };
+              }
+              // Order found but not filled
+              return { filled: false };
+            }
+          }
+        } catch (error) {
+          logger.debug('Error querying order history by orderLinkId', {
+            tradeId: trade.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+        
+        // Step 4: Fallback - query order history without filter and search (last resort)
+        logger.debug('Order not found by orderId or orderLinkId, falling back to search', {
+          tradeId: trade.id,
+          symbol,
+          orderId: trade.order_id
+        });
+        
+        try {
+          const orderHistory = await bybitClient.getHistoricOrders({
+            category: 'linear',
+            symbol: symbol,
+            limit: 50
+          });
+          
+          if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list) {
+            const historicalOrder = orderHistory.result.list.find((o: any) => {
+              const oId = getBybitField<string>(o, 'orderId', 'order_id');
+              const oLinkId = getBybitField<string>(o, 'orderLinkId', 'order_link_id');
+              return oId === trade.order_id || oLinkId === trade.order_id;
+            });
+            
+            if (historicalOrder) {
+              const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
+              logger.debug('Order found via fallback search', {
+                tradeId: trade.id,
+                symbol,
+                orderId: trade.order_id,
+                orderStatus
+              });
+              
+              if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
+                const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+                if (positions.retCode === 0 && positions.result && positions.result.list) {
+                  const position = positions.result.list.find((p: any) => 
+                    p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
+                  );
+                  if (position) {
+                    const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+                    return { filled: true, positionId: positionIdx?.toString() };
+                  }
+                }
+                return { filled: true };
+              }
+            }
+          }
+        } catch (error) {
+          logger.debug('Error in fallback order search', {
+            tradeId: trade.id,
+            error: error instanceof Error ? error.message : String(error)
           });
         }
       } else {
@@ -1120,6 +1146,84 @@ const monitorTrade = async (
             // Place take profit orders now that entry has filled
             await placeTakeProfitOrders(trade, bybitClient, db);
             // Continue to monitor active trade below
+          } else if (trade.order_id) {
+            // No position found, but check order history to see if entry was filled
+            logger.debug('No position found, checking order history for entry fill', {
+              tradeId: trade.id,
+              symbol,
+              orderId: trade.order_id
+            });
+            
+            try {
+              // Try querying order history without orderId filter to search through results
+              let orderHistory = await bybitClient.getHistoricOrders({
+                category: 'linear',
+                symbol: symbol,
+                limit: 50
+              });
+              
+              // Also try with orderId filter
+              if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list && orderHistory.result.list.length === 0) {
+                orderHistory = await bybitClient.getHistoricOrders({
+                  category: 'linear',
+                  symbol: symbol,
+                  orderId: trade.order_id,
+                  limit: 10
+                });
+              }
+              
+              if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list) {
+                const historicalOrder = orderHistory.result.list.find((o: any) => {
+                  const oId = getBybitField<string>(o, 'orderId', 'order_id');
+                  const oLinkId = getBybitField<string>(o, 'orderLinkId', 'order_link_id');
+                  return oId === trade.order_id || oLinkId === trade.order_id;
+                });
+                
+                if (historicalOrder) {
+                  const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
+                  if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
+                    logger.info('Entry order filled (found in order history but no position)', {
+                      tradeId: trade.id,
+                      symbol,
+                      orderId: trade.order_id,
+                      orderStatus,
+                      note: 'Position may have been closed already'
+                    });
+                    
+                    // Entry was filled but position is closed - update status but can't place TPs
+                    const fillTime = trade.entry_filled_at || dayjs().toISOString();
+                    await db.updateTrade(trade.id, {
+                      status: 'active',
+                      entry_filled_at: fillTime
+                    });
+                    trade.status = 'active';
+                    trade.entry_filled_at = fillTime;
+
+                    // Update entry order status
+                    const orders = await db.getOrdersByTradeId(trade.id);
+                    const entryOrder = orders.find(o => o.order_type === 'entry');
+                    if (entryOrder && entryOrder.status !== 'filled') {
+                      await db.updateOrder(entryOrder.id, {
+                        status: 'filled',
+                        filled_at: fillTime,
+                        filled_price: trade.entry_price
+                      });
+                    }
+                    
+                    logger.warn('Entry was filled but position is closed - TP orders cannot be placed', {
+                      tradeId: trade.id,
+                      symbol
+                    });
+                  }
+                }
+              }
+            } catch (historyError) {
+              logger.debug('Error checking order history in early position check', {
+                tradeId: trade.id,
+                symbol,
+                error: historyError instanceof Error ? historyError.message : String(historyError)
+              });
+            }
           }
         }
       } catch (error) {

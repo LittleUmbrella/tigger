@@ -9,6 +9,8 @@ import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../utils/logger.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { BotConfig, AccountConfig } from '../types/config.js';
+import fs from 'fs-extra';
 import dotenv from 'dotenv';
 
 dotenv.config();
@@ -69,77 +71,236 @@ async function troubleshootTrade(tradeId: number) {
       }))
     });
 
-    // Initialize Bybit client
-    const apiKey = process.env.BYBIT_API_KEY;
-    const apiSecret = process.env.BYBIT_API_SECRET;
-    const testnet = process.env.BYBIT_TESTNET === 'true';
+    // Initialize Bybit client - use account-specific credentials if available
+    let apiKey: string | undefined;
+    let apiSecret: string | undefined;
+    let testnet = process.env.BYBIT_TESTNET === 'true';
+    let demo = false;
+    let baseUrl: string | undefined;
+
+    // Use "demo" account instead of trade.account_name
+    const accountNameToUse = 'demo';
+    logger.info('Using account for troubleshooting', {
+      requestedAccount: accountNameToUse,
+      tradeAccountName: trade.account_name,
+      note: 'Using demo account instead of trade account for troubleshooting'
+    });
+
+    // Helper function to get API key fingerprint (first 8 and last 4 chars)
+    const getApiKeyFingerprint = (key: string | undefined): string => {
+      if (!key) return 'not set';
+      if (key.length < 12) return key.substring(0, 4) + '...';
+      return key.substring(0, 8) + '...' + key.substring(key.length - 4);
+    };
+
+    // Try to load account-specific credentials from config
+    try {
+      const configPath = process.env.CONFIG_PATH || 'config.json';
+      logger.info('Loading config', { configPath, exists: fs.existsSync(configPath) });
+      
+      if (fs.existsSync(configPath)) {
+        const configContent = await fs.readFile(configPath, 'utf-8');
+        const config: BotConfig = JSON.parse(configContent);
+        
+        const account = config.accounts?.find(acc => acc.name === accountNameToUse);
+        if (account) {
+          logger.info('Found account config', {
+            accountName: accountNameToUse,
+            testnet: account.testnet,
+            demo: account.demo,
+            hasEnvVarNames: !!(account.envVarNames?.apiKey || account.envVarNames?.apiSecret),
+            envVarNames: {
+              apiKey: account.envVarNames?.apiKey || account.envVars?.apiKey,
+              apiSecret: account.envVarNames?.apiSecret || account.envVars?.apiSecret
+            },
+            hasDirectApiKey: !!account.apiKey,
+            hasDirectApiSecret: !!account.apiSecret
+          });
+          
+          // Set demo flag and baseUrl if demo mode
+          demo = account.demo || false;
+          testnet = account.testnet || false;
+          
+          // Demo trading uses api-demo.bybit.com endpoint (different from testnet)
+          if (demo) {
+            baseUrl = 'https://api-demo.bybit.com';
+            logger.info('Demo mode enabled - using demo endpoint', {
+              baseUrl
+            });
+          }
+          
+          const envVarNameForKey = account.envVarNames?.apiKey || account.envVars?.apiKey;
+          const envVarNameForSecret = account.envVarNames?.apiSecret || account.envVars?.apiSecret;
+          
+          logger.info('Checking environment variables', {
+            envVarNameForKey,
+            envVarNameForSecret,
+            envVarForKeySet: envVarNameForKey ? !!process.env[envVarNameForKey] : 'N/A',
+            envVarForSecretSet: envVarNameForSecret ? !!process.env[envVarNameForSecret] : 'N/A',
+            defaultBybitApiKeySet: !!process.env.BYBIT_API_KEY,
+            defaultBybitApiSecretSet: !!process.env.BYBIT_API_SECRET
+          });
+          
+          // Determine which API key to use
+          if (envVarNameForKey && process.env[envVarNameForKey]) {
+            apiKey = process.env[envVarNameForKey];
+            logger.info('Using API key from envVarNames', {
+              envVarName: envVarNameForKey,
+              fingerprint: getApiKeyFingerprint(apiKey)
+            });
+          } else if (account.apiKey) {
+            apiKey = account.apiKey;
+            logger.info('Using API key from account config (direct)', {
+              fingerprint: getApiKeyFingerprint(apiKey)
+            });
+          } else {
+            apiKey = process.env.BYBIT_API_KEY;
+            logger.info('Using API key from default BYBIT_API_KEY env var', {
+              fingerprint: getApiKeyFingerprint(apiKey)
+            });
+          }
+          
+          // Determine which API secret to use
+          if (envVarNameForSecret && process.env[envVarNameForSecret]) {
+            apiSecret = process.env[envVarNameForSecret];
+            logger.info('Using API secret from envVarNames', {
+              envVarName: envVarNameForSecret,
+              fingerprint: getApiKeyFingerprint(apiSecret)
+            });
+          } else if (account.apiSecret) {
+            apiSecret = account.apiSecret;
+            logger.info('Using API secret from account config (direct)', {
+              fingerprint: getApiKeyFingerprint(apiSecret)
+            });
+          } else {
+            apiSecret = process.env.BYBIT_API_SECRET;
+            logger.info('Using API secret from default BYBIT_API_SECRET env var', {
+              fingerprint: getApiKeyFingerprint(apiSecret)
+            });
+          }
+          
+          testnet = account.testnet || false;
+        } else {
+          logger.warn('Account not found in config, using default credentials', {
+            accountName: accountNameToUse,
+            availableAccounts: config.accounts?.map(a => a.name).join(', ') || 'none'
+          });
+          apiKey = process.env.BYBIT_API_KEY;
+          apiSecret = process.env.BYBIT_API_SECRET;
+          logger.info('Using default credentials', {
+            apiKeyFingerprint: getApiKeyFingerprint(apiKey),
+            apiSecretFingerprint: getApiKeyFingerprint(apiSecret)
+          });
+        }
+      } else {
+        logger.warn('Config file not found, using default credentials', {
+          configPath
+        });
+        apiKey = process.env.BYBIT_API_KEY;
+        apiSecret = process.env.BYBIT_API_SECRET;
+        logger.info('Using default credentials (no config)', {
+          apiKeyFingerprint: getApiKeyFingerprint(apiKey),
+          apiSecretFingerprint: getApiKeyFingerprint(apiSecret)
+        });
+      }
+    } catch (error) {
+      logger.warn('Error loading config for account credentials', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      // Fallback to default
+      apiKey = process.env.BYBIT_API_KEY;
+      apiSecret = process.env.BYBIT_API_SECRET;
+      logger.info('Using default credentials (error fallback)', {
+        apiKeyFingerprint: getApiKeyFingerprint(apiKey),
+        apiSecretFingerprint: getApiKeyFingerprint(apiSecret)
+      });
+    }
 
     if (!apiKey || !apiSecret) {
-      logger.error('Bybit API credentials not found');
+      logger.error('Bybit API credentials not found', {
+        accountName: trade.account_name,
+        hasApiKey: !!apiKey,
+        hasApiSecret: !!apiSecret
+      });
       return;
     }
+
+    logger.info('Final Bybit credentials summary', {
+      accountName: accountNameToUse,
+      testnet,
+      demo,
+      baseUrl: baseUrl || 'default',
+      apiKeyFingerprint: getApiKeyFingerprint(apiKey),
+      apiSecretFingerprint: getApiKeyFingerprint(apiSecret),
+      apiKeyLength: apiKey?.length || 0,
+      apiSecretLength: apiSecret?.length || 0,
+      hasApiKey: !!apiKey,
+      hasApiSecret: !!apiSecret
+    });
 
     const bybitClient = new RestClientV5({ 
       key: apiKey, 
       secret: apiSecret, 
-      testnet 
+      testnet,
+      ...(baseUrl && { baseUrl }) // Use demo endpoint if demo mode
     });
 
     const symbol = normalizeBybitSymbol(trade.trading_pair);
     logger.info('Checking Bybit for symbol', { symbol, originalTradingPair: trade.trading_pair });
 
-    // 1. Check active orders
-    logger.info('=== Checking Active Orders ===');
-    try {
-      const activeOrders = await bybitClient.getActiveOrders({
-        category: 'linear',
-        symbol: symbol
-      });
-      
-      logger.info('Active orders response', {
-        retCode: activeOrders.retCode,
-        retMsg: activeOrders.retMsg,
-        hasResult: !!activeOrders.result,
-        hasList: !!(activeOrders.result && activeOrders.result.list),
-        listLength: activeOrders.result?.list?.length || 0
-      });
-
-      if (activeOrders.retCode === 0 && activeOrders.result && activeOrders.result.list) {
-        logger.info('Active orders list', {
-          orders: activeOrders.result.list.map((o: any) => ({
-            orderId: getBybitField<string>(o, 'orderId', 'order_id'),
-            orderLinkId: getBybitField<string>(o, 'orderLinkId', 'order_link_id'),
-            symbol: o.symbol,
-            side: o.side,
-            orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
-            orderType: o.orderType,
-            price: o.price,
-            qty: o.qty
-          }))
+    // 1. Query active order directly by orderId
+    logger.info('=== Step 1: Query Active Order by orderId ===');
+    if (trade.order_id) {
+      try {
+        const activeOrders = await bybitClient.getActiveOrders({
+          category: 'linear',
+          symbol: symbol,
+          orderId: trade.order_id
+        });
+        
+        logger.info('Active orders response', {
+          retCode: activeOrders.retCode,
+          retMsg: activeOrders.retMsg,
+          hasResult: !!activeOrders.result,
+          hasList: !!(activeOrders.result && activeOrders.result.list),
+          listLength: activeOrders.result?.list?.length || 0
         });
 
-        if (trade.order_id) {
+        if (activeOrders.retCode === 0 && activeOrders.result && activeOrders.result.list && activeOrders.result.list.length > 0) {
           const matchingOrder = activeOrders.result.list.find((o: any) => 
             getBybitField<string>(o, 'orderId', 'order_id') === trade.order_id
           );
+          
           if (matchingOrder) {
-            logger.info('Found matching order in active orders', {
+            const orderStatus = getBybitField<string>(matchingOrder, 'orderStatus', 'order_status');
+            logger.info('✅ Order found in active orders', {
               orderId: trade.order_id,
-              orderStatus: getBybitField<string>(matchingOrder, 'orderStatus', 'order_status')
+              orderStatus,
+              orderType: matchingOrder.orderType,
+              price: matchingOrder.price,
+              qty: matchingOrder.qty
             });
           } else {
-            logger.warn('Order not found in active orders', { orderId: trade.order_id });
+            logger.info('Order not found in active orders (query returned results but no match)', {
+              orderId: trade.order_id,
+              returnedOrders: activeOrders.result.list.length
+            });
           }
+        } else {
+          logger.info('Order not found in active orders (empty result)', {
+            orderId: trade.order_id
+          });
         }
+      } catch (error) {
+        logger.error('Error querying active orders', {
+          error: error instanceof Error ? error.message : String(error)
+        });
       }
-    } catch (error) {
-      logger.error('Error checking active orders', {
-        error: error instanceof Error ? error.message : String(error)
-      });
     }
 
-    // 2. Check order history
-    logger.info('=== Checking Order History ===');
+    // 2. Query order history directly by orderId
+    logger.info('=== Step 2: Query Order History by orderId ===');
     if (trade.order_id) {
       try {
         const orderHistory = await bybitClient.getHistoricOrders({
@@ -149,7 +310,113 @@ async function troubleshootTrade(tradeId: number) {
           limit: 10
         });
 
-        logger.info('Order history response', {
+        logger.info('Order history response (by orderId)', {
+          retCode: orderHistory.retCode,
+          retMsg: orderHistory.retMsg,
+          hasResult: !!orderHistory.result,
+          hasList: !!(orderHistory.result && orderHistory.result.list),
+          listLength: orderHistory.result?.list?.length || 0
+        });
+
+        if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list && orderHistory.result.list.length > 0) {
+          const matchingOrder = orderHistory.result.list.find((o: any) => {
+            const oId = getBybitField<string>(o, 'orderId', 'order_id');
+            return oId === trade.order_id;
+          });
+          
+          if (matchingOrder) {
+            const orderStatus = getBybitField<string>(matchingOrder, 'orderStatus', 'order_status');
+            logger.info('✅ Order found in order history by orderId', {
+              orderId: trade.order_id,
+              orderStatus,
+              avgPrice: getBybitField<string>(matchingOrder, 'avgPrice', 'avg_price'),
+              cumExecQty: getBybitField<string>(matchingOrder, 'cumExecQty', 'cum_exec_qty'),
+              orderType: matchingOrder.orderType,
+              side: matchingOrder.side
+            });
+          } else {
+            logger.info('Order not found in order history by orderId (query returned results but no match)', {
+              orderId: trade.order_id,
+              returnedOrders: orderHistory.result.list.length
+            });
+          }
+        } else {
+          logger.info('Order not found in order history by orderId (empty result)', {
+            orderId: trade.order_id
+          });
+        }
+      } catch (error) {
+        logger.error('Error querying order history by orderId', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    // 3. Query order history by orderLinkId (in case stored ID is actually a link ID)
+    logger.info('=== Step 3: Query Order History by orderLinkId ===');
+    if (trade.order_id) {
+      try {
+        const orderHistoryByLink = await bybitClient.getHistoricOrders({
+          category: 'linear',
+          symbol: symbol,
+          orderLinkId: trade.order_id,
+          limit: 10
+        });
+
+        logger.info('Order history response (by orderLinkId)', {
+          retCode: orderHistoryByLink.retCode,
+          retMsg: orderHistoryByLink.retMsg,
+          hasResult: !!orderHistoryByLink.result,
+          hasList: !!(orderHistoryByLink.result && orderHistoryByLink.result.list),
+          listLength: orderHistoryByLink.result?.list?.length || 0
+        });
+
+        if (orderHistoryByLink.retCode === 0 && orderHistoryByLink.result && orderHistoryByLink.result.list && orderHistoryByLink.result.list.length > 0) {
+          const matchingOrder = orderHistoryByLink.result.list.find((o: any) => {
+            const oLinkId = getBybitField<string>(o, 'orderLinkId', 'order_link_id');
+            return oLinkId === trade.order_id;
+          });
+          
+          if (matchingOrder) {
+            const orderStatus = getBybitField<string>(matchingOrder, 'orderStatus', 'order_status');
+            logger.info('✅ Order found in order history by orderLinkId', {
+              orderLinkId: trade.order_id,
+              orderId: getBybitField<string>(matchingOrder, 'orderId', 'order_id'),
+              orderStatus,
+              avgPrice: getBybitField<string>(matchingOrder, 'avgPrice', 'avg_price'),
+              cumExecQty: getBybitField<string>(matchingOrder, 'cumExecQty', 'cum_exec_qty'),
+              orderType: matchingOrder.orderType,
+              side: matchingOrder.side
+            });
+          } else {
+            logger.info('Order not found in order history by orderLinkId (query returned results but no match)', {
+              orderLinkId: trade.order_id,
+              returnedOrders: orderHistoryByLink.result.list.length
+            });
+          }
+        } else {
+          logger.info('Order not found in order history by orderLinkId (empty result)', {
+            orderLinkId: trade.order_id
+          });
+        }
+      } catch (error) {
+        logger.error('Error querying order history by orderLinkId', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
+    // 4. Fallback: Search order history without filter
+    logger.info('=== Step 4: Fallback - Search Order History ===');
+    if (trade.order_id) {
+      try {
+        const orderHistory = await bybitClient.getHistoricOrders({
+          category: 'linear',
+          symbol: symbol,
+          limit: 50
+        });
+
+        logger.info('Order history response (fallback search)', {
           retCode: orderHistory.retCode,
           retMsg: orderHistory.retMsg,
           hasResult: !!orderHistory.result,
@@ -158,44 +425,40 @@ async function troubleshootTrade(tradeId: number) {
         });
 
         if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list) {
-          logger.info('Order history list', {
-            orders: orderHistory.result.list.map((o: any) => ({
-              orderId: getBybitField<string>(o, 'orderId', 'order_id'),
-              orderLinkId: getBybitField<string>(o, 'orderLinkId', 'order_link_id'),
-              symbol: o.symbol,
-              side: o.side,
-              orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
-              orderType: o.orderType,
-              price: o.price,
-              qty: o.qty,
-              avgPrice: getBybitField<string>(o, 'avgPrice', 'avg_price'),
-              cumExecQty: getBybitField<string>(o, 'cumExecQty', 'cum_exec_qty')
-            }))
+          const matchingOrder = orderHistory.result.list.find((o: any) => {
+            const oId = getBybitField<string>(o, 'orderId', 'order_id');
+            const oLinkId = getBybitField<string>(o, 'orderLinkId', 'order_link_id');
+            return oId === trade.order_id || oLinkId === trade.order_id;
           });
-
-          const matchingOrder = orderHistory.result.list.find((o: any) => 
-            getBybitField<string>(o, 'orderId', 'order_id') === trade.order_id
-          );
+          
           if (matchingOrder) {
             const orderStatus = getBybitField<string>(matchingOrder, 'orderStatus', 'order_status');
-            logger.info('Found matching order in history', {
+            const matchedById = getBybitField<string>(matchingOrder, 'orderId', 'order_id') === trade.order_id;
+            const matchedByLinkId = getBybitField<string>(matchingOrder, 'orderLinkId', 'order_link_id') === trade.order_id;
+            logger.info('✅ Order found via fallback search', {
               orderId: trade.order_id,
               orderStatus,
+              matchedById,
+              matchedByLinkId,
               avgPrice: getBybitField<string>(matchingOrder, 'avgPrice', 'avg_price'),
               cumExecQty: getBybitField<string>(matchingOrder, 'cumExecQty', 'cum_exec_qty')
             });
           } else {
-            logger.warn('Order not found in order history', { orderId: trade.order_id });
+            logger.warn('❌ Order not found in order history (searched all methods)', { 
+              orderId: trade.order_id,
+              searchedOrders: orderHistory.result.list.length,
+              note: 'Tried: active orders by orderId, history by orderId, history by orderLinkId, and fallback search'
+            });
           }
         }
       } catch (error) {
-        logger.error('Error checking order history', {
+        logger.error('Error in fallback order search', {
           error: error instanceof Error ? error.message : String(error)
         });
       }
     }
 
-    // 3. Check positions
+    // 5. Check positions
     logger.info('=== Checking Positions ===');
     try {
       const positions = await bybitClient.getPositionInfo({
@@ -271,7 +534,7 @@ async function troubleshootTrade(tradeId: number) {
       });
     }
 
-    // 4. Check current price
+    // 6. Check current price
     logger.info('=== Checking Current Price ===');
     try {
       const ticker = await bybitClient.getTickers({
