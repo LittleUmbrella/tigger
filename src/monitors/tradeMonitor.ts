@@ -5,7 +5,7 @@ import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getSymbolInfo } from '../initiators/symbolValidator.js';
-import { roundPrice, getDecimalPrecision } from '../utils/positionSizing.js';
+import { roundPrice, getDecimalPrecision, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -702,27 +702,6 @@ const updateStopLoss = async (
 /**
  * Distribute quantity evenly across take profit orders
  */
-const distributeQuantityAcrossTPs = (
-  totalQty: number,
-  numTPs: number,
-  decimalPrecision: number
-): number[] => {
-  if (numTPs === 0) return [];
-  if (numTPs === 1) return [Math.round(totalQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision)];
-  
-  const baseQty = totalQty / numTPs;
-  const roundedQuantities: number[] = [];
-  
-  for (let i = 0; i < numTPs - 1; i++) {
-    roundedQuantities.push(Math.floor(baseQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision));
-  }
-  
-  const allocatedQty = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
-  const remainingQty = totalQty - allocatedQty;
-  roundedQuantities.push(Math.ceil(remainingQty * Math.pow(10, decimalPrecision)) / Math.pow(10, decimalPrecision));
-  
-  return roundedQuantities;
-};
 
 /**
  * Format quantity string with proper precision (remove trailing zeros)
@@ -882,27 +861,86 @@ const placeTakeProfitOrders = async (
       decimalPrecision
     );
 
-    // Round quantities to qtyStep if specified
-    const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
-    const roundedTPQuantities = tpQuantities.map(qty => {
-      if (effectiveQtyStep > 0) {
-        return Math.floor(qty / effectiveQtyStep) * effectiveQtyStep;
+    // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, and redistribution)
+    const minOrderQty = symbolInfo?.minOrderQty;
+    const validTPOrders = validateAndRedistributeTPQuantities(
+      tpQuantities,
+      roundedTPPrices,
+      positionSize,
+      qtyStep,
+      minOrderQty,
+      decimalPrecision
+    );
+
+    // Log redistribution if fewer TPs than expected
+    if (validTPOrders.length < takeProfits.length) {
+      const skippedCount = takeProfits.length - validTPOrders.length;
+      const skippedIndices: number[] = [];
+      const validIndices = validTPOrders.map(tp => tp.index);
+      for (let i = 1; i <= takeProfits.length; i++) {
+        if (!validIndices.includes(i)) {
+          skippedIndices.push(i);
+        }
       }
-      return qty;
-    });
+      
+      if (skippedIndices.length > 0 && validTPOrders.length > 0) {
+        logger.info('Redistributed skipped TP quantities to remaining TPs', {
+          tradeId: trade.id,
+          symbol,
+          skippedTPs: skippedIndices,
+          redistributedTo: validIndices
+        });
+      }
+      
+      logger.warn('Placing fewer TP orders than expected due to quantity constraints', {
+        tradeId: trade.id,
+        symbol,
+        expectedTPs: takeProfits.length,
+        actualTPs: validTPOrders.length,
+        skipped: skippedCount,
+        note: 'Some portion of the position may not have TP orders'
+      });
+    }
+
+    // Log fallback usage for any TP orders that used minOrderQty
+    for (const tpOrder of validTPOrders) {
+      const originalQty = tpQuantities[tpOrder.index - 1];
+      const roundedQty = Math.floor(originalQty / (qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision))) * (qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision));
+      if (tpOrder.quantity === minOrderQty && (roundedQty === 0 || (minOrderQty !== undefined && minOrderQty > 0 && roundedQty < minOrderQty))) {
+        logger.warn('Using minimum order quantity as fallback for TP order', {
+          tradeId: trade.id,
+          tpIndex: tpOrder.index,
+          tpPrice: tpOrder.price,
+          originalQty: roundedQty,
+          minOrderQty,
+          note: 'Bybit will adjust quantity to available position size if needed'
+        });
+      }
+    }
+
+    if (validTPOrders.length === 0) {
+      logger.error('No valid TP orders to place - all quantities are zero or below minimum', {
+        tradeId: trade.id,
+        symbol,
+        positionSize,
+        numTPs: takeProfits.length,
+        minOrderQty
+      });
+      return;
+    }
 
     // Place TP orders
     const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
 
-    for (let i = 0; i < roundedTPPrices.length; i++) {
+    for (const tpOrder of validTPOrders) {
       try {
         const tpOrderParams = {
           category: 'linear' as const,
           symbol: symbol,
           side: tpSide as 'Buy' | 'Sell',
           orderType: 'Limit' as const,
-          qty: formatQuantity(roundedTPQuantities[i], decimalPrecision),
-          price: roundedTPPrices[i].toString(),
+          qty: formatQuantity(tpOrder.quantity, decimalPrecision),
+          price: tpOrder.price.toString(),
           timeInForce: 'GTC' as const,
           reduceOnly: true,
           closeOnTrigger: false,
@@ -912,12 +950,13 @@ const placeTakeProfitOrders = async (
         logger.debug('Placing take profit order from monitor', {
           tradeId: trade.id,
           symbol,
-          tpIndex: i + 1,
-          tpPrice: roundedTPPrices[i],
-          tpQty: roundedTPQuantities[i],
+          tpIndex: tpOrder.index,
+          tpPrice: tpOrder.price,
+          tpQty: tpOrder.quantity,
           positionSide,
           tpSide,
-          positionIdx
+          positionIdx,
+          minOrderQty
         });
 
         const tpOrderResponse = await bybitClient.submitOrder(tpOrderParams);
@@ -925,10 +964,10 @@ const placeTakeProfitOrders = async (
         const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
         if (tpOrderResponse.retCode === 0 && tpOrderResponse.result && tpOrderId) {
           tpOrderIds.push({
-            index: i + 1,
+            index: tpOrder.index,
             orderId: tpOrderId,
-            price: roundedTPPrices[i],
-            quantity: roundedTPQuantities[i]
+            price: tpOrder.price,
+            quantity: tpOrder.quantity
           });
 
           // Store TP order in database
@@ -936,30 +975,30 @@ const placeTakeProfitOrders = async (
             trade_id: trade.id,
             order_type: 'take_profit',
             order_id: tpOrderId,
-            price: roundedTPPrices[i],
-            tp_index: i + 1,
-            quantity: roundedTPQuantities[i],
+            price: tpOrder.price,
+            tp_index: tpOrder.index,
+            quantity: tpOrder.quantity,
             status: 'pending'
           });
 
           logger.info('Take profit order placed by monitor', {
             tradeId: trade.id,
-            tpIndex: i + 1,
-            tpPrice: roundedTPPrices[i],
-            tpQty: roundedTPQuantities[i],
+            tpIndex: tpOrder.index,
+            tpPrice: tpOrder.price,
+            tpQty: tpOrder.quantity,
             tpOrderId
           });
         } else {
           logger.warn('Failed to place take profit order from monitor', {
             tradeId: trade.id,
-            tpIndex: i + 1,
+            tpIndex: tpOrder.index,
             error: JSON.stringify(tpOrderResponse)
           });
         }
       } catch (error) {
         logger.error('Error placing take profit order from monitor', {
           tradeId: trade.id,
-          tpIndex: i + 1,
+          tpIndex: tpOrder.index,
           error: error instanceof Error ? error.message : String(error)
         });
       }

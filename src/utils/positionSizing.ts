@@ -218,3 +218,137 @@ export const roundQuantity = (
   }
 };
 
+/**
+ * Distribute quantity evenly across take profits, rounding up the last TP (max TP) to ensure whole trade quantity is accounted for
+ * 
+ * @param totalQty - Total quantity to distribute
+ * @param numTPs - Number of take profit levels
+ * @param decimalPrecision - Decimal precision for quantity rounding
+ * @returns Array of quantities, one per TP (last TP rounded up)
+ */
+export const distributeQuantityAcrossTPs = (
+  totalQty: number,
+  numTPs: number,
+  decimalPrecision: number
+): number[] => {
+  if (numTPs === 0) return [];
+  if (numTPs === 1) return [roundQuantity(totalQty, decimalPrecision, false)];
+  
+  // Calculate base quantity per TP
+  const baseQty = totalQty / numTPs;
+  
+  // Round down all quantities except the last one
+  const roundedQuantities: number[] = [];
+  for (let i = 0; i < numTPs - 1; i++) {
+    roundedQuantities.push(roundQuantity(baseQty, decimalPrecision, false));
+  }
+  
+  // Calculate remaining quantity for the last TP (max TP)
+  const allocatedQty = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
+  const remainingQty = totalQty - allocatedQty;
+  
+  // Round UP the last TP to ensure whole trade quantity is accounted for
+  roundedQuantities.push(roundQuantity(remainingQty, decimalPrecision, true));
+  
+  return roundedQuantities;
+};
+
+/**
+ * Validates and redistributes TP quantities to handle rounding issues and minimum order requirements
+ * 
+ * This function:
+ * 1. Rounds TP quantities to qtyStep
+ * 2. Identifies TPs that round to zero or below minOrderQty
+ * 3. Redistributes skipped quantities to remaining valid TPs
+ * 4. Uses minOrderQty as fallback for TPs that can't be redistributed
+ * 
+ * @param tpQuantities - Initial distributed TP quantities (before qtyStep rounding)
+ * @param tpPrices - Rounded TP prices (must match tpQuantities length)
+ * @param positionSize - Total position size (for minOrderQty fallback validation)
+ * @param qtyStep - Quantity step from exchange (if undefined, inferred from decimalPrecision)
+ * @param minOrderQty - Minimum order quantity from exchange (0 or undefined means no minimum)
+ * @param decimalPrecision - Decimal precision for quantity (used if qtyStep is not provided)
+ * @returns Array of valid TP orders with { index: number (1-based), price: number, quantity: number }
+ */
+export const validateAndRedistributeTPQuantities = (
+  tpQuantities: number[],
+  tpPrices: number[],
+  positionSize: number,
+  qtyStep: number | undefined,
+  minOrderQty: number | undefined,
+  decimalPrecision: number
+): Array<{ index: number; price: number; quantity: number }> => {
+  if (tpQuantities.length !== tpPrices.length) {
+    throw new Error(`TP quantities (${tpQuantities.length}) and prices (${tpPrices.length}) must have the same length`);
+  }
+
+  // Round quantities to qtyStep if specified
+  const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+  let roundedTPQuantities = tpQuantities.map(qty => {
+    if (effectiveQtyStep > 0) {
+      return Math.floor(qty / effectiveQtyStep) * effectiveQtyStep;
+    }
+    return qty;
+  });
+
+  // Get minimum order quantity (default to 0 if not provided)
+  const minQty = minOrderQty !== undefined && minOrderQty > 0 ? minOrderQty : 0;
+
+  // Identify TP orders that round to zero or below minimum
+  const skippedTPs: number[] = [];
+  for (let i = 0; i < roundedTPQuantities.length; i++) {
+    const qty = roundedTPQuantities[i];
+    if (qty === 0 || (minQty > 0 && qty < minQty)) {
+      skippedTPs.push(i);
+    }
+  }
+
+  // If any TPs were skipped, redistribute their quantity to remaining TPs
+  if (skippedTPs.length > 0 && skippedTPs.length < roundedTPQuantities.length) {
+    const skippedQuantity = skippedTPs.reduce((sum, idx) => sum + tpQuantities[idx], 0);
+    const validTPIndices = roundedTPQuantities
+      .map((qty, idx) => ({ qty, idx }))
+      .filter(({ qty }) => qty > 0 && (minQty === 0 || qty >= minQty))
+      .map(({ idx }) => idx);
+
+    if (validTPIndices.length > 0 && skippedQuantity > 0) {
+      // Redistribute skipped quantity evenly across valid TPs
+      const redistributionPerTP = skippedQuantity / validTPIndices.length;
+      for (const idx of validTPIndices) {
+        const newQty = roundedTPQuantities[idx] + redistributionPerTP;
+        // Round again after redistribution
+        if (effectiveQtyStep > 0) {
+          roundedTPQuantities[idx] = Math.floor(newQty / effectiveQtyStep) * effectiveQtyStep;
+        } else {
+          roundedTPQuantities[idx] = newQty;
+        }
+      }
+    }
+  }
+
+  // Build list of valid TP orders (skip zero quantities, but use minOrderQty as fallback if needed)
+  const validTPOrders: Array<{ index: number; price: number; quantity: number }> = [];
+  for (let i = 0; i < tpPrices.length; i++) {
+    let qty = roundedTPQuantities[i];
+    
+    // If quantity is zero or below minimum, try using minOrderQty as fallback
+    if (qty === 0 || (minQty > 0 && qty < minQty)) {
+      if (minQty > 0 && positionSize >= minQty) {
+        // Use minimum order quantity as fallback - exchange will adjust to available position if needed
+        qty = minQty;
+      } else {
+        // Can't use minOrderQty fallback - skip this TP
+        continue;
+      }
+    }
+
+    validTPOrders.push({
+      index: i + 1, // 1-based index
+      price: tpPrices[i],
+      quantity: qty
+    });
+  }
+
+  return validTPOrders;
+};
+
