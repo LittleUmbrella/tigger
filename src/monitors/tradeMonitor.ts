@@ -42,6 +42,21 @@ const sleep = (ms: number): Promise<void> => {
   });
 };
 
+/**
+ * Normalize trading pair symbol for Bybit API calls
+ * Converts "PAXG" or "PAXG/USDT" to "PAXGUSDT"
+ */
+const normalizeBybitSymbol = (tradingPair: string): string => {
+  let normalized = tradingPair.replace('/', '').toUpperCase();
+  
+  // If symbol doesn't end with USDT or USDC, add USDT
+  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
+    normalized = `${normalized}USDT`;
+  }
+  
+  return normalized;
+};
+
 const getCurrentPrice = async (
   tradingPair: string,
   exchange: string,
@@ -174,14 +189,52 @@ const checkEntryFilled = async (
       }
       return { filled: false };
     } else if (trade.exchange === 'bybit' && bybitClient) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       
       // First, check if we already have a position (trade might have been filled but not detected)
+      logger.debug('Checking positions for entry fill', {
+        tradeId: trade.id,
+        symbol,
+        orderId: trade.order_id
+      });
+      
       const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+      logger.debug('Position API response', {
+        tradeId: trade.id,
+        symbol,
+        retCode: positions.retCode,
+        hasResult: !!positions.result,
+        hasList: !!(positions.result && positions.result.list),
+        listLength: positions.result?.list?.length || 0
+      });
+      
       if (positions.retCode === 0 && positions.result && positions.result.list) {
-        const position = positions.result.list.find((p: any) => 
-          p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
-        );
+        // Log all positions for debugging
+        logger.debug('All positions returned', {
+          tradeId: trade.id,
+          symbol,
+          positions: positions.result.list.map((p: any) => ({
+            symbol: p.symbol,
+            size: getBybitField<string>(p, 'size'),
+            positionIdx: getBybitField<string | number>(p, 'positionIdx', 'position_idx')
+          }))
+        });
+        
+        const position = positions.result.list.find((p: any) => {
+          const pSize = parseFloat(getBybitField<string>(p, 'size') || '0');
+          const symbolMatch = p.symbol === symbol;
+          const hasSize = pSize !== 0;
+          logger.debug('Checking position', {
+            tradeId: trade.id,
+            positionSymbol: p.symbol,
+            expectedSymbol: symbol,
+            symbolMatch,
+            size: pSize,
+            hasSize
+          });
+          return symbolMatch && hasSize;
+        });
+        
         if (position) {
           const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
           logger.debug('Found open position for trade, entry likely filled', {
@@ -192,22 +245,70 @@ const checkEntryFilled = async (
             orderId: trade.order_id
           });
           return { filled: true, positionId: positionIdx?.toString() };
+        } else {
+          logger.debug('No matching position found', {
+            tradeId: trade.id,
+            symbol,
+            checkedPositions: positions.result.list.length
+          });
         }
+      } else {
+        logger.debug('Position API returned error or empty result', {
+          tradeId: trade.id,
+          symbol,
+          retCode: positions.retCode,
+          retMsg: positions.retMsg
+        });
       }
       
       // If we have an order_id, check order status
       if (trade.order_id) {
         // Check active orders first
+        logger.debug('Checking active orders', {
+          tradeId: trade.id,
+          symbol,
+          orderId: trade.order_id
+        });
+        
         const orderInfo = await bybitClient.getActiveOrders({
           category: 'linear',
           symbol: symbol,
           orderId: trade.order_id
         });
         
+        logger.debug('Active orders API response', {
+          tradeId: trade.id,
+          symbol,
+          orderId: trade.order_id,
+          retCode: orderInfo.retCode,
+          retMsg: orderInfo.retMsg,
+          hasResult: !!orderInfo.result,
+          hasList: !!(orderInfo.result && orderInfo.result.list),
+          listLength: orderInfo.result?.list?.length || 0
+        });
+        
         if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list) {
-          const order = orderInfo.result.list.find((o: any) => 
-            getBybitField<string>(o, 'orderId', 'order_id') === trade.order_id
-          );
+          logger.debug('Active orders list', {
+            tradeId: trade.id,
+            symbol,
+            orders: orderInfo.result.list.map((o: any) => ({
+              orderId: getBybitField<string>(o, 'orderId', 'order_id'),
+              orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
+              symbol: o.symbol
+            }))
+          });
+          
+          const order = orderInfo.result.list.find((o: any) => {
+            const oId = getBybitField<string>(o, 'orderId', 'order_id');
+            const matches = oId === trade.order_id;
+            logger.debug('Checking active order', {
+              tradeId: trade.id,
+              orderId: oId,
+              expectedOrderId: trade.order_id,
+              matches
+            });
+            return matches;
+          });
           
           if (order) {
             // Order is still active, check its status
@@ -228,6 +329,12 @@ const checkEntryFilled = async (
             });
             
             try {
+              logger.debug('Querying order history', {
+                tradeId: trade.id,
+                symbol,
+                orderId: trade.order_id
+              });
+              
               const orderHistory = await bybitClient.getHistoricOrders({
                 category: 'linear',
                 symbol: symbol,
@@ -235,10 +342,39 @@ const checkEntryFilled = async (
                 limit: 10
               });
               
+              logger.debug('Order history API response', {
+                tradeId: trade.id,
+                symbol,
+                orderId: trade.order_id,
+                retCode: orderHistory.retCode,
+                retMsg: orderHistory.retMsg,
+                hasResult: !!orderHistory.result,
+                hasList: !!(orderHistory.result && orderHistory.result.list),
+                listLength: orderHistory.result?.list?.length || 0
+              });
+              
               if (orderHistory.retCode === 0 && orderHistory.result && orderHistory.result.list) {
-                const historicalOrder = orderHistory.result.list.find((o: any) => 
-                  getBybitField<string>(o, 'orderId', 'order_id') === trade.order_id
-                );
+                logger.debug('Order history list', {
+                  tradeId: trade.id,
+                  symbol,
+                  orders: orderHistory.result.list.map((o: any) => ({
+                    orderId: getBybitField<string>(o, 'orderId', 'order_id'),
+                    orderStatus: getBybitField<string>(o, 'orderStatus', 'order_status'),
+                    symbol: o.symbol
+                  }))
+                });
+                
+                const historicalOrder = orderHistory.result.list.find((o: any) => {
+                  const oId = getBybitField<string>(o, 'orderId', 'order_id');
+                  const matches = oId === trade.order_id;
+                  logger.debug('Checking historical order', {
+                    tradeId: trade.id,
+                    orderId: oId,
+                    expectedOrderId: trade.order_id,
+                    matches
+                  });
+                  return matches;
+                });
                 
                 if (historicalOrder) {
                   const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
@@ -251,6 +387,10 @@ const checkEntryFilled = async (
                   
                   if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
                     // Try to get position ID again now that we know it's filled
+                    logger.debug('Order is filled, checking for position', {
+                      tradeId: trade.id,
+                      symbol
+                    });
                     const positionsAfterFill = await bybitClient.getPositionInfo({ category: 'linear', symbol });
                     if (positionsAfterFill.retCode === 0 && positionsAfterFill.result && positionsAfterFill.result.list) {
                       const positionAfterFill = positionsAfterFill.result.list.find((p: any) => 
@@ -258,19 +398,50 @@ const checkEntryFilled = async (
                       );
                       if (positionAfterFill) {
                         const positionIdx = getBybitField<string | number>(positionAfterFill, 'positionIdx', 'position_idx');
+                        logger.debug('Found position after order fill check', {
+                          tradeId: trade.id,
+                          symbol,
+                          positionIdx: positionIdx?.toString()
+                        });
                         return { filled: true, positionId: positionIdx?.toString() };
                       }
                     }
+                    logger.debug('Order is filled but no position found', {
+                      tradeId: trade.id,
+                      symbol
+                    });
                     return { filled: true };
+                  } else {
+                    logger.debug('Order found in history but not filled', {
+                      tradeId: trade.id,
+                      symbol,
+                      orderStatus
+                    });
                   }
+                } else {
+                  logger.debug('Order not found in order history', {
+                    tradeId: trade.id,
+                    symbol,
+                    orderId: trade.order_id,
+                    checkedOrders: orderHistory.result.list.length
+                  });
                 }
+              } else {
+                logger.debug('Order history API returned error or empty result', {
+                  tradeId: trade.id,
+                  symbol,
+                  orderId: trade.order_id,
+                  retCode: orderHistory.retCode,
+                  retMsg: orderHistory.retMsg
+                });
               }
             } catch (historyError) {
-              logger.debug('Error checking order history', {
+              logger.error('Error checking order history', {
                 tradeId: trade.id,
                 symbol,
                 orderId: trade.order_id,
-                error: historyError instanceof Error ? historyError.message : String(historyError)
+                error: historyError instanceof Error ? historyError.message : String(historyError),
+                stack: historyError instanceof Error ? historyError.stack : undefined
               });
             }
           }
@@ -351,7 +522,7 @@ const checkPositionClosed = async (
       
       return { closed: false };
     } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       
       // Check current positions
       const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
@@ -459,7 +630,7 @@ const cancelOrder = async (
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient && trade.order_id) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       await bybitClient.cancelOrder({
         category: 'linear',
         symbol: symbol,
@@ -482,7 +653,7 @@ const updateStopLoss = async (
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       await bybitClient.setTradingStop({
         category: 'linear',
         symbol: symbol,
@@ -575,7 +746,7 @@ const placeTakeProfitOrders = async (
       return;
     }
 
-    const symbol = trade.trading_pair.replace('/', '');
+    const symbol = normalizeBybitSymbol(trade.trading_pair);
     
     // Get position info to determine side and quantity
     // Retry logic: position might not be immediately available after entry fills
@@ -817,7 +988,7 @@ const checkOrderFilled = async (
       }
       return { filled: false };
     } else if (trade.exchange === 'bybit' && bybitClient && order.order_id) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       
       // Check if order is still open
       const openOrders = await bybitClient.getActiveOrders({
@@ -899,7 +1070,7 @@ const monitorTrade = async (
 
     // For pending trades, check if position already exists (entry might have been filled but status not updated)
     if (trade.status === 'pending' && !isSimulation && trade.exchange === 'bybit' && bybitClient) {
-      const symbol = trade.trading_pair.replace('/', '');
+      const symbol = normalizeBybitSymbol(trade.trading_pair);
       try {
         const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
         if (positions.retCode === 0 && positions.result && positions.result.list) {
