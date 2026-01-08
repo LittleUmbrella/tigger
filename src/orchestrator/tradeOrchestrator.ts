@@ -76,6 +76,8 @@ export const startTradeOrchestrator = async (
     let apiKey: string | undefined;
     let apiSecret: string | undefined;
     let useTestnet = testnet;
+    let demo = false;
+    let baseUrl: string | undefined;
 
     if (accountName && accountMap.has(accountName)) {
       const account = accountMap.get(accountName)!;
@@ -85,6 +87,12 @@ export const startTradeOrchestrator = async (
       apiKey = envVarNameForKey ? process.env[envVarNameForKey] : (account.apiKey || process.env.BYBIT_API_KEY);
       apiSecret = envVarNameForSecret ? process.env[envVarNameForSecret] : (account.apiSecret || process.env.BYBIT_API_SECRET);
       useTestnet = account.testnet || false;
+      demo = account.demo || false;
+      
+      // Demo trading uses api-demo.bybit.com endpoint (different from testnet)
+      if (demo) {
+        baseUrl = 'https://api-demo.bybit.com';
+      }
     } else {
       // Fallback to environment variables
       apiKey = process.env.BYBIT_API_KEY;
@@ -95,7 +103,15 @@ export const startTradeOrchestrator = async (
       return undefined;
     }
 
-    const client = new RestClientV5({ key: apiKey, secret: apiSecret, testnet: useTestnet });
+    // Don't use testnet if demo is enabled
+    const effectiveTestnet = useTestnet && !demo;
+
+    const client = new RestClientV5({ 
+      key: apiKey, 
+      secret: apiSecret, 
+      testnet: effectiveTestnet,
+      ...(baseUrl && { baseUrl }) // Use demo endpoint if demo mode
+    });
 
     bybitClientMap.set(key, client);
     return client;

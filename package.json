@@ -17,6 +17,7 @@
     "replay-messages": "tsx src/scripts/replay_messages.ts",
     "test-bybit-credentials": "tsx src/scripts/test_bybit_credentials.ts",
     "troubleshoot-trade": "tsx src/scripts/troubleshoot_trade.ts",
+    "fix-trade-tps": "tsx src/scripts/fix_trade_tps.ts",
     "verify-parser": "tsx src/scripts/verify_parser.ts",
     "test": "vitest run",
     "test:watch": "vitest",
