@@ -869,6 +869,16 @@ const monitorTrade = async (
   breakevenAfterTPs: number
 ): Promise<void> => {
   try {
+    // Log trade status at start for debugging
+    logger.debug('Monitoring trade', {
+      tradeId: trade.id,
+      status: trade.status,
+      symbol: trade.trading_pair,
+      orderId: trade.order_id,
+      positionId: trade.position_id,
+      entryFilledAt: trade.entry_filled_at
+    });
+
     // In simulation mode, use price provider's current time; otherwise use real time
     const currentSimTime = isSimulation && priceProvider 
       ? await priceProvider.getCurrentTime() 
@@ -885,6 +895,69 @@ const monitorTrade = async (
       await cancelOrder(trade, bybitClient);
       await db.updateTrade(trade.id, { status: 'cancelled' });
       return;
+    }
+
+    // For pending trades, check if position already exists (entry might have been filled but status not updated)
+    if (trade.status === 'pending' && !isSimulation && trade.exchange === 'bybit' && bybitClient) {
+      const symbol = trade.trading_pair.replace('/', '');
+      try {
+        const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+        if (positions.retCode === 0 && positions.result && positions.result.list) {
+          const position = positions.result.list.find((p: any) => 
+            p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
+          );
+          if (position) {
+            const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+            // Update trade status to active
+            const fillTime = trade.entry_filled_at || dayjs().toISOString();
+            
+            // Log the entry fill (same message as the normal flow for consistency)
+            logger.info('Entry order filled', { 
+              tradeId: trade.id,
+              tradingPair: trade.trading_pair,
+              entryPrice: trade.entry_price,
+              positionId: positionIdx?.toString(),
+              channel: trade.channel,
+              note: 'Detected via position check - entry was filled but status not updated'
+            });
+            
+            await db.updateTrade(trade.id, {
+              status: 'active',
+              entry_filled_at: fillTime,
+              position_id: positionIdx?.toString()
+            });
+            trade.status = 'active';
+            trade.entry_filled_at = fillTime;
+            trade.position_id = positionIdx?.toString();
+
+            // Update entry order to filled status if it exists
+            const orders = await db.getOrdersByTradeId(trade.id);
+            const entryOrder = orders.find(o => o.order_type === 'entry');
+            if (entryOrder && entryOrder.status !== 'filled') {
+              await db.updateOrder(entryOrder.id, {
+                status: 'filled',
+                filled_at: fillTime,
+                filled_price: trade.entry_price
+              });
+              logger.debug('Entry order updated to filled', {
+                tradeId: trade.id,
+                orderId: entryOrder.id,
+                fillPrice: trade.entry_price
+              });
+            }
+
+            // Place take profit orders now that entry has filled
+            await placeTakeProfitOrders(trade, bybitClient, db);
+            // Continue to monitor active trade below
+          }
+        }
+      } catch (error) {
+        logger.debug('Error checking positions for pending trade', {
+          tradeId: trade.id,
+          symbol,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
 
     // Get current price from exchange or historical data
