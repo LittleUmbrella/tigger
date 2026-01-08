@@ -420,17 +420,28 @@ const placeTakeProfitOrders = async (
   db: DatabaseManager
 ): Promise<void> => {
   try {
-    if (!bybitClient || trade.exchange !== 'bybit' || !trade.entry_filled_at) {
+    if (!trade.entry_filled_at) {
       return;
     }
 
-    // Check if TP orders already exist
+    // Check if TP orders already exist first (before checking bybitClient)
+    // This allows the function to work in simulation mode where orders are created by the initiator/mock exchange
     const existingOrders = await db.getOrdersByTradeId(trade.id);
     const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
     if (existingTPOrders.length > 0) {
       logger.debug('Take profit orders already exist, skipping placement', {
         tradeId: trade.id,
         existingTPCount: existingTPOrders.length
+      });
+      return;
+    }
+
+    // Only proceed if we have a bybit client and exchange is bybit (for real exchange orders)
+    if (!bybitClient || trade.exchange !== 'bybit') {
+      logger.debug('Skipping take profit order placement - no bybit client or not bybit exchange', {
+        tradeId: trade.id,
+        exchange: trade.exchange,
+        hasBybitClient: !!bybitClient
       });
       return;
     }
@@ -443,37 +454,88 @@ const placeTakeProfitOrders = async (
     const symbol = trade.trading_pair.replace('/', '');
     
     // Get position info to determine side and quantity
-    const positionResponse = await bybitClient.getPositionInfo({
-      category: 'linear',
-      symbol: symbol
-    });
+    // Retry logic: position might not be immediately available after entry fills
+    let position: any = null;
+    let positionResponse: any = null;
+    const maxRetries = 3;
+    const retryDelay = 1000; // 1 second
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      positionResponse = await bybitClient.getPositionInfo({
+        category: 'linear',
+        symbol: symbol
+      });
 
-    if (positionResponse.retCode !== 0 || !positionResponse.result || !positionResponse.result.list) {
-      logger.warn('Could not get position info for TP order placement', {
+      if (positionResponse.retCode === 0 && positionResponse.result && positionResponse.result.list) {
+        // If we have a position_id, try to find the specific position
+        if (trade.position_id) {
+          position = positionResponse.result.list.find((p: any) => {
+            const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+            return p.symbol === symbol && positionIdx?.toString() === trade.position_id;
+          });
+        }
+        
+        // If not found by position_id, find any position with non-zero size
+        if (!position) {
+          const positions = positionResponse.result.list.filter((p: any) => {
+            const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+            return size !== 0 && p.symbol === symbol;
+          });
+          if (positions.length > 0) {
+            position = positions[0];
+          }
+        }
+        
+        if (position) {
+          break; // Found position, exit retry loop
+        }
+      }
+      
+      // If this wasn't the last attempt, wait before retrying
+      if (attempt < maxRetries) {
+        logger.debug('Position not found yet, retrying', {
+          tradeId: trade.id,
+          symbol,
+          attempt,
+          maxRetries
+        });
+        await sleep(retryDelay);
+      }
+    }
+
+    if (!position) {
+      logger.warn('No position found for TP order placement after retries', {
         tradeId: trade.id,
-        symbol
+        symbol,
+        positionId: trade.position_id,
+        retCode: positionResponse?.retCode,
+        attempts: maxRetries
       });
       return;
     }
-
-    const positions = positionResponse.result.list.filter((p: any) => {
-      const size = parseFloat(getBybitField<string>(p, 'size') || '0');
-      return size !== 0 && p.symbol === symbol;
-    });
-
-    if (positions.length === 0) {
-      logger.warn('No position found for TP order placement', {
-        tradeId: trade.id,
-        symbol
-      });
-      return;
-    }
-
-    const position = positions[0];
     const positionSize = Math.abs(parseFloat(getBybitField<string>(position, 'size') || '0'));
     const positionSizeStr = getBybitField<string>(position, 'size') || '0';
     const positionSide = parseFloat(positionSizeStr) > 0 ? 'Buy' : 'Sell';
     const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+    
+    // Get positionIdx from position (use stored position_id if available, otherwise from position)
+    const positionIdxFromPosition = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+    let positionIdx: 0 | 1 | 2 = 0; // Default to 0
+    if (trade.position_id) {
+      // Use the position_id stored in trade (should match positionIdx)
+      const storedIdx = parseInt(trade.position_id, 10);
+      if (!isNaN(storedIdx) && (storedIdx === 0 || storedIdx === 1 || storedIdx === 2)) {
+        positionIdx = storedIdx as 0 | 1 | 2;
+      }
+    } else if (positionIdxFromPosition !== undefined) {
+      // Fallback to positionIdx from position
+      const idx = typeof positionIdxFromPosition === 'string' 
+        ? parseInt(positionIdxFromPosition, 10) 
+        : positionIdxFromPosition;
+      if (!isNaN(idx) && (idx === 0 || idx === 1 || idx === 2)) {
+        positionIdx = idx as 0 | 1 | 2;
+      }
+    }
 
     // Get symbol info for precision and qtyStep
     const symbolInfo = await getSymbolInfo(bybitClient, symbol);
@@ -523,7 +585,7 @@ const placeTakeProfitOrders = async (
           timeInForce: 'GTC' as const,
           reduceOnly: true,
           closeOnTrigger: false,
-          positionIdx: 0 as 0 | 1 | 2,
+          positionIdx: positionIdx,
         };
 
         logger.debug('Placing take profit order from monitor', {
@@ -533,7 +595,8 @@ const placeTakeProfitOrders = async (
           tpPrice: roundedTPPrices[i],
           tpQty: roundedTPQuantities[i],
           positionSide,
-          tpSide
+          tpSide,
+          positionIdx
         });
 
         const tpOrderResponse = await bybitClient.submitOrder(tpOrderParams);
