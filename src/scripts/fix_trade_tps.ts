@@ -230,7 +230,25 @@ async function fixTradeTPs(tradeId: number) {
 
     const positionSize = Math.abs(parseFloat(getBybitField<string>(position, 'size') || '0'));
     const positionSizeStr = getBybitField<string>(position, 'size') || '0';
-    const positionSide = parseFloat(positionSizeStr) > 0 ? 'Buy' : 'Sell';
+    
+    // Use Bybit's side field directly if available (authoritative source)
+    // Fall back to inferring from size only if side field is not available
+    let positionSide: 'Buy' | 'Sell';
+    if (position.side && (position.side === 'Buy' || position.side === 'Sell')) {
+      positionSide = position.side as 'Buy' | 'Sell';
+    } else {
+      // Fallback: infer from size (for backward compatibility)
+      positionSide = parseFloat(positionSizeStr) > 0 ? 'Buy' : 'Sell';
+      logger.debug('Position side not available, inferred from size', {
+        tradeId,
+        inferredSide: positionSide,
+        positionSize: positionSizeStr
+      });
+    }
+    
+    // TP side is always opposite of position side
+    // For Long (Buy) position, TP is Sell
+    // For Short (Sell) position, TP is Buy
     const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
     
     const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
