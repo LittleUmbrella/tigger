@@ -313,15 +313,17 @@ const connectTelegram = async (
 
 const resolveEntity = async (
   config: HarvesterConfig,
-  client: TelegramClient
+  client: TelegramClient,
+  skipDirectAccessHash: boolean = false
 ): Promise<Api.TypeInputPeer> => {
   try {
-    await client.getDialogs({ limit: 200 });
-    
     // Priority: envVarNames > direct accessHash (deprecated) > none
-    const accessHashValue = config.envVarNames?.accessHash 
-      ? process.env[config.envVarNames.accessHash] 
-      : config.accessHash;
+    // Skip direct access hash if skipDirectAccessHash is true (e.g., when re-resolving after CHANNEL_INVALID)
+    const accessHashValue = skipDirectAccessHash 
+      ? undefined
+      : (config.envVarNames?.accessHash 
+          ? process.env[config.envVarNames.accessHash] 
+          : config.accessHash);
     
     if (/^-?\d+$/.test(config.channel) && accessHashValue) {
       return new Api.InputPeerChannel({
@@ -329,6 +331,9 @@ const resolveEntity = async (
         accessHash: BigInt(accessHashValue) as any
       });
     }
+    
+    // Get dialogs once and reuse (optimization)
+    const dialogs = await client.getDialogs({ limit: 200 });
     
     if (config.channel.startsWith('https://t.me/+') || config.channel.startsWith('t.me/+')) {
       const hash = config.channel.split('+')[1];
@@ -345,9 +350,8 @@ const resolveEntity = async (
       throw new Error('Invite import returned no chats');
     }
     
-    // Try to resolve by username/channel name using getDialogs first (safer for large IDs)
+    // Try to resolve by username/channel name using dialogs (safer for large IDs)
     // This avoids getEntity which may have issues with large channel IDs
-    const dialogs = await client.getDialogs({ limit: 200 });
     const foundDialog = dialogs.find(d => {
       const entity = d.entity;
       if (entity instanceof Api.Channel) {
@@ -744,6 +748,25 @@ const fetchNewMessages = async (
       return lastMessageId;
     }
     
+    // Handle CHANNEL_INVALID errors - channel may have been deleted, bot removed, or access hash expired
+    if (errorMessage.includes('CHANNEL_INVALID') || (errorMessage.includes('400') && errorMessage.includes('messages.GetHistory'))) {
+      logger.error('CHANNEL_INVALID: Channel entity is no longer valid', {
+        channel: config.channel,
+        error: errorMessage,
+        possibleCauses: [
+          'Channel was deleted',
+          'Bot was removed from the channel',
+          'Access hash expired or changed',
+          'Channel ID or access hash is incorrect'
+        ],
+        action: 'Will attempt to re-resolve entity on next poll'
+      });
+      // Throw a specific error that the harvest loop can catch and handle
+      const channelInvalidError = new Error(`CHANNEL_INVALID: ${errorMessage}`);
+      (channelInvalidError as any).isChannelInvalid = true;
+      throw channelInvalidError;
+    }
+    
     // Reset AUTH_KEY_DUPLICATED counter on other errors (might be transient)
     authKeyDuplicateCounts.delete(harvesterKey);
     
@@ -1071,20 +1094,83 @@ export const startSignalHarvester = async (
   let isFirstFetch = true;
 
   const harvestLoop = async (): Promise<void> => {
+    let consecutiveChannelInvalidErrors = 0;
+    const maxChannelInvalidErrors = 5;
+    
     while (running) {
       try {
         if (entity) {
           const isFirstFetchAfterStartup = isFirstFetch;
           lastMessageId = await fetchNewMessages(config, client, entity, db, lastMessageId, isFirstFetchAfterStartup);
           isFirstFetch = false;
+          // Reset counter on successful fetch
+          consecutiveChannelInvalidErrors = 0;
         }
         await sleep(pollInterval);
       } catch (error) {
-        logger.error('Error in harvest loop', {
-          channel: config.channel,
-          error: error instanceof Error ? error.message : String(error)
-        });
-        await sleep(pollInterval * 2);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const isChannelInvalid = (error as any).isChannelInvalid || errorMessage.includes('CHANNEL_INVALID');
+        
+        if (isChannelInvalid) {
+          consecutiveChannelInvalidErrors++;
+          
+          logger.warn('CHANNEL_INVALID detected, attempting to re-resolve entity', {
+            channel: config.channel,
+            consecutiveErrors: consecutiveChannelInvalidErrors,
+            maxErrors: maxChannelInvalidErrors,
+            error: errorMessage
+          });
+          
+          try {
+            // Attempt to re-resolve the entity, skipping direct access hash to get fresh hash from Telegram
+            // This is important because CHANNEL_INVALID often means the access hash is wrong/expired
+            const newEntity = await resolveEntity(config, client, true);
+            entity = newEntity;
+            consecutiveChannelInvalidErrors = 0; // Reset on successful re-resolution
+            
+            logger.info('Successfully re-resolved channel entity', {
+              channel: config.channel,
+              title: (entity as any).title || (entity as any).username || config.channel
+            });
+            
+            // Continue with normal polling after successful re-resolution
+            await sleep(pollInterval);
+          } catch (resolveError) {
+            const resolveErrorMsg = resolveError instanceof Error ? resolveError.message : String(resolveError);
+            
+            if (consecutiveChannelInvalidErrors >= maxChannelInvalidErrors) {
+              logger.error('CHANNEL_INVALID: Failed to re-resolve entity after multiple attempts', {
+                channel: config.channel,
+                consecutiveErrors: consecutiveChannelInvalidErrors,
+                resolveError: resolveErrorMsg,
+                action: 'Harvester will continue polling but channel appears to be permanently invalid',
+                possibleSolutions: [
+                  'Verify the channel ID and access hash in config.json',
+                  'Check if the bot still has access to the channel',
+                  'Verify the channel exists and is accessible',
+                  'Check if TG_ACCESS_HASH_RONNIE (or relevant env var) is correct'
+                ]
+              });
+              // Back off significantly but don't stop the harvester completely
+              await sleep(pollInterval * 10); // Wait 10x longer before retrying
+              consecutiveChannelInvalidErrors = 0; // Reset counter after backoff
+            } else {
+              logger.warn('Failed to re-resolve entity, will retry', {
+                channel: config.channel,
+                consecutiveErrors: consecutiveChannelInvalidErrors,
+                resolveError: resolveErrorMsg
+              });
+              await sleep(pollInterval * 2);
+            }
+          }
+        } else {
+          // Other errors - log and continue with normal backoff
+          logger.error('Error in harvest loop', {
+            channel: config.channel,
+            error: errorMessage
+          });
+          await sleep(pollInterval * 2);
+        }
       }
     }
   };
