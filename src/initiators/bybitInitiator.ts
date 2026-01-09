@@ -588,8 +588,21 @@ const executeTradeForAccount = async (
             
             if (positions.length > 0) {
               const position = positions[0];
-              const size = parseFloat(getBybitField<string>(position, 'size') || '0');
-              positionSide = size > 0 ? 'Buy' : 'Sell';
+              // Use Bybit's side field directly if available (authoritative source)
+              // Fall back to inferring from size only if side field is not available
+              if (position.side && (position.side === 'Buy' || position.side === 'Sell')) {
+                positionSide = position.side as 'Buy' | 'Sell';
+              } else {
+                // Fallback: infer from size (for backward compatibility)
+                const size = parseFloat(getBybitField<string>(position, 'size') || '0');
+                positionSide = size > 0 ? 'Buy' : 'Sell';
+                logger.debug('Position side not available, inferred from size', {
+                  channel,
+                  symbol,
+                  inferredSide: positionSide,
+                  size
+                });
+              }
             }
           }
         } catch (error) {
