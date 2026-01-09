@@ -15,7 +15,7 @@
     },
     {
       "name": "ronnie_harvester",
-      "channel": "3241720654",
+      "channel": "3272135406",
       "envVarNames": {
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH_RONNIE"
@@ -33,7 +33,7 @@
     },
     {
       "name": "ronnie_crypto_signals",
-      "channel": "3241720654"
+      "channel": "3272135406"
     }
   ],
   "accounts": [
@@ -88,7 +88,7 @@
       "baseLeverage": 20
     },
     {
-      "channel": "3241720654",
+      "channel": "3272135406",
       "harvester": "ronnie_harvester",
       "parser": "ronnie_crypto_signals",
       "breakevenAfterTPs": 2,
