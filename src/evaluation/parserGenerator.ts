@@ -106,7 +106,7 @@ The parser should:
 1. Import ParsedOrder from '../../../types/order'
 2. Export a function that takes a string (message content) and returns ParsedOrder | null
 3. Extract: trading_pair, entry_price, stop_loss, take_profits (array), leverage, signal_type ('long' | 'short')
-4. The entry price can be 'current' or 'market'. If it is a range, pick the worst value for the signal_type.
+4. The entry price can be 'current' or 'market'. If it is a range, use the average of the two prices.
 5. Handle multiple format variations from the examples
 6. Return null if the message doesn't match any format
 7. Use regex patterns to extract the required fields

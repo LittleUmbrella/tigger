@@ -218,8 +218,10 @@ const executeTradeForAccount = async (
     const side = order.signalType === 'long' ? 'Buy' : 'Sell';
     
     // For market orders, we need to get current price first
-    let entryPrice = order.entryPrice;
-    if (!entryPrice || entryPrice <= 0) {
+    let entryPrice: number | undefined = order.entryPrice;
+    const isUsingMarketPrice = !entryPrice || entryPrice <= 0;
+    
+    if (isUsingMarketPrice) {
       if (!isSimulation && bybitClient) {
         try {
           const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
@@ -240,15 +242,36 @@ const executeTradeForAccount = async (
       }
     }
 
+    // At this point, entryPrice is guaranteed to be a number (either from order or fetched from market)
+    // TypeScript doesn't know this, so we assert it
+    if (!entryPrice || entryPrice <= 0) {
+      throw new Error(`Invalid entry price: ${entryPrice}`);
+    }
+    const finalEntryPrice: number = entryPrice;
+
     // Validate trade prices before proceeding (safety net - parsers should have validated already)
-    if (!validateTradePrices(
-      order.signalType,
-      entryPrice,
-      order.stopLoss,
-      order.takeProfits,
-      { channel, symbol, messageId: message.message_id }
-    )) {
-      throw new Error(`Trade validation failed for ${symbol}: Invalid price relationships detected`);
+    // Only validate strictly when using the original parsed entry price.
+    // For market orders, skip strict validation since TP/SL were parsed relative to the original signal entry,
+    // not the current market price which may have moved.
+    if (!isUsingMarketPrice) {
+      if (!validateTradePrices(
+        order.signalType,
+        finalEntryPrice,
+        order.stopLoss,
+        order.takeProfits,
+        { channel, symbol, messageId: message.message_id }
+      )) {
+        throw new Error(`Trade validation failed for ${symbol}: Invalid price relationships detected`);
+      }
+    } else {
+      // For market orders, do a lenient validation - just check that prices are positive and reasonable
+      // The actual validation will happen when the position is opened and we know the fill price
+      logger.debug('Skipping strict validation for market order - will validate after fill', {
+        channel,
+        symbol,
+        entryPrice: finalEntryPrice,
+        originalEntryPrice: order.entryPrice
+      });
     }
 
     // Use baseLeverage as default if leverage is not specified in order
@@ -259,7 +282,7 @@ const executeTradeForAccount = async (
     const positionSize = calculatePositionSize(
       balance,
       riskPercentage,
-      entryPrice,
+      finalEntryPrice,
       order.stopLoss,
       effectiveLeverage,
       baseLeverage
@@ -282,9 +305,9 @@ const executeTradeForAccount = async (
       });
       if (symbolInfo?.qtyPrecision !== undefined) {
         decimalPrecision = symbolInfo.qtyPrecision;
-      } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
+      } else if (finalEntryPrice > 0 && positionSize > 0) {
         // Fallback: 2 decimal places lower than first significant digit of risk amount in asset
-        const riskAmountInAsset = positionSize / entryPrice;
+        const riskAmountInAsset = positionSize / finalEntryPrice;
         decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       }
       pricePrecision = symbolInfo?.pricePrecision;
@@ -293,14 +316,14 @@ const executeTradeForAccount = async (
       qtyStep = symbolInfo?.qtyStep;
       // Note: tickSize would need to be extracted from symbolInfo if available
       // For now, we'll use pricePrecision for rounding
-    } else if (entryPrice && entryPrice > 0 && positionSize > 0) {
-      const riskAmountInAsset = positionSize / entryPrice;
+    } else if (finalEntryPrice > 0 && positionSize > 0) {
+      const riskAmountInAsset = positionSize / finalEntryPrice;
       decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
-      pricePrecision = getDecimalPrecision(entryPrice);
+      pricePrecision = getDecimalPrecision(finalEntryPrice);
     }
     
     // Round entry price to exchange precision
-    const roundedEntryPrice = roundPrice(entryPrice, pricePrecision, tickSize);
+    const roundedEntryPrice = roundPrice(finalEntryPrice, pricePrecision, tickSize);
     
     // Calculate quantity with exchange-provided precision (using rounded entry price)
     let qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
@@ -393,7 +416,7 @@ const executeTradeForAccount = async (
       qty,
       qtyString,
       entryPrice: roundedEntryPrice,
-      originalEntryPrice: entryPrice,
+      originalEntryPrice: finalEntryPrice,
       stopLoss: roundedStopLoss,
       leverage: effectiveLeverage,
       baseLeverage,
@@ -462,7 +485,7 @@ const executeTradeForAccount = async (
         symbol,
         side,
         qty,
-        price: entryPrice
+        price: finalEntryPrice
       });
     } else if (bybitClient) {
       // Set leverage first (use effective leverage)

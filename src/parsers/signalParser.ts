@@ -119,8 +119,7 @@ export const parseUnparsedMessages = async (
             // Check if LLM returned a management command
             if (llmResult.type === 'management') {
               // Management commands are handled separately by the orchestrator
-              // Mark as parsed but log that it's a management command
-              await db.markMessageParsed(message.id);
+              // Don't mark as parsed here - let the orchestrator mark it after processing
               logger.info('LLM parsed management command', {
                 channel: config.channel,
                 parserName: config.name,
@@ -175,8 +174,8 @@ export const parseUnparsedMessages = async (
           parserName: config.name,
           messageId: message.message_id
         });
-        // Mark as parsed even if we couldn't extract order data (to avoid reprocessing unparseable messages)
-        await db.markMessageParsed(message.id);
+        // Don't mark as parsed here - let the initiator mark it after attempting to process
+        // The initiator will mark unparseable messages as parsed to avoid reprocessing
       }
     } catch (error) {
       logger.error('Error parsing message', {
@@ -185,7 +184,8 @@ export const parseUnparsedMessages = async (
         messageId: message.message_id,
         error: error instanceof Error ? error.message : String(error)
       });
-      await db.markMessageParsed(message.id); // Mark as parsed to avoid infinite retry
+      // Don't mark as parsed here - let the initiator handle error cases
+      // The initiator will mark non-retryable errors as parsed to avoid infinite retries
     }
   }
 };
