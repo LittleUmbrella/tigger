@@ -24,7 +24,7 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
   const signalTypeText = signalTypeMatch[0].toLowerCase();
   const signalType: 'long' | 'short' = signalTypeText.includes('short') ? 'short' : 'long';
 
-  // Entry price - extract range and use worst value for signal type, or allow "current"/"market"
+  // Entry price - extract range and use average value for signal type, or allow "current"/"market"
   let entryPrice: number | undefined;
   const entryPriceCurrentMatch = content.match(/(?:LONG|BUY|SHORT|SELL|Entry|ENTRY|Entry Price|Entry Targets|Buy)[:\s=]*-?\s*(current|market|CMP)/i);
   if (entryPriceCurrentMatch) {
@@ -36,9 +36,8 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
     if (entryPriceRangeMatch) {
       const price1 = parseFloat(entryPriceRangeMatch[1]);
       const price2 = parseFloat(entryPriceRangeMatch[2]);
-      // For LONG: worst = highest price (entering higher is worse, you pay more)
-      // For SHORT: worst = lowest price (entering lower is worse, you sell for less)
-      entryPrice = signalType === 'long' ? Math.max(price1, price2) : Math.min(price1, price2);
+      // Use average of the two prices for both long and short
+      entryPrice = (price1 + price2) / 2;
     } else {
       // Try "Entry Targets: 1) 51.70 2) 46.00" - use first entry target
       const entryTargetsMatch = content.match(/Entry Targets?\s*:\s*1\)\s*([\d.]+)/i);
