@@ -432,6 +432,9 @@ const executeTradeForAccount = async (
     const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
     const orderType = isMarketOrder ? 'Market' : 'Limit';
     
+    // Declare tradeId early so it's available throughout the function
+    let tradeId: number | undefined;
+    
     // Using Bybit Futures API (linear perpetuals)
     // Create order at entry price (or market)
     const orderParams: any = {
@@ -515,6 +518,38 @@ const executeTradeForAccount = async (
         throw new Error(`Order placement failed: ${JSON.stringify(orderResponse)}`);
       }
 
+      // Insert trade record early so we can update it if needed (e.g., if we need to close position)
+      const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
+      try {
+        tradeId = await db.insertTrade({
+          message_id: message.message_id,
+          channel: channel,
+          trading_pair: order.tradingPair,
+          leverage: effectiveLeverage,
+          entry_price: roundedEntryPrice,
+          stop_loss: roundedStopLoss || order.stopLoss,
+          take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
+          risk_percentage: riskPercentage,
+          quantity: qty,
+          exchange: 'bybit',
+          account_name: accountName || undefined,
+          order_id: orderId,
+          entry_order_type: isMarketOrder ? 'market' : 'limit',
+          direction: order.signalType,
+          status: 'pending',
+          stop_loss_breakeven: false,
+          expires_at: expiresAt
+        });
+      } catch (error) {
+        logger.warn('Failed to insert trade record early', {
+          channel,
+          symbol,
+          orderId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Continue anyway - we'll insert it later
+      }
+
       // Verify stop loss was set, or set it separately if initial order didn't support it
       // Note: If Bybit accepted the stop loss in the initial order, it will be set when the position opens
       // For limit orders, we can't verify until position exists, so we'll set it separately if needed
@@ -592,11 +627,14 @@ const executeTradeForAccount = async (
       // NOTE: For limit orders that may take hours/days to fill, TP orders are placed by the trade monitor
       // after the entry order fills. This prevents TP orders from being placed before a position exists.
       // Only place TP orders immediately if this is a market order (which fills instantly)
-      const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
+      // (isMarketOrder already declared above)
       
       if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder) {
-        // For market orders, check if we have a position immediately
+        // For market orders, check if we have a position immediately and get position details
         let positionSide: 'Buy' | 'Sell' | null = null;
+        let actualEntryPrice: number | undefined;
+        let actualPositionQty: number | undefined;
+        
         try {
           const positionResponse = await bybitClient.getPositionInfo({
             category: 'linear',
@@ -611,8 +649,8 @@ const executeTradeForAccount = async (
             
             if (positions.length > 0) {
               const position = positions[0];
-              // Use Bybit's side field directly if available (authoritative source)
-              // Fall back to inferring from size only if side field is not available
+              
+              // Get position side
               if (position.side && (position.side === 'Buy' || position.side === 'Sell')) {
                 positionSide = position.side as 'Buy' | 'Sell';
               } else {
@@ -626,6 +664,16 @@ const executeTradeForAccount = async (
                   size
                 });
               }
+              
+              // Get actual entry price and position quantity
+              const avgPrice = parseFloat(getBybitField<string>(position, 'avgPrice') || '0');
+              const size = parseFloat(getBybitField<string>(position, 'size') || '0');
+              if (avgPrice > 0) {
+                actualEntryPrice = avgPrice;
+              }
+              if (size !== 0) {
+                actualPositionQty = Math.abs(size);
+              }
             }
           }
         } catch (error) {
@@ -638,6 +686,159 @@ const executeTradeForAccount = async (
         
         if (positionSide) {
           // Only place TP orders if entry order has filled and we have position side
+          
+          // Step 1: Validate with current market price first (already done earlier)
+          // Step 2: Validate with actual entry fill price from position
+          
+          // Use actual entry price if available, otherwise fall back to finalEntryPrice
+          const entryPriceForValidation = actualEntryPrice || finalEntryPrice;
+          
+          // Step 3: Validate TP prices against actual entry fill price
+          // Filter out invalid TPs and recalculate quantities if needed
+          let validTPPrices = [...roundedTPPrices];
+          let validTPIndices: number[] = [];
+          
+          // Check each TP price against entry price
+          validTPPrices.forEach((tpPrice, index) => {
+            const isValid = order.signalType === 'long' 
+              ? tpPrice > entryPriceForValidation 
+              : tpPrice < entryPriceForValidation;
+            
+            if (isValid) {
+              validTPIndices.push(index);
+            }
+          });
+          
+          // Filter to only valid TPs
+          validTPPrices = validTPPrices.filter((tpPrice, index) => {
+            return order.signalType === 'long' 
+              ? tpPrice > entryPriceForValidation 
+              : tpPrice < entryPriceForValidation;
+          });
+          
+          if (validTPPrices.length < roundedTPPrices.length) {
+            const removedCount = roundedTPPrices.length - validTPPrices.length;
+            logger.warn('Some TP prices invalid relative to actual entry fill price - removing invalid TPs', {
+              channel,
+              symbol,
+              entryPriceForValidation,
+              actualEntryPrice,
+              finalEntryPrice,
+              originalTPs: roundedTPPrices,
+              validTPs: validTPPrices,
+              removedCount,
+              signalType: order.signalType
+            });
+          }
+          
+          // Step 4: If no valid TPs remain, close the position
+          if (validTPPrices.length === 0) {
+            logger.error('No valid TP prices relative to actual entry fill price - closing position', {
+              channel,
+              symbol,
+              entryPriceForValidation,
+              actualEntryPrice,
+              finalEntryPrice,
+              originalTPs: roundedTPPrices,
+              stopLoss: order.stopLoss,
+              signalType: order.signalType,
+              note: 'All TP prices were invalid, closing position immediately'
+            });
+            
+            // Close the position using reduce-only market order
+            if (!isSimulation && bybitClient && actualPositionQty) {
+              try {
+                const closeSide = order.signalType === 'long' ? 'Sell' : 'Buy';
+                const closeOrder = await bybitClient.submitOrder({
+                  category: 'linear',
+                  symbol: symbol,
+                  side: closeSide,
+                  orderType: 'Market',
+                  qty: actualPositionQty.toString(),
+                  timeInForce: 'IOC',
+                  reduceOnly: true,
+                  closeOnTrigger: false
+                });
+                
+                if (closeOrder.retCode === 0 && closeOrder.result) {
+                  const closeOrderId = getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown';
+                  logger.info('Position closed due to invalid TP prices', {
+                    channel,
+                    symbol,
+                    tradeId,
+                    entryOrderId: orderId,
+                    closeOrderId
+                  });
+                  
+                  // Update trade status
+                  if (tradeId) {
+                    try {
+                      await db.updateTrade(tradeId, {
+                        status: 'closed',
+                        exit_filled_at: dayjs().toISOString()
+                      });
+                    } catch (error) {
+                      logger.warn('Could not update trade status after closing position', {
+                        channel,
+                        symbol,
+                        tradeId,
+                        error: error instanceof Error ? error.message : String(error)
+                      });
+                    }
+                  }
+                  
+                  // Don't place TP orders - position is already closed
+                  return;
+                } else {
+                  throw new Error(`Failed to close position: ${JSON.stringify(closeOrder)}`);
+                }
+              } catch (error) {
+                logger.error('Failed to close position with invalid TPs', {
+                  channel,
+                  symbol,
+                  tradeId,
+                  orderId,
+                  error: error instanceof Error ? error.message : String(error)
+                });
+                throw error;
+              }
+            } else {
+              // Simulation mode - mark trade as closed
+              if (tradeId) {
+                try {
+                  await db.updateTrade(tradeId, {
+                    status: 'closed',
+                    exit_filled_at: dayjs().toISOString()
+                  });
+                } catch (error) {
+                  logger.warn('Could not update trade status in simulation', {
+                    channel,
+                    symbol,
+                    tradeId,
+                    error: error instanceof Error ? error.message : String(error)
+                  });
+                }
+              }
+              logger.info('Simulated position close due to invalid TP prices', {
+                channel,
+                symbol,
+                tradeId
+              });
+              return;
+            }
+          }
+          
+          // Step 5: Recalculate TP quantities for remaining valid TPs
+          // Use the valid TP prices and recalculate quantities
+          roundedTPPrices = validTPPrices;
+          
+          logger.info('Using filtered TP prices after validation', {
+            channel,
+            symbol,
+            originalTPCount: order.takeProfits.length,
+            validTPCount: validTPPrices.length,
+            validTPPrices: validTPPrices
+          });
         
           // Verify position side matches expected side
           const expectedPositionSide = order.signalType === 'long' ? 'Buy' : 'Sell';
@@ -652,10 +853,10 @@ const executeTradeForAccount = async (
           });
         }
 
-          // Distribute quantity evenly across TPs (last TP rounded up)
+          // Distribute quantity evenly across remaining valid TPs (last TP rounded up)
           const tpQuantities = distributeQuantityAcrossTPs(
             qty,
-            order.takeProfits.length,
+            validTPPrices.length, // Use filtered count, not original
             decimalPrecision
           );
 
@@ -968,27 +1169,35 @@ const executeTradeForAccount = async (
       tpOrdersPlaced: !isSimulation && order.takeProfits && order.takeProfits.length > 0
     });
 
-    // Store trade in database with account name (use rounded prices)
-    const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
-    const tradeId = await db.insertTrade({
-      message_id: message.message_id,
-      channel: channel,
-      trading_pair: order.tradingPair,
-      leverage: effectiveLeverage,
-      entry_price: roundedEntryPrice,
-      stop_loss: roundedStopLoss || order.stopLoss,
-      take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
-      risk_percentage: riskPercentage,
-      quantity: qty,
-      exchange: 'bybit',
-      account_name: accountName || undefined,
-      order_id: orderId,
-      entry_order_type: isMarketOrder ? 'market' : 'limit',
-      direction: order.signalType, // Store direction: 'long' or 'short'
-      status: 'pending',
-      stop_loss_breakeven: false,
-      expires_at: expiresAt
-    });
+    // Update trade record if it was already inserted earlier, otherwise insert it now
+    // (For market orders, trade was inserted earlier to allow closing position if needed)
+    if (!tradeId) {
+      const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
+      tradeId = await db.insertTrade({
+        message_id: message.message_id,
+        channel: channel,
+        trading_pair: order.tradingPair,
+        leverage: effectiveLeverage,
+        entry_price: roundedEntryPrice,
+        stop_loss: roundedStopLoss || order.stopLoss,
+        take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
+        risk_percentage: riskPercentage,
+        quantity: qty,
+        exchange: 'bybit',
+        account_name: accountName || undefined,
+        order_id: orderId,
+        entry_order_type: isMarketOrder ? 'market' : 'limit',
+        direction: order.signalType, // Store direction: 'long' or 'short'
+        status: 'pending',
+        stop_loss_breakeven: false,
+        expires_at: expiresAt
+      });
+    } else {
+      // Update existing trade with final TP prices (may have been filtered)
+      await db.updateTrade(tradeId, {
+        take_profits: JSON.stringify(roundedTPPrices || order.takeProfits)
+      });
+    }
 
     // Store entry order (use rounded price)
     try {

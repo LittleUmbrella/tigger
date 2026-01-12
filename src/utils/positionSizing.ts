@@ -108,14 +108,24 @@ export const roundPrice = (
 };
 
 /**
- * Calculate position size based on risk percentage, accounting for leverage
+ * Calculate position size based on risk percentage
+ * 
+ * Formula:
+ * - Risk amount = balance × (riskPercentage / 100)
+ * - Quantity = riskAmount / priceDiff
+ * - Position size = quantity × entryPrice
+ * 
+ * Note: Leverage does NOT affect position size calculation. Leverage only affects margin:
+ * - Margin = positionSize / leverage
+ * 
+ * The loss at stop loss is always: quantity × priceDiff, regardless of leverage.
  * 
  * @param balance - Account balance
  * @param riskPercentage - Risk percentage (e.g., 1 for 1%)
  * @param entryPrice - Entry price for the trade
  * @param stopLoss - Stop loss price
- * @param leverage - Leverage multiplier (e.g., 20 for 20x)
- * @param baseLeverage - Base/default leverage used as confidence indicator (optional)
+ * @param leverage - Leverage multiplier (e.g., 20 for 20x) - used for margin calculation and risk adjustment
+ * @param baseLeverage - Base/default leverage used for risk adjustment (optional)
  * @returns Position size in quote currency (e.g., USDT)
  */
 export const calculatePositionSize = (
@@ -152,13 +162,27 @@ export const calculatePositionSize = (
   // Calculate price difference between entry and stop loss
   const priceDiff = Math.abs(entryPrice - stopLoss);
   
-  // With leverage, the risk per unit is amplified
-  // For example, with 20x leverage, a 5% price move results in 100% loss
-  const riskPerUnit = (priceDiff / entryPrice) * effectiveLeverage;
+  // Validate price difference
+  if (priceDiff === 0 || !isFinite(priceDiff)) {
+    throw new Error(`Invalid price difference: entry=${entryPrice}, stopLoss=${stopLoss}, diff=${priceDiff}`);
+  }
   
-  // Position size = risk amount / risk per unit
-  // This ensures that if stop loss is hit, loss equals risk amount
-  const positionSize = riskAmount / riskPerUnit;
+  // CORRECT FORMULA:
+  // The actual loss when stop loss is hit: loss = quantity × priceDiff
+  // We want: loss = riskAmount
+  // Therefore: quantity = riskAmount / priceDiff
+  // Position size (notional) = quantity × entryPrice = (riskAmount / priceDiff) × entryPrice
+  // 
+  // Note: Leverage does NOT affect the position size calculation directly.
+  // Leverage only affects the margin required: margin = positionSize / leverage
+  // The loss at stop loss is always: quantity × priceDiff, regardless of leverage.
+  const quantity = riskAmount / priceDiff;
+  const positionSize = quantity * entryPrice;
+  
+  // Validate result
+  if (!isFinite(positionSize) || positionSize <= 0) {
+    throw new Error(`Invalid position size calculated: ${positionSize} (riskAmount=${riskAmount}, priceDiff=${priceDiff}, entryPrice=${entryPrice})`);
+  }
   
   return positionSize;
 };

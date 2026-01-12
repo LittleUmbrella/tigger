@@ -250,9 +250,10 @@ export function createMockExchange(
       ? exitPrice - state.entryFillPrice
       : state.entryFillPrice - exitPrice;
 
-    const positionSize = quantity * state.entryFillPrice;
-    
-    return priceDiff * (positionSize / state.entryFillPrice) * state.trade.leverage;
+    // P&L = priceDiff * quantity
+    // Leverage does NOT affect P&L - it only affects margin requirement
+    // The actual profit/loss is always: quantity × price difference
+    return priceDiff * quantity;
   };
 
   const calculatePnLPercentage = (exitPrice: number, quantity: number, totalQuantity: number): number => {
