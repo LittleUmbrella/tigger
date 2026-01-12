@@ -66,20 +66,51 @@ export function createMockExchange(
     const existingOrders = await db.getOrdersByTradeId(state.trade.id);
     
     // Create stop loss order if missing
+    // Set quantity to trade quantity to ensure 100% coverage
     const hasStopLoss = existingOrders.some(o => o.order_type === 'stop_loss');
     if (!hasStopLoss && state.trade.stop_loss) {
       try {
+        const stopLossQuantity = state.trade.quantity || 0;
         await db.insertOrder({
           trade_id: state.trade.id,
           order_type: 'stop_loss',
           price: state.trade.stop_loss,
+          quantity: stopLossQuantity, // Set to trade quantity for 100% coverage
           status: 'pending'
+        });
+        logger.debug('Created stop loss order with quantity', {
+          tradeId: state.trade.id,
+          quantity: stopLossQuantity
         });
       } catch (error) {
         logger.warn('Failed to create stop loss order', {
           tradeId: state.trade.id,
           error: error instanceof Error ? error.message : String(error)
         });
+      }
+    } else if (hasStopLoss) {
+      // Update existing stop loss order quantity to match trade quantity (ensure 100% coverage)
+      const stopLossOrder = existingOrders.find(o => o.order_type === 'stop_loss');
+      if (stopLossOrder && state.trade.quantity && state.trade.quantity > 0) {
+        // Only update if quantity is missing or doesn't match trade quantity
+        if (!stopLossOrder.quantity || stopLossOrder.quantity !== state.trade.quantity) {
+          try {
+            await db.updateOrder(stopLossOrder.id, {
+              quantity: state.trade.quantity
+            });
+            logger.debug('Updated stop loss order quantity to match trade quantity', {
+              tradeId: state.trade.id,
+              orderId: stopLossOrder.id,
+              quantity: state.trade.quantity
+            });
+          } catch (error) {
+            logger.warn('Failed to update stop loss order quantity', {
+              tradeId: state.trade.id,
+              orderId: stopLossOrder.id,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
+        }
       }
     }
 
@@ -204,6 +235,27 @@ export function createMockExchange(
       await db.updateTrade(state.trade.id, {
         quantity: adjustedQuantity
       });
+
+      // Update stop loss order quantity to match trade quantity (ensure 100% coverage)
+      const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+      if (stopLossOrder) {
+        try {
+          await db.updateOrder(stopLossOrder.id, {
+            quantity: adjustedQuantity
+          });
+          logger.debug('Updated stop loss order quantity after entry fill', {
+            tradeId: state.trade.id,
+            orderId: stopLossOrder.id,
+            quantity: adjustedQuantity
+          });
+        } catch (error) {
+          logger.warn('Failed to update stop loss order quantity after entry fill', {
+            tradeId: state.trade.id,
+            orderId: stopLossOrder.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
 
       // Update state
       state.trade.quantity = adjustedQuantity;
@@ -439,13 +491,37 @@ export function createMockExchange(
       tradeId: state.trade.id,
       newStopLoss: state.currentStopLoss,
       entryFillPrice: state.entryFillPrice,
-      originalEntryPrice: state.trade.entry_price
+      originalEntryPrice: state.trade.entry_price,
+      remainingQuantity: state.remainingQuantity
     });
 
     await db.updateTrade(state.trade.id, {
       stop_loss: state.currentStopLoss,
       stop_loss_breakeven: true
     });
+
+    // Update stop loss order quantity to match remaining quantity (after TPs filled)
+    // This ensures stop loss covers 100% of remaining position
+    const orders = await db.getOrdersByTradeId(state.trade.id);
+    const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+    if (stopLossOrder && state.remainingQuantity > 0) {
+      try {
+        await db.updateOrder(stopLossOrder.id, {
+          quantity: state.remainingQuantity
+        });
+        logger.debug('Updated stop loss order quantity to remaining quantity at breakeven', {
+          tradeId: state.trade.id,
+          orderId: stopLossOrder.id,
+          quantity: state.remainingQuantity
+        });
+      } catch (error) {
+        logger.warn('Failed to update stop loss order quantity at breakeven', {
+          tradeId: state.trade.id,
+          orderId: stopLossOrder.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
   };
 
   const closeTrade = async (price: number, fillTime: dayjs.Dayjs): Promise<void> => {

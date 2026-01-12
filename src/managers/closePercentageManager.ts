@@ -172,19 +172,43 @@ async function closePercentageOfPosition(
           });
 
           // If moving stop loss to entry, update it
+          // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
           if (moveStopLossToEntry) {
             try {
               await bybitClient.setTradingStop({
                 category: 'linear',
                 symbol: symbol,
                 stopLoss: trade.entry_price.toString(),
-                positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
+                positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2,
+                tpslMode: 'Full' // Apply stop loss to 100% of position automatically
               });
 
               await db.updateTrade(trade.id, {
                 stop_loss: trade.entry_price,
                 stop_loss_breakeven: true
               });
+              
+              // Update stop loss order quantity in database for tracking
+              // Bybit API automatically covers 100% of position, but we track quantity for consistency
+              try {
+                const orders = await db.getOrdersByTradeId(trade.id);
+                const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+                if (stopLossOrder && trade.quantity) {
+                  await db.updateOrder(stopLossOrder.id, {
+                    quantity: trade.quantity
+                  });
+                  logger.debug('Updated stop loss order quantity when moving to breakeven', {
+                    tradeId: trade.id,
+                    orderId: stopLossOrder.id,
+                    quantity: trade.quantity
+                  });
+                }
+              } catch (error) {
+                logger.warn('Failed to update stop loss order quantity when moving to breakeven', {
+                  tradeId: trade.id,
+                  error: error instanceof Error ? error.message : String(error)
+                });
+              }
 
               logger.info('Stop loss moved to entry', {
                 tradeId: trade.id,

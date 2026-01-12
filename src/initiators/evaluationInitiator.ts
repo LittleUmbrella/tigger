@@ -200,13 +200,15 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     });
   }
 
-  // Store stop loss order (no quantity needed, use rounded price)
+  // Store stop loss order (quantity will be updated when trade quantity is calculated)
+  // Set quantity to trade quantity if available, otherwise 0 (will be updated later)
   if (roundedStopLoss && roundedStopLoss > 0) {
     try {
       await db.insertOrder({
         trade_id: tradeId,
         order_type: 'stop_loss',
         price: roundedStopLoss,
+        quantity: qty, // Will be 0 initially, updated when trade quantity is calculated
         status: 'pending'
       });
     } catch (error) {
