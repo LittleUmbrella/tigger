@@ -675,17 +675,45 @@ const cancelOrder = async (
 const updateStopLoss = async (
   trade: Trade,
   newStopLoss: number,
-  bybitClient?: RestClientV5
+  bybitClient?: RestClientV5,
+  db?: DatabaseManager
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient) {
       const symbol = normalizeBybitSymbol(trade.trading_pair);
+      // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
       await bybitClient.setTradingStop({
         category: 'linear',
         symbol: symbol,
         stopLoss: newStopLoss.toString(),
-        positionIdx: 0
+        positionIdx: 0,
+        tpslMode: 'Full' // Apply stop loss to 100% of position automatically
       });
+      
+      // Update stop loss order quantity in database for tracking
+      // Bybit API automatically covers 100% of position, but we track quantity for consistency
+      if (db && trade.quantity) {
+        try {
+          const orders = await db.getOrdersByTradeId(trade.id);
+          const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+          if (stopLossOrder) {
+            await db.updateOrder(stopLossOrder.id, {
+              quantity: trade.quantity // Update to current trade quantity
+            });
+            logger.debug('Updated stop loss order quantity in database', {
+              tradeId: trade.id,
+              orderId: stopLossOrder.id,
+              quantity: trade.quantity
+            });
+          }
+        } catch (error) {
+          logger.warn('Failed to update stop loss order quantity', {
+            tradeId: trade.id,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+      
       logger.info('Stop loss updated', {
         tradeId: trade.id,
         newStopLoss
@@ -1519,7 +1547,7 @@ const monitorTrade = async (
           entryPrice: trade.entry_price
         });
         
-        await updateStopLoss(trade, trade.entry_price, bybitClient);
+        await updateStopLoss(trade, trade.entry_price, bybitClient, db);
         await db.updateTrade(trade.id, {
           stop_loss: trade.entry_price,
           stop_loss_breakeven: true

@@ -582,11 +582,12 @@ const executeTradeForAccount = async (
         // If entry hasn't filled, Bybit will apply the stop loss from the initial order when position opens
         if (entryFilled) {
           try {
-            const stopLossParams = {
+            const stopLossParams: any = {
               category: 'linear' as const,
               symbol: symbol,
               stopLoss: roundedStopLoss.toString(),
-              positionIdx: 0 as 0 | 1 | 2
+              positionIdx: 0 as 0 | 1 | 2,
+              tpslMode: 'Full' // Apply stop loss to 100% of position automatically
             };
             
             logger.debug('Stop loss parameters being sent to Bybit (entry already filled)', {
@@ -598,7 +599,33 @@ const executeTradeForAccount = async (
               originalStopLoss: order.stopLoss
             });
             
+            // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
             await bybitClient.setTradingStop(stopLossParams);
+            
+            // Update stop loss order quantity in database for tracking
+            // Bybit API automatically covers 100% of position, but we track quantity for consistency
+            if (tradeId) {
+              try {
+                const orders = await db.getOrdersByTradeId(tradeId);
+                const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+                if (stopLossOrder) {
+                  await db.updateOrder(stopLossOrder.id, {
+                    quantity: qty
+                  });
+                  logger.debug('Updated stop loss order quantity after setting on exchange', {
+                    tradeId,
+                    orderId: stopLossOrder.id,
+                    quantity: qty
+                  });
+                }
+              } catch (error) {
+                logger.warn('Failed to update stop loss order quantity', {
+                  tradeId,
+                  error: error instanceof Error ? error.message : String(error)
+                });
+              }
+            }
+            
             logger.info('Stop loss verified/set', {
               symbol,
               stopLoss: roundedStopLoss
@@ -1217,13 +1244,21 @@ const executeTradeForAccount = async (
     }
 
     // Store stop loss order (if not in simulation, use rounded price)
+    // Set quantity to trade quantity to ensure 100% coverage tracking
+    // Note: Bybit's setTradingStop API is position-level and automatically covers 100% of the position
     if (!isSimulation && roundedStopLoss && roundedStopLoss > 0) {
       try {
         await db.insertOrder({
           trade_id: tradeId,
           order_type: 'stop_loss',
           price: roundedStopLoss,
+          quantity: qty, // Store quantity for tracking (Bybit API automatically covers 100% of position)
           status: 'pending'
+        });
+        logger.debug('Stored stop loss order with quantity', {
+          tradeId,
+          quantity: qty,
+          stopLoss: roundedStopLoss
         });
       } catch (error) {
         logger.warn('Failed to store stop loss order', {

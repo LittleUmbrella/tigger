@@ -589,6 +589,19 @@ async function recalculateQuantitiesHistorically(
       });
     }
 
+    // Update stop loss order quantity to match trade quantity (ensure 100% coverage)
+    const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+    if (stopLossOrder) {
+      await db.updateOrder(stopLossOrder.id, {
+        quantity: newQuantity
+      });
+      logger.debug('Updated stop loss order quantity during recalculation', {
+        tradeId: trade.id,
+        orderId: stopLossOrder.id,
+        quantity: newQuantity
+      });
+    }
+
     // Update take profit order quantities
     const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
     if (takeProfits.length > 0) {
