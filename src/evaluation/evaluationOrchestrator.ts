@@ -377,18 +377,27 @@ export async function runEvaluation(
     // Calculate unrealized P&L for open trades
     let unrealizedPnL = 0;
     for (const trade of channelOpenTrades) {
-      if (trade.entry_filled_at && trade.entry_price) {
+      if (trade.entry_filled_at && trade.entry_price && trade.stop_loss && trade.risk_percentage) {
         try {
           const currentPrice = await priceProvider.getCurrentPrice(trade.trading_pair);
           if (currentPrice) {
-            const isLong = trade.entry_price < (trade.stop_loss || trade.entry_price);
+            const isLong = trade.entry_price < trade.stop_loss;
             const priceDiff = isLong
               ? currentPrice - trade.entry_price
               : trade.entry_price - currentPrice;
             const pnlPercentage = (priceDiff / trade.entry_price) * 100;
-            const positionSize = (rule.initialBalance * (trade.risk_percentage / 100)) / 
-              Math.abs(trade.entry_price - (trade.stop_loss || trade.entry_price)) * trade.entry_price;
-            unrealizedPnL += (priceDiff * positionSize);
+            
+            // Calculate position size using the correct formula
+            // quantity = riskAmount / priceDiff
+            // positionSize = quantity * entryPrice = (riskAmount / priceDiff) * entryPrice
+            const riskAmount = rule.initialBalance * (trade.risk_percentage / 100);
+            const slPriceDiff = Math.abs(trade.entry_price - trade.stop_loss);
+            if (slPriceDiff > 0) {
+              const quantity = riskAmount / slPriceDiff;
+              const positionSize = quantity * trade.entry_price;
+              // P&L = priceDiff * quantity (leverage doesn't affect P&L, only margin)
+              unrealizedPnL += (priceDiff * quantity);
+            }
           }
         } catch (error) {
           logger.warn('Failed to calculate unrealized P&L', {

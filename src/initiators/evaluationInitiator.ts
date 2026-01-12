@@ -8,7 +8,7 @@
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo } from './symbolValidator.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
+import { getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import dayjs from 'dayjs';
 
