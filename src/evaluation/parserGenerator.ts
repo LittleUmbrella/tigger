@@ -104,20 +104,25 @@ ${examples}
 
 The parser should:
 1. Import ParsedOrder from '../../../types/order'
-2. Export a function that takes a string (message content) and returns ParsedOrder | null
-3. Extract: trading_pair, entry_price, stop_loss, take_profits (array), leverage, signal_type ('long' | 'short')
-4. The entry price can be 'current' or 'market'. If it is a range, use the average of the two prices.
-5. Handle multiple format variations from the examples
-6. Return null if the message doesn't match any format
-7. Use regex patterns to extract the required fields
+2. Import calculateEntryPrice from '../../../utils/entryPriceStrategy.js'
+3. Import ParserOptions from '../../parserRegistry.js'
+4. Export a function that takes a string (message content) and optional ParserOptions, returns ParsedOrder | null
+5. Extract: trading_pair, entry_price, stop_loss, take_profits (array), leverage, signal_type ('long' | 'short')
+6. The entry price can be 'current' or 'market'. If it is a range, use calculateEntryPrice(price1, price2, signalType, options?.entryPriceStrategy || 'worst')
+7. Handle multiple format variations from the examples
+8. Return null if the message doesn't match any format
+9. Use regex patterns to extract the required fields
 
 Return ONLY the TypeScript code, no explanations. The function should be exported with the name provided in the export statement.
 
 Example structure:
 import { ParsedOrder } from '../../../types/order';
+import { calculateEntryPrice } from '../../../utils/entryPriceStrategy.js';
+import { ParserOptions } from '../../parserRegistry.js';
 
-export const ${parserName} = (content: string): ParsedOrder | null => {
+export const ${parserName} = (content: string, options?: ParserOptions): ParsedOrder | null => {
   // Your parser logic here
+  // For entry price ranges, use: calculateEntryPrice(price1, price2, signalType, options?.entryPriceStrategy || 'worst')
 };`;
 
   try {

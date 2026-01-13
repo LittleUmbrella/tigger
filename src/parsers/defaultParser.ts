@@ -2,12 +2,13 @@ import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
+import { ParserOptions } from './parserRegistry.js';
 
 /**
  * Default parser - handles common signal formats
  * This is a fallback parser that tries to extract order data from various formats
  */
-export const defaultParser = (content: string): ParsedOrder | null => {
+export const defaultParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     // Example message format:
     // "⚡️© PERP/USDT ©⚡️ Exchanges: Pionex, Binance, Bybit Signal Type: Regular (Short) Leverage: 5x-10х Use 3-5% Of Portfolio Entry Targets: 0.7034 🖖🏽 0.717605 Take-Profit Targets: 1) 0.68919 2) 0.67498 3) 0.65366 4) 0.63945 5) 0.61814 6) 0.59682 8) 0.56840 7) 🚀🚀🚀 Stop Targets: 0.76024"

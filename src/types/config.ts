@@ -50,6 +50,7 @@ export interface ParserConfig {
   channel: string;
   ollama?: OllamaConfig; // LLM fallback configuration (only for LLM parsers)
   db?: DatabaseManager; // DatabaseManager instance (optional, passed at runtime for reply chain support)
+  entryPriceStrategy?: 'worst' | 'average'; // Strategy for handling multiple entry prices: 'worst' (default) uses worst price, 'average' uses average price
   // Parser-specific config can be added here
 }
 

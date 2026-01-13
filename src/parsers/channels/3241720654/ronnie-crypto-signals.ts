@@ -1,8 +1,10 @@
 import { ParsedOrder } from '../../../types/order';
 import { validateParsedOrder } from '../../../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../../../utils/deduplication.js';
+import { calculateEntryPrice } from '../../../utils/entryPriceStrategy.js';
+import { ParserOptions } from '../../parserRegistry.js';
 
-export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
+export const ronnieCryptoSignals = (content: string, options?: ParserOptions): ParsedOrder | null => {
   // Signal type - check first to determine if we should continue
   // Handle formats: "LONG", "SHORT", "Long SIGNAL", "Short SIGNAL", "LONG SIGNAL", "SHORT SIGNAL"
   const signalTypeMatch = content.match(/(?:^|\s)(Long|Short|LONG|SHORT)(?:\s+SIGNAL)?/i);
@@ -49,8 +51,9 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
     if (leverage < 1 || isNaN(leverage)) return null;
   }
 
-  // Entry price - handle ranges and use average value for signal type, or allow "current"/"market"
+  // Entry price - handle ranges and use configured strategy (default: worst), or allow "current"/"market"
   // Handle formats: "Entry: 0.3140 - 0.3100", "Buy: 0.08710 - 0.08457", "✅ Entry: 0.48-0.46"
+  const entryPriceStrategy = options?.entryPriceStrategy || 'worst';
   let entryPrice: number | undefined;
   const entryPriceCurrentMatch = content.match(/(?:Market price|current|market|CMP)/i);
   if (entryPriceCurrentMatch) {
@@ -70,8 +73,8 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
       // Remove commas from numbers before parsing
       const price1 = parseFloat(entryPriceRangeMatch[1].replace(/,/g, ''));
       const price2 = parseFloat(entryPriceRangeMatch[2].replace(/,/g, ''));
-      // Use average of the two prices for both long and short
-      entryPrice = (price1 + price2) / 2;
+      // Use configured strategy (worst or average)
+      entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
     } else {
       // Try single entry price: "Entry: 0.3140" or "Buy: 0.08710" or "Entry (Limit Order) : 3,148.60"
       // Handle numbers with commas: "3,148.60" -> "3148.60"
