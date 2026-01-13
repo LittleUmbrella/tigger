@@ -1,6 +1,7 @@
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
+import { deduplicateTakeProfits } from '../utils/deduplication.js';
 
 /**
  * Parser for emoji-heavy signal format like:
@@ -52,12 +53,14 @@ export const emojiHeavyParser = (content: string): ParsedOrder | null => {
     const leverageMatch = content.match(/🔘\s*Leverage:\s*(\d+)x/i);
     const leverage = leverageMatch ? parseInt(leverageMatch[1], 10) : 1;
 
-    // Sort take profits based on signal type
-    if (signalType === 'long') {
-      takeProfits.sort((a, b) => a - b); // Ascending for long
-    } else {
-      takeProfits.sort((a, b) => b - a); // Descending for short
-    }
+    // Deduplicate take profits
+    const deduplicatedTPs = deduplicateTakeProfits(takeProfits, signalType);
+    
+    // Replace takeProfits with deduplicated version
+    takeProfits.length = 0;
+    takeProfits.push(...deduplicatedTPs);
+    
+    if (takeProfits.length === 0) return null;
 
     const parsedOrder: ParsedOrder = {
       tradingPair,

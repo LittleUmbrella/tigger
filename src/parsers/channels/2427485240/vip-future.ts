@@ -1,5 +1,6 @@
 import { ParsedOrder } from '../../../types/order';
 import { validateParsedOrder } from '../../../utils/tradeValidation.js';
+import { deduplicateTakeProfits } from '../../../utils/deduplication.js';
 
 const signalTypeRegex = /(?:🟢\s*)?(?:LONG|Long|long)|(?:🔴\s*)?(?:SHORT|Short|short)/i;
 
@@ -120,6 +121,15 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
       takeProfits.push(...validTargets);
     }
   }
+  
+  if (takeProfits.length === 0) return null;
+
+  // Deduplicate take profits
+  const deduplicatedTPs = deduplicateTakeProfits(takeProfits, signalType);
+  
+  // Replace takeProfits with deduplicated version
+  takeProfits.length = 0;
+  takeProfits.push(...deduplicatedTPs);
   
   if (takeProfits.length === 0) return null;
 
