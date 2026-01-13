@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { Trade, DatabaseManager } from '../db/schema.js';
 
 /**
  * Manager to close a percentage of a position
@@ -106,10 +107,10 @@ export const closePercentageManager: ManagerFunction = async (context: ManagerCo
  * Helper function to close a percentage of a position
  */
 async function closePercentageOfPosition(
-  trade: any,
+  trade: Trade,
   percentage: number,
   moveStopLossToEntry: boolean,
-  db: any,
+  db: DatabaseManager,
   isSimulation: boolean,
   bybitClient?: RestClientV5
 ): Promise<void> {
