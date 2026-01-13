@@ -1,5 +1,6 @@
 import { ParsedOrder } from '../../../types/order';
 import { validateParsedOrder } from '../../../utils/tradeValidation.js';
+import { deduplicateTakeProfits } from '../../../utils/deduplication.js';
 
 export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
   // Signal type - check first to determine if we should continue
@@ -261,6 +262,15 @@ export const ronnieCryptoSignals = (content: string): ParsedOrder | null => {
       }
     }
   }
+  
+  if (takeProfits.length === 0) return null;
+
+  // Deduplicate take profits
+  const deduplicatedTPs = deduplicateTakeProfits(takeProfits, signalType);
+  
+  // Replace takeProfits with deduplicated version
+  takeProfits.length = 0;
+  takeProfits.push(...deduplicatedTPs);
   
   if (takeProfits.length === 0) return null;
 

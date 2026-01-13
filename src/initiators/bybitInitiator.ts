@@ -6,6 +6,7 @@ import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import dayjs from 'dayjs';
 
 /**
@@ -481,6 +482,29 @@ const executeTradeForAccount = async (
       roundedTPPrices = order.takeProfits.map(tpPrice => 
         roundPrice(tpPrice, pricePrecision, tickSize)
       );
+      
+      // Deduplicate rounded TP prices (rounding can create duplicates)
+      roundedTPPrices = deduplicateTakeProfits(roundedTPPrices, order.signalType);
+      
+      if (roundedTPPrices.length === 0) {
+        logger.warn('All TP prices were removed after deduplication', {
+          channel,
+          symbol,
+          originalTPs: order.takeProfits,
+          roundedTPs: order.takeProfits.map(tpPrice => 
+            roundPrice(tpPrice, pricePrecision, tickSize)
+          )
+        });
+      } else if (roundedTPPrices.length < order.takeProfits.length) {
+        logger.info('Removed duplicate TP prices after rounding', {
+          channel,
+          symbol,
+          originalCount: order.takeProfits.length,
+          deduplicatedCount: roundedTPPrices.length,
+          originalTPs: order.takeProfits,
+          deduplicatedTPs: roundedTPPrices
+        });
+      }
     }
 
     if (isSimulation) {
@@ -859,16 +883,29 @@ const executeTradeForAccount = async (
             }
           }
           
-          // Step 5: Recalculate TP quantities for remaining valid TPs
-          // Use the valid TP prices and recalculate quantities
-          roundedTPPrices = validTPPrices;
+          // Step 5: Deduplicate valid TP prices (in case validation didn't catch duplicates)
+          const deduplicatedValidTPs = deduplicateTakeProfits(validTPPrices, order.signalType);
+          
+          // Step 6: Recalculate TP quantities for remaining valid TPs
+          // Use the deduplicated valid TP prices and recalculate quantities
+          roundedTPPrices = deduplicatedValidTPs;
+          
+          if (deduplicatedValidTPs.length < validTPPrices.length) {
+            logger.info('Removed duplicate TP prices after validation', {
+              channel,
+              symbol,
+              beforeDedupCount: validTPPrices.length,
+              afterDedupCount: deduplicatedValidTPs.length,
+              removedCount: validTPPrices.length - deduplicatedValidTPs.length
+            });
+          }
           
           logger.info('Using filtered TP prices after validation', {
             channel,
             symbol,
             originalTPCount: order.takeProfits.length,
-            validTPCount: validTPPrices.length,
-            validTPPrices: validTPPrices
+            validTPCount: roundedTPPrices.length,
+            validTPPrices: roundedTPPrices
           });
         
           // Verify position side matches expected side
