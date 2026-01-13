@@ -38,16 +38,6 @@
   ],
   "accounts": [
     {
-      "name": "demo2",
-      "exchange": "bybit",
-      "demo": true,
-      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
-      "envVarNames": {
-        "apiKey": "BYBIT_DEMO_API_KEY2",
-        "apiSecret": "BYBIT_DEMO_API_SECRET2"
-      }
-    },
-    {
       "name": "demo",
       "exchange": "bybit",
       "demo": true,
@@ -64,7 +54,7 @@
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "riskPercentage": 1,
-      "accounts": ["demo", "demo2"]
+      "accounts": ["demo"]
     }
   ],
   "monitors": [

@@ -217,7 +217,8 @@ const executeTradeForAccount = async (
     // Determine side (Buy for long, Sell for short)
     const side = order.signalType === 'long' ? 'Buy' : 'Sell';
     
-    // For market orders, we need to get current price first
+    // For market orders (entry price missing), we need to get current price first
+    // We'll convert these to limit orders at current price for predictable cost
     let entryPrice: number | undefined = order.entryPrice;
     const isUsingMarketPrice = !entryPrice || entryPrice <= 0;
     
@@ -227,7 +228,7 @@ const executeTradeForAccount = async (
           const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
           if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0 && ticker.result.list[0]?.lastPrice) {
             entryPrice = parseFloat(ticker.result.list[0].lastPrice);
-            logger.info('Using market price for entry', { symbol, entryPrice });
+            logger.info('Using current market price for limit order entry', { symbol, entryPrice });
           }
         } catch (error) {
           logger.warn('Failed to get market price', {
@@ -264,9 +265,10 @@ const executeTradeForAccount = async (
         throw new Error(`Trade validation failed for ${symbol}: Invalid price relationships detected`);
       }
     } else {
-      // For market orders, do a lenient validation - just check that prices are positive and reasonable
+      // For orders originally specified as market (now converted to limit at current price),
+      // do a lenient validation - just check that prices are positive and reasonable
       // The actual validation will happen when the position is opened and we know the fill price
-      logger.debug('Skipping strict validation for market order - will validate after fill', {
+      logger.debug('Skipping strict validation for limit order at current market price - will validate after fill', {
         channel,
         symbol,
         entryPrice: finalEntryPrice,
@@ -428,31 +430,33 @@ const executeTradeForAccount = async (
       positionSize
     });
 
-    // Determine order type - use Market if original entry price was 0 or not provided
+    // Determine if this was originally a market order (entry price missing)
+    // Even though we convert it to a limit order at current price, we keep this flag
+    // for TP placement logic (immediate execution vs waiting for fill)
     const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
-    const orderType = isMarketOrder ? 'Market' : 'Limit';
+    // Convert market orders to limit orders at current price for predictable cost
+    const orderType = 'Limit';
     
     // Declare tradeId early so it's available throughout the function
     let tradeId: number | undefined;
     
     // Using Bybit Futures API (linear perpetuals)
-    // Create order at entry price (or market)
+    // Create order at entry price (limit order, even if originally market)
     const orderParams: any = {
       category: 'linear',
       symbol: symbol,
       side: side,
       orderType: orderType,
       qty: qtyString,
+      // Use IOC for immediate execution (fills immediately if price is at or better, otherwise cancels)
+      // This provides predictable cost while still executing quickly
       timeInForce: isMarketOrder ? 'IOC' : 'GTC',
       reduceOnly: false,
       closeOnTrigger: false,
       positionIdx: 0,
+      // Always add price for limit orders (use rounded price)
+      price: roundedEntryPrice.toString(),
     };
-    
-    // Only add price for limit orders (use rounded price)
-    if (!isMarketOrder) {
-      orderParams.price = roundedEntryPrice.toString();
-    }
 
     // Add stop loss to initial order if available (Bybit supports this) - use rounded price
     if (roundedStopLoss && roundedStopLoss > 0) {
@@ -534,7 +538,7 @@ const executeTradeForAccount = async (
           exchange: 'bybit',
           account_name: accountName || undefined,
           order_id: orderId,
-          entry_order_type: isMarketOrder ? 'market' : 'limit',
+          entry_order_type: 'limit', // Always limit order (market orders converted to limit at current price)
           direction: order.signalType,
           status: 'pending',
           stop_loss_breakeven: false,
@@ -653,11 +657,11 @@ const executeTradeForAccount = async (
       // Place take profit orders using batch placement if available
       // NOTE: For limit orders that may take hours/days to fill, TP orders are placed by the trade monitor
       // after the entry order fills. This prevents TP orders from being placed before a position exists.
-      // Only place TP orders immediately if this is a market order (which fills instantly)
+      // Only place TP orders immediately if this was originally a market order (now limit with IOC, fills immediately)
       // (isMarketOrder already declared above)
       
       if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder) {
-        // For market orders, check if we have a position immediately and get position details
+        // For limit orders with IOC timeInForce (originally market orders), check if we have a position immediately and get position details
         let positionSide: 'Buy' | 'Sell' | null = null;
         let actualEntryPrice: number | undefined;
         let actualPositionQty: number | undefined;
@@ -1168,7 +1172,7 @@ const executeTradeForAccount = async (
           }
           }
         } else {
-          logger.info('Market order placed but no position detected yet, TP orders will be placed by monitor', {
+          logger.info('Limit order (IOC) placed but no position detected yet, TP orders will be placed by monitor', {
             channel,
             symbol,
             orderId
@@ -1197,7 +1201,7 @@ const executeTradeForAccount = async (
     });
 
     // Update trade record if it was already inserted earlier, otherwise insert it now
-    // (For market orders, trade was inserted earlier to allow closing position if needed)
+    // (For limit orders with IOC timeInForce, trade was inserted earlier to allow closing position if needed)
     if (!tradeId) {
       const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
       tradeId = await db.insertTrade({
