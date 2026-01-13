@@ -302,7 +302,9 @@ export const startTradeOrchestrator = async (
         }
 
         // Not a management command, check if it's a trade signal
-        const newParsed = parseMessage(message.content, parserName);
+        const parserConfig = parserMap.get(parserName);
+        const parserOptions = parserConfig?.entryPriceStrategy ? { entryPriceStrategy: parserConfig.entryPriceStrategy } : undefined;
+        const newParsed = parseMessage(message.content, parserName, parserOptions);
         if (!newParsed) {
           // Not a trade signal either, mark as parsed and skip
           await db.markMessageParsed(message.id);
@@ -524,7 +526,8 @@ export const startTradeOrchestrator = async (
                   await db.markMessageParsed(message.id);
                   continue;
                 }
-                const newParsed = parseMessage(message.content, parser.name);
+                const parserOptions = parser.entryPriceStrategy ? { entryPriceStrategy: parser.entryPriceStrategy } : undefined;
+                const newParsed = parseMessage(message.content, parser.name, parserOptions);
                 if (newParsed) {
                   const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
                   if (existingTrades.length > 0) {

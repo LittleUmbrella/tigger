@@ -1,10 +1,12 @@
 import { ParsedOrder } from '../../../types/order';
 import { validateParsedOrder } from '../../../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../../../utils/deduplication.js';
+import { calculateEntryPrice } from '../../../utils/entryPriceStrategy.js';
+import { ParserOptions } from '../../parserRegistry.js';
 
 const signalTypeRegex = /(?:🟢\s*)?(?:LONG|Long|long)|(?:🔴\s*)?(?:SHORT|Short|short)/i;
 
-export const vipCryptoSignals = (content: string): ParsedOrder | null => {
+export const vipCryptoSignals = (content: string, options?: ParserOptions): ParsedOrder | null => {
   // Channel ID - optional check, don't fail if not present
   const channelIdMatch = content.match(/#(\d+)/);
   if (channelIdMatch && channelIdMatch[1] !== '2427485240') {
@@ -25,7 +27,8 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
   const signalTypeText = signalTypeMatch[0].toLowerCase();
   const signalType: 'long' | 'short' = signalTypeText.includes('short') ? 'short' : 'long';
 
-  // Entry price - extract range and use average value for signal type, or allow "current"/"market"
+  // Entry price - extract range and use configured strategy (default: worst), or allow "current"/"market"
+  const entryPriceStrategy = options?.entryPriceStrategy || 'worst';
   let entryPrice: number | undefined;
   const entryPriceCurrentMatch = content.match(/(?:LONG|BUY|SHORT|SELL|Entry|ENTRY|Entry Price|Entry Targets|Buy)[:\s=]*-?\s*(current|market|CMP)/i);
   if (entryPriceCurrentMatch) {
@@ -37,8 +40,8 @@ export const vipCryptoSignals = (content: string): ParsedOrder | null => {
     if (entryPriceRangeMatch) {
       const price1 = parseFloat(entryPriceRangeMatch[1]);
       const price2 = parseFloat(entryPriceRangeMatch[2]);
-      // Use average of the two prices for both long and short
-      entryPrice = (price1 + price2) / 2;
+      // Use configured strategy (worst or average)
+      entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
     } else {
       // Try "Entry Targets: 1) 51.70 2) 46.00" - use first entry target
       const entryTargetsMatch = content.match(/Entry Targets?\s*:\s*1\)\s*([\d.]+)/i);

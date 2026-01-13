@@ -20,11 +20,11 @@ registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
  * Parse a message using the specified parser name
  * Falls back to default parser if parser not found
  */
-export const parseMessage = (content: string, parserName?: string): ParsedOrder | null => {
+export const parseMessage = (content: string, parserName?: string, options?: { entryPriceStrategy?: 'worst' | 'average' }): ParsedOrder | null => {
   const parser = parserName ? getParserSync(parserName) : null;
   const actualParser = parser || defaultParser;
   
-  return actualParser(content);
+  return actualParser(content, options);
 };
 
 /**
@@ -35,17 +35,20 @@ export const parseMessageWithFallback = async (
   content: string,
   config: ParserConfig
 ): Promise<ParsedOrder | null> => {
+  // Prepare parser options from config
+  const parserOptions = config.entryPriceStrategy ? { entryPriceStrategy: config.entryPriceStrategy } : undefined;
+  
   // Try configured parser first
   const parser = await getParser(config.name);
   if (parser) {
-    const result = parser(content);
+    const result = parser(content, parserOptions);
     if (result) {
       return result;
     }
   }
 
   // Try default parser
-  const defaultResult = defaultParser(content);
+  const defaultResult = defaultParser(content, parserOptions);
   if (defaultResult) {
     return defaultResult;
   }
@@ -93,10 +96,13 @@ export const parseUnparsedMessages = async (
   }
   const parserFunction = parser || defaultParser;
   
+  // Prepare parser options from config
+  const parserOptions = config.entryPriceStrategy ? { entryPriceStrategy: config.entryPriceStrategy } : undefined;
+  
   for (const message of messages) {
     try {
       // Try configured/default parser first (synchronous)
-      let parsed = parserFunction(message.content);
+      let parsed = parserFunction(message.content, parserOptions);
       let usedLLMFallback = false;
       
       // If that fails, try LLM fallback (async)

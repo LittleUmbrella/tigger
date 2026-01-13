@@ -8,9 +8,16 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
- * Parser function type - takes message content and returns parsed order or null
+ * Parser options passed to parser functions
  */
-export type ParserFunction = (content: string) => ParsedOrder | null;
+export interface ParserOptions {
+  entryPriceStrategy?: 'worst' | 'average';
+}
+
+/**
+ * Parser function type - takes message content and optional options, returns parsed order or null
+ */
+export type ParserFunction = (content: string, options?: ParserOptions) => ParsedOrder | null;
 
 /**
  * Registry of parsers by name
