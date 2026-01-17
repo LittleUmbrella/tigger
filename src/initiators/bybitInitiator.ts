@@ -279,7 +279,8 @@ const executeTradeForAccount = async (
 
     // Use baseLeverage as default if leverage is not specified in order
     const baseLeverage = context.config.baseLeverage;
-    const effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
+    // Start with effective leverage, but may be adjusted if position limit error occurs
+    let effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
     
     // Calculate position size based on risk percentage
     const positionSize = calculatePositionSize(
@@ -519,31 +520,361 @@ const executeTradeForAccount = async (
         price: finalEntryPrice
       });
     } else if (bybitClient) {
-      // Set leverage first (use effective leverage)
+      // Proactively check position limits before placing order
+      // Get current position and pending orders to calculate effective position value
+      let currentPositionSize = 0;
+      let pendingOrderSize = 0;
+      
       try {
-        await bybitClient.setLeverage({
+        // Get current position for this symbol
+        const positionResponse = await bybitClient.getPositionInfo({
           category: 'linear',
-          symbol: symbol,
-          buyLeverage: effectiveLeverage.toString(),
-          sellLeverage: effectiveLeverage.toString(),
+          symbol: symbol
         });
+        
+        if (positionResponse.retCode === 0 && positionResponse.result?.list) {
+          const positions = positionResponse.result.list.filter((p: any) => {
+            const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+            return size !== 0;
+          });
+          
+          if (positions.length > 0) {
+            const position = positions[0];
+            const size = parseFloat(getBybitField<string>(position, 'size') || '0');
+            const avgPrice = parseFloat(getBybitField<string>(position, 'avgPrice') || '0');
+            if (size !== 0 && avgPrice > 0) {
+              currentPositionSize = Math.abs(size) * avgPrice;
+            }
+          }
+        }
+        
+        // Get pending orders for this symbol
+        const activeOrdersResponse = await bybitClient.getActiveOrders({
+          category: 'linear',
+          symbol: symbol
+        });
+        
+        if (activeOrdersResponse.retCode === 0 && activeOrdersResponse.result?.list) {
+          const pendingOrders = activeOrdersResponse.result.list.filter((o: any) => {
+            const orderSide = getBybitField<string>(o, 'side');
+            // Only count orders in the same direction as our new order
+            return orderSide === side;
+          });
+          
+          for (const order of pendingOrders) {
+            const orderQty = parseFloat(getBybitField<string>(order, 'qty') || '0');
+            const orderPrice = parseFloat(getBybitField<string>(order, 'price') || '0');
+            if (orderQty > 0 && orderPrice > 0) {
+              pendingOrderSize += orderQty * orderPrice;
+            }
+          }
+        }
+      } catch (error) {
+        logger.debug('Could not fetch position/order info for limit check', {
+          symbol,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        // Continue anyway - we'll rely on retry logic if needed
+      }
+      
+      // Calculate effective position value (current + pending + new order)
+      const effectivePositionValue = currentPositionSize + pendingOrderSize + positionSize;
+      
+      // Proactively check if position might exceed limits
+      // Bybit's position limits are based on leverage and risk tiers
+      // Higher leverage = lower max position size allowed at that leverage tier
+      // As a conservative heuristic: if position size is very large relative to balance * leverage,
+      // we should proactively reduce leverage to avoid hitting limits
+      // Conservative estimate: max position ≈ balance * leverage * 0.5 (very conservative)
+      const positionToBalanceRatio = balance > 0 ? effectivePositionValue / balance : 0;
+      const conservativeMaxPosition = balance * effectiveLeverage * 0.5;
+      
+      if (effectivePositionValue > conservativeMaxPosition && effectiveLeverage > 1 && balance > 0) {
+        // Calculate recommended leverage: if position is too large, reduce leverage
+        // We want: effectivePositionValue <= balance * newLeverage * 0.5
+        // So: newLeverage >= effectivePositionValue / (balance * 0.5)
+        // Use floor to be conservative, but ensure it's at least 1
+        const calculatedLeverage = effectivePositionValue / (balance * 0.5);
+        const recommendedLeverage = Math.max(1, Math.floor(calculatedLeverage));
+        
+        if (recommendedLeverage < effectiveLeverage) {
+          logger.warn('Proactively reducing leverage to avoid position limit error', {
+            channel,
+            symbol,
+            currentLeverage: effectiveLeverage,
+            recommendedLeverage,
+            calculatedLeverage,
+            currentPositionSize,
+            pendingOrderSize,
+            newOrderPositionSize: positionSize,
+            effectivePositionValue,
+            balance,
+            positionToBalanceRatio,
+            conservativeMaxPosition,
+            note: 'This is a conservative estimate - actual limits may vary by symbol and market conditions'
+          });
+          
+          effectiveLeverage = recommendedLeverage;
+        }
+      } else {
+        logger.debug('Position limit check passed', {
+          channel,
+          symbol,
+          leverage: effectiveLeverage,
+          currentPositionSize,
+          pendingOrderSize,
+          newOrderPositionSize: positionSize,
+          effectivePositionValue,
+          balance,
+          positionToBalanceRatio,
+          conservativeMaxPosition
+        });
+      }
+      
+      // Set leverage first (use effective leverage, potentially adjusted)
+      const leverageParams = {
+        category: 'linear' as const,
+        symbol: symbol,
+        buyLeverage: effectiveLeverage.toString(),
+        sellLeverage: effectiveLeverage.toString(),
+      };
+      try {
+        await bybitClient.setLeverage(leverageParams);
         logger.info('Leverage set', { symbol, leverage: effectiveLeverage });
       } catch (error) {
         logger.warn('Failed to set leverage', {
           symbol,
-          leverage: order.leverage,
+          leverage: effectiveLeverage,
+          parameters: leverageParams,
           ...serializeError(error)
         });
       }
 
       // Place the entry order with stop loss (if supported in initial order)
-      const orderResponse = await bybitClient.submitOrder(orderParams);
-      orderId = orderResponse.retCode === 0 && orderResponse.result
-        ? getBybitField<string>(orderResponse.result, 'orderId', 'order_id') || 'unknown'
-        : null;
-
+      // Handle position limit errors by reducing leverage and retrying
+      let orderResponse: any;
+      let retryCount = 0;
+      const maxRetries = 1; // Only retry once with reduced leverage
+      
+      // Helper function to check if error is position limit error (110090)
+      const isPositionLimitError = (responseOrError: any): boolean => {
+        if (responseOrError?.retCode === 110090) {
+          return true;
+        }
+        if (responseOrError instanceof Error) {
+          return responseOrError.message.includes('110090') || 
+                 responseOrError.message.includes('position may exceed the max. limit');
+        }
+        if (typeof responseOrError === 'string') {
+          return responseOrError.includes('110090') || 
+                 responseOrError.includes('position may exceed the max. limit');
+        }
+        return false;
+      };
+      
+      // Helper function to parse recommended leverage from error message
+      // Looks for patterns like "adjust your leverage to 19 or below" or "leverage to 4.9"
+      // Supports both integer and decimal leverage values
+      const parseRecommendedLeverage = (errorMessage: string): number | null => {
+        if (!errorMessage) return null;
+        
+        // Try pattern: "adjust your leverage to X or below" (supports decimals like 4.9)
+        let match = errorMessage.match(/adjust\s+your\s+leverage\s+to\s+([\d.]+)\s+or\s+below/i);
+        if (match && match[1]) {
+          return parseFloat(match[1]);
+        }
+        
+        // Try pattern: "leverage to X or below" (supports decimals)
+        match = errorMessage.match(/leverage\s+to\s+([\d.]+)\s+or\s+below/i);
+        if (match && match[1]) {
+          return parseFloat(match[1]);
+        }
+        
+        // Try pattern: "to X or below" (more generic, supports decimals)
+        match = errorMessage.match(/to\s+([\d.]+)\s+or\s+below/i);
+        if (match && match[1]) {
+          return parseFloat(match[1]);
+        }
+        
+        // Try pattern: "leverage to X" (supports decimals)
+        match = errorMessage.match(/leverage\s+to\s+([\d.]+)/i);
+        if (match && match[1]) {
+          return parseFloat(match[1]);
+        }
+        
+        return null;
+      };
+      
+      while (retryCount <= maxRetries) {
+        try {
+          orderResponse = await bybitClient.submitOrder(orderParams);
+          
+          // Check if order was successful
+          if (orderResponse?.retCode === 0 && orderResponse?.result) {
+            orderId = getBybitField<string>(orderResponse.result, 'orderId', 'order_id') || 'unknown';
+            if (orderId && orderId !== 'unknown') {
+              break; // Success, exit retry loop
+            }
+          }
+          
+          // Check for position limit error (110090)
+          if (isPositionLimitError(orderResponse)) {
+            const errorMsg = orderResponse?.retMsg || orderResponse?.message || '';
+            const recommendedLeverage = parseRecommendedLeverage(errorMsg);
+            
+            logger.warn('Position limit error detected, attempting to reduce leverage', {
+              channel,
+              symbol,
+              retCode: orderResponse?.retCode || 110090,
+              retMsg: errorMsg,
+              currentLeverage: effectiveLeverage,
+              recommendedLeverage,
+              retryCount
+            });
+            
+            // Reduce leverage to recommended value or below (as suggested by Bybit)
+            if (recommendedLeverage !== null && effectiveLeverage > recommendedLeverage) {
+              const newLeverage = recommendedLeverage;
+              logger.info('Reducing leverage to comply with position limit', {
+                channel,
+                symbol,
+                oldLeverage: effectiveLeverage,
+                newLeverage,
+                recommendedByExchange: true
+              });
+              
+              effectiveLeverage = newLeverage;
+              
+              // Update leverage on exchange
+              const reducedLeverageParams = {
+                category: 'linear' as const,
+                symbol: symbol,
+                buyLeverage: effectiveLeverage.toString(),
+                sellLeverage: effectiveLeverage.toString(),
+              };
+              try {
+                await bybitClient.setLeverage(reducedLeverageParams);
+                logger.info('Leverage reduced and set on exchange', { 
+                  symbol, 
+                  leverage: effectiveLeverage 
+                });
+              } catch (leverageError) {
+                logger.warn('Failed to set reduced leverage', {
+                  symbol,
+                  leverage: effectiveLeverage,
+                  parameters: reducedLeverageParams,
+                  ...serializeError(leverageError)
+                });
+                // Continue anyway - might still work
+              }
+              
+              retryCount++;
+              continue; // Retry with reduced leverage
+            } else if (recommendedLeverage === null) {
+              // Could not parse recommended leverage from error message
+              logger.error('Position limit error but could not parse recommended leverage', {
+                channel,
+                symbol,
+                errorMsg,
+                currentLeverage: effectiveLeverage,
+                parameters: orderParams
+              });
+              throw new Error(`Order placement failed: ${JSON.stringify(orderResponse)}`);
+            } else {
+              // Leverage already <= recommended value, but still getting error
+              // This might be a position size issue, throw error
+              logger.error('Position limit error but leverage already at or below recommended value', {
+                channel,
+                symbol,
+                currentLeverage: effectiveLeverage,
+                recommendedLeverage,
+                parameters: orderParams
+              });
+              throw new Error(`Order placement failed: ${JSON.stringify(orderResponse)}`);
+            }
+          } else {
+            // Other error, throw immediately
+            logger.error('Order placement failed with error', {
+              channel,
+              symbol,
+              parameters: orderParams,
+              response: orderResponse
+            });
+            throw new Error(`Order placement failed: ${JSON.stringify(orderResponse)}`);
+          }
+        } catch (error) {
+          // Check if this is a position limit error that we can retry
+          if (isPositionLimitError(error) && retryCount < maxRetries) {
+            const errorMsg = error instanceof Error ? error.message : String(error);
+            const recommendedLeverage = parseRecommendedLeverage(errorMsg);
+            
+            // Position limit error, reduce leverage and retry
+            if (recommendedLeverage !== null && effectiveLeverage > recommendedLeverage) {
+              logger.warn('Position limit error caught, reducing leverage and retrying', {
+                channel,
+                symbol,
+                currentLeverage: effectiveLeverage,
+                recommendedLeverage,
+                error: errorMsg
+              });
+              
+              effectiveLeverage = recommendedLeverage;
+              
+              // Update leverage on exchange
+              const retryLeverageParams = {
+                category: 'linear' as const,
+                symbol: symbol,
+                buyLeverage: effectiveLeverage.toString(),
+                sellLeverage: effectiveLeverage.toString(),
+              };
+              try {
+                await bybitClient.setLeverage(retryLeverageParams);
+                logger.info('Leverage reduced and set on exchange after error', { 
+                  symbol, 
+                  leverage: effectiveLeverage 
+                });
+              } catch (leverageError) {
+                logger.warn('Failed to set reduced leverage after error', {
+                  symbol,
+                  leverage: effectiveLeverage,
+                  parameters: retryLeverageParams,
+                  ...serializeError(leverageError)
+                });
+                // Continue anyway - might still work
+              }
+              
+              retryCount++;
+              continue; // Retry with reduced leverage
+            } else {
+              // Could not parse recommended leverage or already at/below recommended
+              logger.error('Position limit error but cannot reduce leverage further', {
+                channel,
+                symbol,
+                currentLeverage: effectiveLeverage,
+                recommendedLeverage,
+                error: errorMsg,
+                couldNotParse: recommendedLeverage === null,
+                parameters: orderParams
+              });
+              throw error;
+            }
+          }
+          
+          // Re-throw error if not handled
+          logger.error('Order placement error not handled by retry logic', {
+            channel,
+            symbol,
+            parameters: orderParams,
+            retryCount,
+            ...serializeError(error)
+          });
+          throw error;
+        }
+      }
+      
+      // Final check - if orderId is still null after retries, throw error
       if (!orderId) {
-        throw new Error(`Order placement failed: ${JSON.stringify(orderResponse)}`);
+        throw new Error(`Order placement failed after retries: ${JSON.stringify(orderResponse)}`);
       }
 
       // Insert trade record early so we can update it if needed (e.g., if we need to close position)
@@ -609,15 +940,15 @@ const executeTradeForAccount = async (
         // Only try to set stop loss if entry has filled (position exists)
         // If entry hasn't filled, Bybit will apply the stop loss from the initial order when position opens
         if (entryFilled) {
+          const stopLossParams: any = {
+            category: 'linear' as const,
+            symbol: symbol,
+            stopLoss: roundedStopLoss.toString(),
+            positionIdx: 0 as 0 | 1 | 2,
+            tpslMode: 'Full' // Apply stop loss to 100% of position automatically
+          };
+          
           try {
-            const stopLossParams: any = {
-              category: 'linear' as const,
-              symbol: symbol,
-              stopLoss: roundedStopLoss.toString(),
-              positionIdx: 0 as 0 | 1 | 2,
-              tpslMode: 'Full' // Apply stop loss to 100% of position automatically
-            };
-            
             logger.debug('Stop loss parameters being sent to Bybit (entry already filled)', {
               channel,
               symbol,
@@ -664,6 +995,7 @@ const executeTradeForAccount = async (
             logger.warn('Failed to set stop loss after entry fill, monitor will retry', {
               symbol,
               stopLoss: order.stopLoss,
+              parameters: stopLossParams,
               ...serializeError(error)
             });
           }
@@ -802,18 +1134,19 @@ const executeTradeForAccount = async (
             
             // Close the position using reduce-only market order
             if (!isSimulation && bybitClient && actualPositionQty) {
+              const closeSide = order.signalType === 'long' ? 'Sell' : 'Buy';
+              const closeOrderParams = {
+                category: 'linear' as const,
+                symbol: symbol,
+                side: closeSide as 'Buy' | 'Sell',
+                orderType: 'Market' as const,
+                qty: actualPositionQty.toString(),
+                timeInForce: 'IOC' as const,
+                reduceOnly: true,
+                closeOnTrigger: false
+              };
               try {
-                const closeSide = order.signalType === 'long' ? 'Sell' : 'Buy';
-                const closeOrder = await bybitClient.submitOrder({
-                  category: 'linear',
-                  symbol: symbol,
-                  side: closeSide,
-                  orderType: 'Market',
-                  qty: actualPositionQty.toString(),
-                  timeInForce: 'IOC',
-                  reduceOnly: true,
-                  closeOnTrigger: false
-                });
+                const closeOrder = await bybitClient.submitOrder(closeOrderParams);
                 
                 if (closeOrder.retCode === 0 && closeOrder.result) {
                   const closeOrderId = getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown';
@@ -853,6 +1186,7 @@ const executeTradeForAccount = async (
                   symbol,
                   tradeId,
                   orderId,
+                  parameters: closeOrderParams,
                   error: error instanceof Error ? error.message : String(error)
                 });
                 throw error;
@@ -1041,14 +1375,13 @@ const executeTradeForAccount = async (
 
           // Try batch placement first (more atomic)
           let batchSuccess = false;
+          const batchRequestParams = {
+            category: 'linear',
+            request: batchOrders
+          };
           try {
             // Check if batchPlaceOrder method exists
             if (typeof (bybitClient as any).batchPlaceOrder === 'function') {
-            const batchRequestParams = {
-              category: 'linear',
-              request: batchOrders
-            };
-            
             logger.debug('Batch take profit orders request parameters being sent to Bybit', {
               channel,
               symbol,
@@ -1082,6 +1415,7 @@ const executeTradeForAccount = async (
             } else {
               logger.warn('Batch TP order placement failed, falling back to individual orders', {
                 symbol,
+                parameters: batchRequestParams,
                 error: JSON.stringify(batchResponse)
               });
             }
@@ -1089,6 +1423,7 @@ const executeTradeForAccount = async (
         } catch (batchError) {
           logger.warn('Batch placement not available or failed, using individual orders', {
             symbol,
+            parameters: batchRequestParams,
             error: batchError instanceof Error ? batchError.message : String(batchError)
           });
           }
@@ -1144,6 +1479,7 @@ const executeTradeForAccount = async (
                   tpIndex: tpOrder.index,
                   tpPrice: tpOrder.price,
                   tpQty: tpOrder.quantity,
+                  parameters: batchOrders[i],
                   error: JSON.stringify(tpOrderResponse)
                 });
               }
@@ -1158,6 +1494,7 @@ const executeTradeForAccount = async (
                 tpIndex: tpOrder.index,
                 tpPrice: tpOrder.price,
                 tpQty: tpOrder.quantity,
+                parameters: batchOrders[i],
                 ...serializeError(error)
               });
             }

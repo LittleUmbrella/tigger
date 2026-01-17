@@ -657,16 +657,24 @@ const cancelOrder = async (
   try {
     if (trade.exchange === 'bybit' && bybitClient && trade.order_id) {
       const symbol = normalizeBybitSymbol(trade.trading_pair);
-      await bybitClient.cancelOrder({
-        category: 'linear',
+      const cancelOrderParams = {
+        category: 'linear' as const,
         symbol: symbol,
         orderId: trade.order_id
-      });
+      };
+      await bybitClient.cancelOrder(cancelOrderParams);
       logger.info('Order cancelled', { tradeId: trade.id, orderId: trade.order_id });
     }
   } catch (error) {
+    const symbol = trade.exchange === 'bybit' ? normalizeBybitSymbol(trade.trading_pair) : undefined;
+    const cancelOrderParams = trade.exchange === 'bybit' && trade.order_id ? {
+      category: 'linear' as const,
+      symbol: symbol!,
+      orderId: trade.order_id
+    } : undefined;
     logger.error('Error cancelling order', {
       tradeId: trade.id,
+      parameters: cancelOrderParams,
       error: error instanceof Error ? error.message : String(error)
     });
   }
@@ -682,13 +690,14 @@ const updateStopLoss = async (
     if (trade.exchange === 'bybit' && bybitClient) {
       const symbol = normalizeBybitSymbol(trade.trading_pair);
       // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
-      await bybitClient.setTradingStop({
-        category: 'linear',
+      const stopLossParams = {
+        category: 'linear' as const,
         symbol: symbol,
         stopLoss: newStopLoss.toString(),
-        positionIdx: 0,
-        tpslMode: 'Full' // Apply stop loss to 100% of position automatically
-      });
+        positionIdx: 0 as 0 | 1 | 2,
+        tpslMode: 'Full' as const // Apply stop loss to 100% of position automatically
+      };
+      await bybitClient.setTradingStop(stopLossParams);
       
       // Update stop loss order quantity in database for tracking
       // Bybit API automatically covers 100% of position, but we track quantity for consistency
@@ -720,8 +729,17 @@ const updateStopLoss = async (
       });
     }
   } catch (error) {
+    const symbol = trade.exchange === 'bybit' ? normalizeBybitSymbol(trade.trading_pair) : undefined;
+    const stopLossParams = trade.exchange === 'bybit' ? {
+      category: 'linear' as const,
+      symbol: symbol!,
+      stopLoss: newStopLoss.toString(),
+      positionIdx: 0 as 0 | 1 | 2,
+      tpslMode: 'Full' as const
+    } : undefined;
     logger.error('Error updating stop loss', {
       tradeId: trade.id,
+      parameters: stopLossParams,
       error: error instanceof Error ? error.message : String(error)
     });
   }
@@ -979,20 +997,20 @@ const placeTakeProfitOrders = async (
     const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
 
     for (const tpOrder of validTPOrders) {
-      try {
-        const tpOrderParams = {
-          category: 'linear' as const,
-          symbol: symbol,
-          side: tpSide as 'Buy' | 'Sell',
-          orderType: 'Limit' as const,
-          qty: formatQuantity(tpOrder.quantity, decimalPrecision),
-          price: tpOrder.price.toString(),
-          timeInForce: 'GTC' as const,
-          reduceOnly: true,
-          closeOnTrigger: false,
-          positionIdx: positionIdx,
-        };
+      const tpOrderParams = {
+        category: 'linear' as const,
+        symbol: symbol,
+        side: tpSide as 'Buy' | 'Sell',
+        orderType: 'Limit' as const,
+        qty: formatQuantity(tpOrder.quantity, decimalPrecision),
+        price: tpOrder.price.toString(),
+        timeInForce: 'GTC' as const,
+        reduceOnly: true,
+        closeOnTrigger: false,
+        positionIdx: positionIdx,
+      };
 
+      try {
         logger.debug('Placing take profit order from monitor', {
           tradeId: trade.id,
           symbol,
@@ -1040,6 +1058,7 @@ const placeTakeProfitOrders = async (
           logger.warn('Failed to place take profit order from monitor', {
             tradeId: trade.id,
             tpIndex: tpOrder.index,
+            parameters: tpOrderParams,
             error: JSON.stringify(tpOrderResponse)
           });
         }
@@ -1047,6 +1066,7 @@ const placeTakeProfitOrders = async (
         logger.error('Error placing take profit order from monitor', {
           tradeId: trade.id,
           tpIndex: tpOrder.index,
+          parameters: tpOrderParams,
           error: error instanceof Error ? error.message : String(error)
         });
       }
