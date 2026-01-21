@@ -925,16 +925,36 @@ const placeTakeProfitOrders = async (
       decimalPrecision
     );
 
-    // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, and redistribution)
+    // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, maxOrderQty, and redistribution)
+    // Note: Last TP will use remaining quantity to ensure full position coverage (exchange determines final size)
     const minOrderQty = symbolInfo?.minOrderQty;
+    const maxOrderQty = symbolInfo?.maxOrderQty;
     const validTPOrders = validateAndRedistributeTPQuantities(
       tpQuantities,
       roundedTPPrices,
       positionSize,
       qtyStep,
       minOrderQty,
+      maxOrderQty,
       decimalPrecision
     );
+    
+    // Log that last TP uses remaining quantity (similar to SL with tpslMode='Full')
+    if (validTPOrders.length > 0) {
+      const lastTP = validTPOrders[validTPOrders.length - 1];
+      const allocatedQty = validTPOrders.slice(0, -1).reduce((sum, tp) => sum + tp.quantity, 0);
+      const remainingQty = positionSize - allocatedQty;
+      logger.info('Last TP order uses remaining quantity to close entire position', {
+        tradeId: trade.id,
+        symbol,
+        lastTPIndex: lastTP.index,
+        lastTPQuantity: lastTP.quantity,
+        remainingQuantity: remainingQty,
+        totalPositionQty: positionSize,
+        allocatedQty,
+        note: 'Bybit will automatically adjust last TP quantity to match available position size when executing (similar to SL with tpslMode=Full)'
+      });
+    }
 
     // Log redistribution if fewer TPs than expected
     if (validTPOrders.length < takeProfits.length) {

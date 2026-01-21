@@ -25,7 +25,7 @@ const logOptions = (commandName: string, options: Record<string, unknown>): void
 const program = new Command();
 program
   .name("find-channels")
-  .description("List or search Telegram channels you're a member of (GramJS)")
+  .description("List or search Telegram dialogs (channels, groups, and private chats) (GramJS)")
   .option("-s, --search <term>", "Search term (case-insensitive)")
   .option("--api-id <id>", "Telegram API ID (override .env)")
   .option("--api-hash <hash>", "Telegram API hash (override .env)")
@@ -93,42 +93,89 @@ if (!apiId || !apiHash) {
 
   const term = opts.search ? opts.search.toLowerCase() : null;
 
-  const channels = dialogs
+  const dialogsList = dialogs
     .filter((d) => {
-      if (!d.isChannel || !d.entity) return false;
+      if (!d.entity) return false;
       if (!term) return true;
+      
+      // Search in channels
       if (d.entity instanceof Api.Channel) {
         return d.entity.title.toLowerCase().includes(term);
+      }
+      // Search in groups
+      if (d.entity instanceof Api.Chat) {
+        return d.entity.title.toLowerCase().includes(term);
+      }
+      // Search in private chats (users)
+      if (d.entity instanceof Api.User) {
+        const firstName = d.entity.firstName || "";
+        const lastName = d.entity.lastName || "";
+        const fullName = `${firstName} ${lastName}`.trim().toLowerCase();
+        const username = (d.entity.username || "").toLowerCase();
+        return fullName.includes(term) || username.includes(term);
       }
       return false;
     })
     .map((d) => {
-      if (!d.entity || !(d.entity instanceof Api.Channel)) {
-        throw new Error("Expected Channel entity");
+      if (!d.entity) {
+        throw new Error("Dialog has no entity");
       }
-      return {
-        title: d.entity.title,
-        id: d.entity.id,
-        accessHash: d.entity.accessHash,
-        username: d.entity.username || "(none)",
-      };
+      
+      // Handle channels
+      if (d.entity instanceof Api.Channel) {
+        return {
+          type: "Channel",
+          name: d.entity.title,
+          id: d.entity.id,
+          accessHash: d.entity.accessHash,
+          username: d.entity.username || "(none)",
+        };
+      }
+      
+      // Handle groups
+      if (d.entity instanceof Api.Chat) {
+        return {
+          type: "Group",
+          name: d.entity.title,
+          id: d.entity.id,
+          accessHash: BigInt(0), // Groups don't have accessHash
+          username: "(none)",
+        };
+      }
+      
+      // Handle private chats (users)
+      if (d.entity instanceof Api.User) {
+        const firstName = d.entity.firstName || "";
+        const lastName = d.entity.lastName || "";
+        const fullName = `${firstName} ${lastName}`.trim() || "(no name)";
+        return {
+          type: "Private Chat",
+          name: fullName,
+          id: d.entity.id,
+          accessHash: d.entity.accessHash || BigInt(0),
+          username: d.entity.username || "(none)",
+        };
+      }
+      
+      throw new Error(`Unknown entity type: ${d.entity.className}`);
     });
 
-  if (!channels.length) {
+  if (!dialogsList.length) {
     console.log(term
-      ? `⚠️ No channels found matching "${opts.search}".`
-      : "⚠️ No channel dialogs found.");
+      ? `⚠️ No dialogs found matching "${opts.search}".`
+      : "⚠️ No dialogs found.");
     await client.disconnect();
     process.exit(0);
   }
 
-  console.log(`✅ Found ${channels.length} channel(s):\n`);
-  for (const c of channels) {
+  console.log(`✅ Found ${dialogsList.length} dialog(s):\n`);
+  for (const d of dialogsList) {
     console.log("────────────────────────────────────");
-    console.log(`📛 Title:       ${c.title}`);
-    console.log(`🆔 ID:          ${c.id}`);
-    console.log(`🔑 AccessHash:  ${c.accessHash}`);
-    console.log(`🔗 Username:    ${c.username}`);
+    console.log(`📋 Type:        ${d.type}`);
+    console.log(`📛 Name:        ${d.name}`);
+    console.log(`🆔 ID:          ${d.id}`);
+    console.log(`🔑 AccessHash:  ${d.accessHash}`);
+    console.log(`🔗 Username:    ${d.username}`);
   }
   console.log("────────────────────────────────────");
 
