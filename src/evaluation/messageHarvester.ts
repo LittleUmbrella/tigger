@@ -192,11 +192,11 @@ async function harvestTelegramMessages(
         let alreadyProcessedCount = 0; // Track messages skipped because already processed (for newer messages mode)
 
         for (const msg of ordered) {
-          if (!('message' in msg) || !msg.message) {
+          if (!msg || !('message' in msg) || !msg.message) {
             batchSkipped++;
             logger.debug('Skipping message: no message content', {
               channel: options.channel,
-              messageId: msg.id
+              messageId: msg?.id
             });
             continue;
           }
