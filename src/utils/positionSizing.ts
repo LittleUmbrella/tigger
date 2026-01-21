@@ -281,16 +281,24 @@ export const distributeQuantityAcrossTPs = (
  * Validates and redistributes TP quantities to handle rounding issues and minimum order requirements
  * 
  * This function:
- * 1. Rounds TP quantities to qtyStep
+ * 1. Rounds TP quantities to qtyStep (except the last TP)
  * 2. Identifies TPs that round to zero or below minOrderQty
  * 3. Redistributes skipped quantities to remaining valid TPs
  * 4. Uses minOrderQty as fallback for TPs that can't be redistributed
+ * 5. For the last TP, uses remaining quantity rounded UP to ensure full position coverage
+ *    (Bybit will adjust it down to available position when executing due to reduceOnly: true)
+ * 6. Validates quantities don't exceed maxOrderQty after redistribution and caps/redistributes if needed
+ * 
+ * Key feature: Last TP quantity is rounded UP (not down) to ensure no quantity is ever lost.
+ * This guarantees the sum of all TP quantities >= position size. Bybit's reduceOnly: true
+ * ensures the order only fills up to the available position size, similar to SL with tpslMode='Full'.
  * 
  * @param tpQuantities - Initial distributed TP quantities (before qtyStep rounding)
  * @param tpPrices - Rounded TP prices (must match tpQuantities length)
- * @param positionSize - Total position size (for minOrderQty fallback validation)
+ * @param positionSize - Total position size (for minOrderQty fallback validation and last TP calculation)
  * @param qtyStep - Quantity step from exchange (if undefined, inferred from decimalPrecision)
  * @param minOrderQty - Minimum order quantity from exchange (0 or undefined means no minimum)
+ * @param maxOrderQty - Maximum order quantity from exchange (undefined means no maximum)
  * @param decimalPrecision - Decimal precision for quantity (used if qtyStep is not provided)
  * @returns Array of valid TP orders with { index: number (1-based), price: number, quantity: number }
  */
@@ -300,15 +308,20 @@ export const validateAndRedistributeTPQuantities = (
   positionSize: number,
   qtyStep: number | undefined,
   minOrderQty: number | undefined,
+  maxOrderQty: number | undefined,
   decimalPrecision: number
 ): Array<{ index: number; price: number; quantity: number }> => {
   if (tpQuantities.length !== tpPrices.length) {
     throw new Error(`TP quantities (${tpQuantities.length}) and prices (${tpPrices.length}) must have the same length`);
   }
 
-  // Round quantities to qtyStep if specified
+  // Round quantities to qtyStep if specified (except the last TP - it will use remaining quantity)
   const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
-  let roundedTPQuantities = tpQuantities.map(qty => {
+  let roundedTPQuantities = tpQuantities.map((qty, idx) => {
+    // Don't round the last TP yet - it will use remaining quantity
+    if (idx === tpQuantities.length - 1) {
+      return qty; // Keep original for now
+    }
     if (effectiveQtyStep > 0) {
       return Math.floor(qty / effectiveQtyStep) * effectiveQtyStep;
     }
@@ -318,19 +331,20 @@ export const validateAndRedistributeTPQuantities = (
   // Get minimum order quantity (default to 0 if not provided)
   const minQty = minOrderQty !== undefined && minOrderQty > 0 ? minOrderQty : 0;
 
-  // Identify TP orders that round to zero or below minimum
+  // Identify TP orders that round to zero or below minimum (excluding the last TP)
   const skippedTPs: number[] = [];
-  for (let i = 0; i < roundedTPQuantities.length; i++) {
+  for (let i = 0; i < roundedTPQuantities.length - 1; i++) { // Exclude last TP from this check
     const qty = roundedTPQuantities[i];
     if (qty === 0 || (minQty > 0 && qty < minQty)) {
       skippedTPs.push(i);
     }
   }
 
-  // If any TPs were skipped, redistribute their quantity to remaining TPs
-  if (skippedTPs.length > 0 && skippedTPs.length < roundedTPQuantities.length) {
+  // If any TPs were skipped, redistribute their quantity to remaining TPs (excluding the last TP)
+  if (skippedTPs.length > 0 && skippedTPs.length < roundedTPQuantities.length - 1) {
     const skippedQuantity = skippedTPs.reduce((sum, idx) => sum + tpQuantities[idx], 0);
     const validTPIndices = roundedTPQuantities
+      .slice(0, -1) // Exclude last TP
       .map((qty, idx) => ({ qty, idx }))
       .filter(({ qty }) => qty > 0 && (minQty === 0 || qty >= minQty))
       .map(({ idx }) => idx);
@@ -352,25 +366,206 @@ export const validateAndRedistributeTPQuantities = (
 
   // Build list of valid TP orders (skip zero quantities, but use minOrderQty as fallback if needed)
   const validTPOrders: Array<{ index: number; price: number; quantity: number }> = [];
+  const lastTPIndex = tpPrices.length - 1;
+  
   for (let i = 0; i < tpPrices.length; i++) {
+    const isLastTP = i === lastTPIndex;
     let qty = roundedTPQuantities[i];
     
-    // If quantity is zero or below minimum, try using minOrderQty as fallback
-    if (qty === 0 || (minQty > 0 && qty < minQty)) {
+    // For non-last TPs, handle zero or below minimum quantities
+    if (!isLastTP) {
+      if (qty === 0 || (minQty > 0 && qty < minQty)) {
+        if (minQty > 0 && positionSize >= minQty) {
+          // Use minimum order quantity as fallback - exchange will adjust to available position if needed
+          qty = minQty;
+        } else {
+          // Can't use minOrderQty fallback - skip this TP
+          continue;
+        }
+      }
+      
+      // Add non-last TP if quantity is valid
+      if (qty > 0) {
+        validTPOrders.push({
+          index: i + 1, // 1-based index
+          price: tpPrices[i],
+          quantity: qty
+        });
+      }
+    }
+  }
+  
+  // Handle the last TP separately - use remaining quantity to ensure full position coverage
+  // This ensures the total always adds up to the full position size (exchange will determine final size)
+  if (lastTPIndex >= 0) {
+    // Calculate sum of all valid TP orders already added
+    const allocatedQty = validTPOrders.reduce((sum, tp) => sum + tp.quantity, 0);
+    // Use remaining quantity - exchange will determine final size (similar to SL with tpslMode='Full')
+    let remainingQty = positionSize - allocatedQty;
+    
+    // Round the last TP quantity UP (not down) to ensure we never lose quantity
+    // Bybit will adjust it down to available position when executing due to reduceOnly: true
+    let roundedRemainingQty = remainingQty;
+    if (effectiveQtyStep > 0 && remainingQty > 0) {
+      // Round UP to next qtyStep to ensure we capture all remaining quantity
+      roundedRemainingQty = Math.ceil(remainingQty / effectiveQtyStep) * effectiveQtyStep;
+    }
+    
+    // Ensure last TP quantity is at least minQty if specified
+    if (minQty > 0 && roundedRemainingQty < minQty && positionSize >= minQty) {
+      roundedRemainingQty = minQty;
+    }
+    
+    // Check if last TP quantity is valid
+    const isLastTPValid = roundedRemainingQty > 0 && (minQty === 0 || roundedRemainingQty >= minQty);
+    
+    if (isLastTPValid) {
+      // Last TP quantity is valid - add it
+      // Note: Quantity may be slightly larger than remaining position, but Bybit will adjust
+      // it down to available position when executing due to reduceOnly: true (similar to SL with tpslMode='Full')
+      validTPOrders.push({
+        index: lastTPIndex + 1, // 1-based index
+        price: tpPrices[lastTPIndex],
+        quantity: roundedRemainingQty
+      });
+    } else if (remainingQty > 0 && validTPOrders.length > 0) {
+      // Last TP quantity is invalid (below minQty or rounded to 0) but we have remaining quantity
+      // Redistribute remaining quantity across existing valid TPs to ensure full position coverage
+      const redistributionPerTP = remainingQty / validTPOrders.length;
+      
+      for (let i = 0; i < validTPOrders.length; i++) {
+        const newQty = validTPOrders[i].quantity + redistributionPerTP;
+        // Round again after redistribution
+        if (effectiveQtyStep > 0) {
+          validTPOrders[i].quantity = Math.floor(newQty / effectiveQtyStep) * effectiveQtyStep;
+        } else {
+          validTPOrders[i].quantity = newQty;
+        }
+      }
+      
+      // Recalculate remaining quantity after redistribution (may have rounding differences)
+      const finalAllocatedQty = validTPOrders.reduce((sum, tp) => sum + tp.quantity, 0);
+      const finalRemainingQty = positionSize - finalAllocatedQty;
+      
+      // If there's still a small remaining quantity after redistribution, add it to the last valid TP
+      // (this handles rounding differences and ensures full position coverage)
+      if (finalRemainingQty > 0 && validTPOrders.length > 0) {
+        const lastValidTP = validTPOrders[validTPOrders.length - 1];
+        const newLastQty = lastValidTP.quantity + finalRemainingQty;
+        // Round one more time
+        if (effectiveQtyStep > 0) {
+          lastValidTP.quantity = Math.floor(newLastQty / effectiveQtyStep) * effectiveQtyStep;
+        } else {
+          lastValidTP.quantity = newLastQty;
+        }
+      }
+    } else if (remainingQty > 0 && validTPOrders.length === 0) {
+      // No valid TPs exist, but we have remaining quantity - use minQty if available
       if (minQty > 0 && positionSize >= minQty) {
-        // Use minimum order quantity as fallback - exchange will adjust to available position if needed
-        qty = minQty;
+        validTPOrders.push({
+          index: lastTPIndex + 1,
+          price: tpPrices[lastTPIndex],
+          quantity: minQty // Exchange will adjust to available position
+        });
+      }
+    } else if (remainingQty > 0 && roundedRemainingQty === 0 && validTPOrders.length > 0) {
+      // Remaining quantity rounded to 0, but we still have unallocated quantity due to rounding
+      // Add the unrounded remainder to the last valid TP to ensure full coverage
+      const lastValidTP = validTPOrders[validTPOrders.length - 1];
+      const newLastQty = lastValidTP.quantity + remainingQty;
+      if (effectiveQtyStep > 0) {
+        lastValidTP.quantity = Math.floor(newLastQty / effectiveQtyStep) * effectiveQtyStep;
       } else {
-        // Can't use minOrderQty fallback - skip this TP
-        continue;
+        lastValidTP.quantity = newLastQty;
+      }
+    }
+    // If remainingQty <= 0, all quantity has been allocated - nothing to do
+  }
+
+  // Validate quantities don't exceed maxOrderQty after redistribution
+  // If any TP quantity exceeds maxOrderQty, cap it and redistribute the excess
+  if (maxOrderQty !== undefined && maxOrderQty > 0 && validTPOrders.length > 0) {
+    const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+    let excessQty = 0;
+    let hasExcess = false;
+
+    // First pass: cap quantities that exceed maxOrderQty and collect excess
+    for (const tpOrder of validTPOrders) {
+      if (tpOrder.quantity > maxOrderQty) {
+        hasExcess = true;
+        const cappedQty = Math.floor(maxOrderQty / effectiveQtyStep) * effectiveQtyStep;
+        excessQty += tpOrder.quantity - cappedQty;
+        tpOrder.quantity = cappedQty;
       }
     }
 
-    validTPOrders.push({
-      index: i + 1, // 1-based index
-      price: tpPrices[i],
-      quantity: qty
-    });
+    // If we have excess quantity, redistribute it across TPs that are below maxOrderQty
+    if (hasExcess && excessQty > 0) {
+      // Iteratively redistribute excess until all is distributed or no more TPs can accept it
+      let remainingExcess = excessQty;
+      let iterations = 0;
+      const maxIterations = 10; // Prevent infinite loops
+      
+      while (remainingExcess > 0 && iterations < maxIterations) {
+        iterations++;
+        const tpsBelowMax = validTPOrders.filter(tp => tp.quantity < maxOrderQty);
+        
+        if (tpsBelowMax.length === 0) {
+          // No TPs can accept more quantity - stop redistribution
+          break;
+        }
+        
+        // Redistribute remaining excess evenly across TPs below max
+        const redistributionPerTP = remainingExcess / tpsBelowMax.length;
+        let newExcess = 0;
+        
+        for (const tpOrder of tpsBelowMax) {
+          let newQty = tpOrder.quantity + redistributionPerTP;
+          
+          // Cap at maxOrderQty if redistribution would exceed it
+          if (newQty > maxOrderQty) {
+            const cappedQty = Math.floor(maxOrderQty / effectiveQtyStep) * effectiveQtyStep;
+            newExcess += newQty - cappedQty; // Track new excess from capping
+            newQty = cappedQty;
+          }
+          
+          // Round to qtyStep
+          if (effectiveQtyStep > 0) {
+            tpOrder.quantity = Math.floor(newQty / effectiveQtyStep) * effectiveQtyStep;
+          } else {
+            tpOrder.quantity = newQty;
+          }
+        }
+        
+        // Update remaining excess (may have increased due to rounding/capping)
+        const allocatedQty = validTPOrders.reduce((sum, tp) => sum + tp.quantity, 0);
+        remainingExcess = positionSize - allocatedQty;
+        
+        // If excess is very small (less than qtyStep), stop to avoid infinite loops
+        if (remainingExcess < effectiveQtyStep) {
+          break;
+        }
+      }
+      
+      // If there's still a small remaining excess after redistribution (due to rounding),
+      // add it to the last TP (but cap at maxOrderQty)
+      if (remainingExcess > 0 && validTPOrders.length > 0) {
+        const lastTP = validTPOrders[validTPOrders.length - 1];
+        let newLastQty = lastTP.quantity + remainingExcess;
+        
+        // Cap at maxOrderQty
+        if (newLastQty > maxOrderQty) {
+          newLastQty = Math.floor(maxOrderQty / effectiveQtyStep) * effectiveQtyStep;
+        }
+        
+        // Round to qtyStep
+        if (effectiveQtyStep > 0) {
+          lastTP.quantity = Math.floor(newLastQty / effectiveQtyStep) * effectiveQtyStep;
+        } else {
+          lastTP.quantity = newLastQty;
+        }
+      }
+    }
   }
 
   return validTPOrders;
