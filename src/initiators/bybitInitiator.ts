@@ -110,7 +110,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutDays, message, order, db, isSimulation, priceProvider, config } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config } = context;
 
   try {
     // Get API credentials for this account
@@ -352,6 +352,11 @@ const executeTradeForAccount = async (
     // Round entry price to exchange precision
     const roundedEntryPrice = roundPrice(finalEntryPrice, pricePrecision, tickSize);
     
+    // Validate rounded entry price is valid (must be > 0)
+    if (!roundedEntryPrice || roundedEntryPrice <= 0 || !isFinite(roundedEntryPrice)) {
+      throw new Error(`Invalid rounded entry price: ${roundedEntryPrice} (original: ${finalEntryPrice}, pricePrecision: ${pricePrecision}, tickSize: ${tickSize})`);
+    }
+    
     // Calculate quantity with exchange-provided precision (using rounded entry price)
     let qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
     
@@ -414,13 +419,17 @@ const executeTradeForAccount = async (
       });
     }
     
-    // Final validation: ensure quantity is valid (positive and non-zero)
-    if (qty <= 0) {
+    // Final validation: ensure quantity is valid (positive, non-zero, and finite)
+    if (!isFinite(qty) || qty <= 0) {
       throw new Error(`Invalid quantity calculated: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice}, qtyStep: ${effectiveQtyStep})`);
     }
 
     // Format quantity string with proper precision (remove trailing zeros, ensure correct decimal places)
     const formatQuantity = (quantity: number, precision: number): string => {
+      // Validate quantity is finite before formatting (prevents "Infinity" string)
+      if (!isFinite(quantity) || quantity <= 0) {
+        throw new Error(`Cannot format invalid quantity: ${quantity}`);
+      }
       // If qtyStep is specified, quantity should already be rounded to qtyStep
       // Just format it with the correct precision without additional rounding
       // Format to string with exact precision, removing trailing zeros
@@ -434,6 +443,11 @@ const executeTradeForAccount = async (
       ? roundPrice(order.stopLoss, pricePrecision, tickSize)
       : order.stopLoss;
 
+    // Validate quantity is finite before formatting (prevents "Infinity" string)
+    if (!isFinite(qty)) {
+      throw new Error(`Quantity is not finite: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice})`);
+    }
+    
     const qtyString = formatQuantity(qty, decimalPrecision);
     
     logger.info('Calculated trade parameters', {
@@ -464,6 +478,11 @@ const executeTradeForAccount = async (
     
     // Declare tradeId early so it's available throughout the function
     let tradeId: number | undefined;
+    
+    // Final validation before creating order params: ensure price is valid
+    if (!roundedEntryPrice || roundedEntryPrice <= 0 || !isFinite(roundedEntryPrice)) {
+      throw new Error(`Cannot create order: invalid price ${roundedEntryPrice} for symbol ${symbol}`);
+    }
     
     // Using Bybit Futures API (linear perpetuals)
     // Create order at entry price (limit order, even if originally market)
@@ -901,7 +920,7 @@ const executeTradeForAccount = async (
       }
 
       // Insert trade record early so we can update it if needed (e.g., if we need to close position)
-      const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
+      const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
       try {
         tradeId = await db.insertTrade({
           message_id: message.message_id,
@@ -1619,7 +1638,7 @@ const executeTradeForAccount = async (
     // Update trade record if it was already inserted earlier, otherwise insert it now
     // (For limit orders with IOC timeInForce, trade was inserted earlier to allow closing position if needed)
     if (!tradeId) {
-      const expiresAt = dayjs().add(entryTimeoutDays, 'days').toISOString();
+      const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
       tradeId = await db.insertTrade({
         message_id: message.message_id,
         channel: channel,
@@ -1714,7 +1733,7 @@ const executeTradeForAccount = async (
     // In simulation mode, pre-fetch price data for this trade
     if (isSimulation && priceProvider) {
       const messageTime = dayjs(message.date);
-      const maxDuration = entryTimeoutDays + 1; // Add 1 day buffer
+      const maxDuration = entryTimeoutMinutes + 1440; // Add 1 day (1440 minutes) buffer
       priceProvider.prefetchPriceData(order.tradingPair, messageTime, maxDuration).catch(error => {
         logger.warn('Failed to pre-fetch price data', {
           tradingPair: order.tradingPair,

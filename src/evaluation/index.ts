@@ -148,7 +148,7 @@ program
             type: 'bybit',
             testnet: false,
             pollInterval: 10000,
-            entryTimeoutDays: 2,
+            entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
             breakevenAfterTPs: parseInt(options.breakevenAfterTps || '1', 10),
           },
           propFirms,

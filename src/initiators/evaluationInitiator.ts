@@ -20,7 +20,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   const {
     channel,
     riskPercentage,
-    entryTimeoutDays,
+    entryTimeoutMinutes,
     message,
     order,
     db,
@@ -186,7 +186,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   // Store trade in database (use normalized trading pair and rounded prices)
   // Use message date for created_at in evaluation mode to ensure proper historical simulation
   const messageDate = dayjs(message.date);
-  const expiresAt = messageDate.add(entryTimeoutDays, 'days').toISOString();
+  const expiresAt = messageDate.add(entryTimeoutMinutes, 'minutes').toISOString();
   const tradeId = await db.insertTrade({
     message_id: message.message_id,
     channel: channel,

@@ -1184,7 +1184,7 @@ const checkOrderFilled = async (
 const monitorTrade = async (
   channel: string,
   monitorType: 'bybit' | 'dex',
-  entryTimeoutDays: number,
+  entryTimeoutMinutes: number,
   trade: Trade,
   db: DatabaseManager,
   bybitClient: RestClientV5 | undefined,
@@ -1674,7 +1674,7 @@ export const startTradeMonitor = async (
 
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
-  const entryTimeoutDays = monitorConfig.entryTimeoutDays || 2;
+  const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
 
   const monitorLoop = async (): Promise<void> => {
@@ -1690,7 +1690,7 @@ export const startTradeMonitor = async (
           const accountClient = getBybitClient 
             ? getBybitClient(trade.account_name)
             : bybitClient; // Fallback to legacy client
-          await monitorTrade(channel, monitorConfig.type, entryTimeoutDays, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs);
+          await monitorTrade(channel, monitorConfig.type, entryTimeoutMinutes, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs);
         }
 
         // Skip sleep in maximum speed mode

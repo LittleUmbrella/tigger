@@ -99,7 +99,7 @@ export interface MonitorConfig {
   type: 'bybit' | 'dex';
   testnet?: boolean;
   pollInterval?: number; // milliseconds
-  entryTimeoutDays?: number; // days to wait for entry before cancelling
+  entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
 }
 

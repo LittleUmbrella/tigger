@@ -128,7 +128,7 @@ export async function runEvaluation(
   await processUnparsedMessages(
     initiatorConfig,
     channel,
-    monitorConfig.entryTimeoutDays || 2,
+    monitorConfig.entryTimeoutMinutes || 2880, // Default: 2 days = 2880 minutes
     db,
     true, // isSimulation
     priceProvider,

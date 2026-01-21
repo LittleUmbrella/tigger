@@ -763,13 +763,13 @@ export const startTradeOrchestrator = async (
           continue;
         }
         
-        const entryTimeoutDays = monitor?.entryTimeoutDays || 2;
+        const entryTimeoutMinutes = monitor?.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
         
         // Process all unparsed messages (they will be sorted chronologically in processUnparsedMessages)
         await processUnparsedMessages(
           initiator,
           channelConfig.channel,
-          entryTimeoutDays,
+          entryTimeoutMinutes,
           db,
           isSimulation,
           priceProvider,
@@ -815,12 +815,12 @@ export const startTradeOrchestrator = async (
           continue;
         }
         
-        const entryTimeoutDays = monitor?.entryTimeoutDays || 2;
+        const entryTimeoutMinutes = monitor?.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
         
         processUnparsedMessages(
           initiator,
           channelConfig.channel,
-          entryTimeoutDays,
+          entryTimeoutMinutes,
           db,
           isSimulation,
           priceProvider,

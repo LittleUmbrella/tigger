@@ -63,7 +63,7 @@
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "pollInterval": 3000,
-      "entryTimeoutDays": 1
+      "entryTimeoutMinutes": 1440
     }
   ],
   "channels": [
@@ -85,7 +85,7 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 25
+      "baseLeverage": 50
     }
   ],
   "database": {
