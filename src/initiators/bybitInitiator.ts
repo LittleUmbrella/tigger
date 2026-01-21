@@ -215,6 +215,29 @@ const executeTradeForAccount = async (
       logger.debug('Symbol validated', { originalTradingPair: order.tradingPair, normalizedSymbol: symbol });
     }
     
+    // Check for existing open positions for the same symbol to prevent multiple positions
+    // This ensures stop loss always applies to 100% of the position
+    const existingTrades = await db.getActiveTrades();
+    const existingTradeForSymbol = existingTrades.find(t => 
+      t.trading_pair === order.tradingPair && 
+      (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
+    );
+    
+    if (existingTradeForSymbol) {
+      logger.info('Skipping trade - existing open position for symbol', {
+        channel,
+        symbol,
+        tradingPair: order.tradingPair,
+        existingTradeId: existingTradeForSymbol.id,
+        existingTradeStatus: existingTradeForSymbol.status,
+        existingTradeCreatedAt: existingTradeForSymbol.created_at,
+        messageId: message.message_id
+      });
+      // Mark message as parsed to avoid reprocessing
+      await db.markMessageParsed(message.id);
+      return;
+    }
+    
     // Determine side (Buy for long, Sell for short)
     const side = order.signalType === 'long' ? 'Buy' : 'Sell';
     
@@ -1262,15 +1285,34 @@ const executeTradeForAccount = async (
             decimalPrecision
           );
 
-          // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, and redistribution)
+          // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, maxOrderQty, and redistribution)
+          // Note: Last TP will use remaining quantity to ensure full position coverage (exchange determines final size)
           const validTPOrders = validateAndRedistributeTPQuantities(
             tpQuantities,
             roundedTPPrices,
             qty,
             qtyStep,
             minOrderQty,
+            maxOrderQty,
             decimalPrecision
           );
+          
+          // Log that last TP uses remaining quantity (similar to SL with tpslMode='Full')
+          if (validTPOrders.length > 0) {
+            const lastTP = validTPOrders[validTPOrders.length - 1];
+            const allocatedQty = validTPOrders.slice(0, -1).reduce((sum, tp) => sum + tp.quantity, 0);
+            const remainingQty = qty - allocatedQty;
+            logger.info('Last TP order uses remaining quantity to close entire position', {
+              channel,
+              symbol,
+              lastTPIndex: lastTP.index,
+              lastTPQuantity: lastTP.quantity,
+              remainingQuantity: remainingQty,
+              totalPositionQty: qty,
+              allocatedQty,
+              note: 'Bybit will automatically adjust last TP quantity to match available position size when executing (similar to SL with tpslMode=Full)'
+            });
+          }
 
           // Log redistribution if fewer TPs than expected
           if (validTPOrders.length < order.takeProfits.length) {
