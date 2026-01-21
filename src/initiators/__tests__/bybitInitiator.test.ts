@@ -32,7 +32,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,
@@ -62,7 +62,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 5, // 5% risk
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,
@@ -92,7 +92,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: {
         ...mockMessage,
         content: 'Short signal for ETH',
@@ -121,7 +121,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,
@@ -144,7 +144,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,
@@ -167,7 +167,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: {
         ...mockParsedOrder,
@@ -195,7 +195,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 3,
+      entryTimeoutMinutes: 4320, // 3 days = 4320 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,
@@ -214,7 +214,7 @@ describe('Bybit Initiator', () => {
     const insertCall = (mockDb.insertTrade as any).mock.calls[0][0];
     const expiresAt = new Date(insertCall.expires_at);
     const now = new Date();
-    const expectedExpiry = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const expectedExpiry = new Date(now.getTime() + 4320 * 60 * 1000); // 4320 minutes = 3 days
     
     // Allow 1 second tolerance for test execution time
     expect(Math.abs(expiresAt.getTime() - expectedExpiry.getTime())).toBeLessThan(1000);
@@ -224,7 +224,7 @@ describe('Bybit Initiator', () => {
     const context: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 3,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: mockMessage,
       order: mockParsedOrder,
       db: mockDb,

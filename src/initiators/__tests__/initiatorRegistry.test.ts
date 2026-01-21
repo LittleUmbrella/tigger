@@ -80,7 +80,7 @@ describe('Initiator Registry', () => {
     const mockContext: InitiatorContext = {
       channel: 'test_channel',
       riskPercentage: 5,
-      entryTimeoutDays: 2,
+      entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: {
         id: 1,
         message_id: 123,

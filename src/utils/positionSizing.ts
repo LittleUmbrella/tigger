@@ -200,6 +200,11 @@ export const calculateQuantity = (
   entryPrice: number,
   decimalPrecision: number
 ): number => {
+  // Validate entry price to prevent division by zero
+  if (!entryPrice || entryPrice <= 0 || !isFinite(entryPrice)) {
+    throw new Error(`Invalid entry price for quantity calculation: ${entryPrice}`);
+  }
+  
   const rawQuantity = positionSize / entryPrice;
   const multiplier = Math.pow(10, decimalPrecision);
   const roundedQuantity = Math.floor(rawQuantity * multiplier) / multiplier;

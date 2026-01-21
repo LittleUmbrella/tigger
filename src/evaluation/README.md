@@ -198,7 +198,7 @@ You can also use a configuration file for more complex setups:
       "type": "bybit",
       "testnet": false,
       "pollInterval": 10000,
-      "entryTimeoutDays": 2,
+      "entryTimeoutMinutes": 2880, // 2 days = 2880 minutes
       "breakevenAfterTPs": 1
     },
     "propFirms": [

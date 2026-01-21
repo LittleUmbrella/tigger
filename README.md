@@ -125,7 +125,7 @@ The configuration file has four main sections:
 4. **monitors**: Array of monitor configurations (by type)
    - `type`: Either "bybit" or "dex" (dex not yet implemented)
    - `pollInterval`: Polling interval in milliseconds (default: 10000)
-   - `entryTimeoutDays`: Days to wait for entry before cancelling (default: 2)
+   - `entryTimeoutMinutes`: Minutes to wait for entry before cancelling (default: 2880, which is 2 days)
    - `breakevenAfterTPs`: Number of take profits to hit before moving stop-loss to breakeven (default: 1)
 
 5. **channels**: Array of channel sets that combine harvesters, parsers, initiators, and monitors

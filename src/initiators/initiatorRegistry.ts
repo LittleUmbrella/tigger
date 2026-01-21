@@ -10,7 +10,7 @@ import { logger } from '../utils/logger.js';
 export interface InitiatorContext {
   channel: string;
   riskPercentage: number;
-  entryTimeoutDays: number;
+  entryTimeoutMinutes: number;
   message: Message;
   order: ParsedOrder;
   db: DatabaseManager;

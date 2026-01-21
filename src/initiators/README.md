@@ -23,7 +23,7 @@ export const myExchangeInitiator: InitiatorFunction = async (context: InitiatorC
   const { 
     channel, 
     riskPercentage, 
-    entryTimeoutDays, 
+    entryTimeoutMinutes, 
     message, 
     order, 
     db, 
@@ -65,7 +65,7 @@ export const myExchangeInitiator: InitiatorFunction = async (context: InitiatorC
         order_id: orderId,
         status: 'pending',
         stop_loss_breakeven: false,
-        expires_at: new Date(Date.now() + entryTimeoutDays * 24 * 60 * 60 * 1000).toISOString()
+        expires_at: new Date(Date.now() + entryTimeoutMinutes * 60 * 1000).toISOString()
       });
     } else {
       // Handle live trading
@@ -136,7 +136,7 @@ Your initiator function must:
 interface InitiatorContext {
   channel: string;                    // Channel name
   riskPercentage: number;             // Risk percentage from config
-  entryTimeoutDays: number;           // Days to wait for entry
+  entryTimeoutMinutes: number;        // Minutes to wait for entry
   message: Message;                   // Original Telegram message
   order: ParsedOrder;                 // Parsed order data
   db: DatabaseManager;                // Database instance
