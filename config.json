@@ -46,6 +46,16 @@
         "apiKey": "BYBIT_DEMO_API_KEY",
         "apiSecret": "BYBIT_DEMO_API_SECRET"
       }
+    },
+    {
+      "name": "hyrotrader_challenge1",
+      "exchange": "bybit",
+      "demo": true,
+      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
+      "envVarNames": {
+        "apiKey": "BYBIT_DEMO_API_KEY_HYROTRADER_CHALLENGE1",
+        "apiSecret": "BYBIT_DEMO_API_SECRET_HYROTRADER_CHALLENGE1"
+      }
     }
   ],
   "initiators": [
@@ -54,7 +64,7 @@
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "riskPercentage": 1,
-      "accounts": ["demo"]
+      "accounts": ["demo", "hyrotrader_challenge1"]
     }
   ],
   "monitors": [
