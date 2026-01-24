@@ -205,10 +205,11 @@ export const startTradeOrchestrator = async (
       }
       state.stopHarvesters.push(stopHarvester);
 
-      // Merge channel-specific breakevenAfterTPs override with monitor config
+      // Merge channel-specific breakevenAfterTPs and entryTimeoutMinutes overrides with monitor config
       const monitorConfigWithOverride: MonitorConfig = {
         ...monitor,
-        breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs
+        breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs,
+        entryTimeoutMinutes: channelConfig.entryTimeoutMinutes ?? monitor.entryTimeoutMinutes
       };
 
       // Start monitor for this channel
@@ -763,7 +764,7 @@ export const startTradeOrchestrator = async (
           continue;
         }
         
-        const entryTimeoutMinutes = monitor?.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
+        const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
         
         // Process all unparsed messages (they will be sorted chronologically in processUnparsedMessages)
         await processUnparsedMessages(
@@ -815,7 +816,7 @@ export const startTradeOrchestrator = async (
           continue;
         }
         
-        const entryTimeoutMinutes = monitor?.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
+        const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
         
         processUnparsedMessages(
           initiator,

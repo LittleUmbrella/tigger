@@ -1116,496 +1116,519 @@ const executeTradeForAccount = async (
         if (positionSide) {
           // Only place TP orders if entry order has filled and we have position side
           
-          // Step 1: Validate with current market price first (already done earlier)
-          // Step 2: Validate with actual entry fill price from position
-          
-          // Use actual entry price if available, otherwise fall back to finalEntryPrice
-          const entryPriceForValidation = actualEntryPrice || finalEntryPrice;
-          
-          // Step 3: Validate TP prices against actual entry fill price
-          // Filter out invalid TPs and recalculate quantities if needed
-          let validTPPrices = [...roundedTPPrices];
-          let validTPIndices: number[] = [];
-          
-          // Check each TP price against entry price
-          validTPPrices.forEach((tpPrice, index) => {
-            const isValid = order.signalType === 'long' 
-              ? tpPrice > entryPriceForValidation 
-              : tpPrice < entryPriceForValidation;
-            
-            if (isValid) {
-              validTPIndices.push(index);
+          // Check if TP orders already exist in database before placing on exchange
+          // This prevents race conditions with the monitor that also places TP orders
+          let shouldPlaceTPOrders = true;
+          if (tradeId) {
+            const existingOrders = await db.getOrdersByTradeId(tradeId);
+            const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
+            if (existingTPOrders.length > 0) {
+              logger.info('Take profit orders already exist in database, skipping placement on exchange', {
+                tradeId,
+                symbol,
+                existingTPCount: existingTPOrders.length,
+                existingTPIndices: existingTPOrders.map(o => o.tp_index).filter(i => i !== undefined)
+              });
+              // Skip placing TP orders - they already exist
+              // Note: tpOrderIds will remain empty, so we won't try to store duplicates later
+              shouldPlaceTPOrders = false;
             }
-          });
-          
-          // Filter to only valid TPs
-          validTPPrices = validTPPrices.filter((tpPrice, index) => {
-            return order.signalType === 'long' 
-              ? tpPrice > entryPriceForValidation 
-              : tpPrice < entryPriceForValidation;
-          });
-          
-          if (validTPPrices.length < roundedTPPrices.length) {
-            const removedCount = roundedTPPrices.length - validTPPrices.length;
-            logger.warn('Some TP prices invalid relative to actual entry fill price - removing invalid TPs', {
-              channel,
-              symbol,
-              entryPriceForValidation,
-              actualEntryPrice,
-              finalEntryPrice,
-              originalTPs: roundedTPPrices,
-              validTPs: validTPPrices,
-              removedCount,
-              signalType: order.signalType
-            });
           }
           
-          // Step 4: If no valid TPs remain, close the position
-          if (validTPPrices.length === 0) {
-            logger.error('No valid TP prices relative to actual entry fill price - closing position', {
-              channel,
-              symbol,
-              entryPriceForValidation,
-              actualEntryPrice,
-              finalEntryPrice,
-              originalTPs: roundedTPPrices,
-              stopLoss: order.stopLoss,
-              signalType: order.signalType,
-              note: 'All TP prices were invalid, closing position immediately'
-            });
+          if (shouldPlaceTPOrders) {
+            // No existing TP orders, proceed with placement
             
-            // Close the position using reduce-only market order
-            if (!isSimulation && bybitClient && actualPositionQty) {
-              const closeSide = order.signalType === 'long' ? 'Sell' : 'Buy';
-              const closeOrderParams = {
-                category: 'linear' as const,
-                symbol: symbol,
-                side: closeSide as 'Buy' | 'Sell',
-                orderType: 'Market' as const,
-                qty: actualPositionQty.toString(),
-                timeInForce: 'IOC' as const,
-                reduceOnly: true,
-                closeOnTrigger: false
-              };
-              try {
-                const closeOrder = await bybitClient.submitOrder(closeOrderParams);
-                
-                if (closeOrder.retCode === 0 && closeOrder.result) {
-                  const closeOrderId = getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown';
-                  logger.info('Position closed due to invalid TP prices', {
-                    channel,
-                    symbol,
-                    tradeId,
-                    entryOrderId: orderId,
-                    closeOrderId
-                  });
-                  
-                  // Update trade status
-                  if (tradeId) {
-                    try {
-                      await db.updateTrade(tradeId, {
-                        status: 'closed',
-                        exit_filled_at: dayjs().toISOString()
-                      });
-                    } catch (error) {
-                      logger.warn('Could not update trade status after closing position', {
-                        channel,
-                        symbol,
-                        tradeId,
-                        error: error instanceof Error ? error.message : String(error)
-                      });
-                    }
-                  }
-                  
-                  // Don't place TP orders - position is already closed
-                  return;
-                } else {
-                  throw new Error(`Failed to close position: ${JSON.stringify(closeOrder)}`);
-                }
-              } catch (error) {
-                logger.error('Failed to close position with invalid TPs', {
-                  channel,
-                  symbol,
-                  tradeId,
-                  orderId,
-                  parameters: closeOrderParams,
-                  error: error instanceof Error ? error.message : String(error)
-                });
-                throw error;
+            // Step 1: Validate with current market price first (already done earlier)
+            // Step 2: Validate with actual entry fill price from position
+            
+            // Use actual entry price if available, otherwise fall back to finalEntryPrice
+            const entryPriceForValidation = actualEntryPrice || finalEntryPrice;
+            
+            // Step 3: Validate TP prices against actual entry fill price
+            // Filter out invalid TPs and recalculate quantities if needed
+            let validTPPrices = [...roundedTPPrices];
+            let validTPIndices: number[] = [];
+            
+            // Check each TP price against entry price
+            validTPPrices.forEach((tpPrice, index) => {
+              const isValid = order.signalType === 'long' 
+                ? tpPrice > entryPriceForValidation 
+                : tpPrice < entryPriceForValidation;
+              
+              if (isValid) {
+                validTPIndices.push(index);
               }
-            } else {
-              // Simulation mode - mark trade as closed
-              if (tradeId) {
-                try {
-                  await db.updateTrade(tradeId, {
-                    status: 'closed',
-                    exit_filled_at: dayjs().toISOString()
-                  });
-                } catch (error) {
-                  logger.warn('Could not update trade status in simulation', {
-                    channel,
-                    symbol,
-                    tradeId,
-                    error: error instanceof Error ? error.message : String(error)
-                  });
-                }
-              }
-              logger.info('Simulated position close due to invalid TP prices', {
-                channel,
-                symbol,
-                tradeId
-              });
-              return;
-            }
-          }
-          
-          // Step 5: Deduplicate valid TP prices (in case validation didn't catch duplicates)
-          const deduplicatedValidTPs = deduplicateTakeProfits(validTPPrices, order.signalType);
-          
-          // Step 6: Recalculate TP quantities for remaining valid TPs
-          // Use the deduplicated valid TP prices and recalculate quantities
-          roundedTPPrices = deduplicatedValidTPs;
-          
-          if (deduplicatedValidTPs.length < validTPPrices.length) {
-            logger.info('Removed duplicate TP prices after validation', {
-              channel,
-              symbol,
-              beforeDedupCount: validTPPrices.length,
-              afterDedupCount: deduplicatedValidTPs.length,
-              removedCount: validTPPrices.length - deduplicatedValidTPs.length
             });
-          }
-          
-          logger.info('Using filtered TP prices after validation', {
-            channel,
-            symbol,
-            originalTPCount: order.takeProfits.length,
-            validTPCount: roundedTPPrices.length,
-            validTPPrices: roundedTPPrices
-          });
-        
-          // Verify position side matches expected side
-          const expectedPositionSide = order.signalType === 'long' ? 'Buy' : 'Sell';
-        if (positionSide !== expectedPositionSide) {
-          logger.error('Position side mismatch', {
-            channel,
-            symbol,
-            orderId,
-            expectedPositionSide,
-            actualPositionSide: positionSide,
-            note: 'TP orders may fail due to side mismatch'
-          });
-        }
-
-          // Distribute quantity evenly across remaining valid TPs (last TP rounded up)
-          const tpQuantities = distributeQuantityAcrossTPs(
-            qty,
-            validTPPrices.length, // Use filtered count, not original
-            decimalPrecision
-          );
-
-          // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, maxOrderQty, and redistribution)
-          // Note: Last TP will use remaining quantity to ensure full position coverage (exchange determines final size)
-          const validTPOrders = validateAndRedistributeTPQuantities(
-            tpQuantities,
-            roundedTPPrices,
-            qty,
-            qtyStep,
-            minOrderQty,
-            maxOrderQty,
-            decimalPrecision
-          );
-          
-          // Log that last TP uses remaining quantity (similar to SL with tpslMode='Full')
-          if (validTPOrders.length > 0) {
-            const lastTP = validTPOrders[validTPOrders.length - 1];
-            const allocatedQty = validTPOrders.slice(0, -1).reduce((sum, tp) => sum + tp.quantity, 0);
-            const remainingQty = qty - allocatedQty;
-            logger.info('Last TP order uses remaining quantity to close entire position', {
-              channel,
-              symbol,
-              lastTPIndex: lastTP.index,
-              lastTPQuantity: lastTP.quantity,
-              remainingQuantity: remainingQty,
-              totalPositionQty: qty,
-              allocatedQty,
-              note: 'Bybit will automatically adjust last TP quantity to match available position size when executing (similar to SL with tpslMode=Full)'
-            });
-          }
-
-          // Log redistribution if fewer TPs than expected
-          if (validTPOrders.length < order.takeProfits.length) {
-            const skippedCount = order.takeProfits.length - validTPOrders.length;
-            const skippedIndices: number[] = [];
-            const validIndices = validTPOrders.map(tp => tp.index);
-            for (let i = 1; i <= order.takeProfits.length; i++) {
-              if (!validIndices.includes(i)) {
-                skippedIndices.push(i);
-              }
-            }
             
-            if (skippedIndices.length > 0 && validTPOrders.length > 0) {
-              logger.info('Redistributed skipped TP quantities to remaining TPs', {
+            // Filter to only valid TPs
+            validTPPrices = validTPPrices.filter((tpPrice, index) => {
+              return order.signalType === 'long' 
+                ? tpPrice > entryPriceForValidation 
+                : tpPrice < entryPriceForValidation;
+            });
+            
+            if (validTPPrices.length < roundedTPPrices.length) {
+              const removedCount = roundedTPPrices.length - validTPPrices.length;
+              logger.warn('Some TP prices invalid relative to actual entry fill price - removing invalid TPs', {
                 channel,
                 symbol,
-                skippedTPs: skippedIndices,
-                redistributedTo: validIndices
+                entryPriceForValidation,
+                actualEntryPrice,
+                finalEntryPrice,
+                originalTPs: roundedTPPrices,
+                validTPs: validTPPrices,
+                removedCount,
+                signalType: order.signalType
               });
             }
             
-            logger.warn('Placing fewer TP orders than expected due to quantity constraints', {
-              channel,
-              symbol,
-              expectedTPs: order.takeProfits.length,
-              actualTPs: validTPOrders.length,
-              skipped: skippedCount,
-              note: 'Some portion of the position may not have TP orders'
-            });
-          }
-
-          // Log fallback usage for any TP orders that used minOrderQty
-          for (const tpOrder of validTPOrders) {
-            const originalQty = tpQuantities[tpOrder.index - 1];
-            const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
-            const roundedQty = Math.floor(originalQty / effectiveQtyStep) * effectiveQtyStep;
-            if (tpOrder.quantity === minOrderQty && (roundedQty === 0 || (minOrderQty !== undefined && minOrderQty > 0 && roundedQty < minOrderQty))) {
-              logger.warn('Using minimum order quantity as fallback for TP order', {
+            // Step 4: If no valid TPs remain, close the position
+            if (validTPPrices.length === 0) {
+              logger.error('No valid TP prices relative to actual entry fill price - closing position', {
                 channel,
                 symbol,
-                tpIndex: tpOrder.index,
-                tpPrice: tpOrder.price,
-                originalQty: roundedQty,
-                minOrderQty,
-                note: 'Bybit will adjust quantity to available position size if needed'
-              });
-            }
-          }
-
-          if (validTPOrders.length === 0) {
-            logger.error('No valid TP orders to place - all quantities are zero or below minimum', {
-              channel,
-              symbol,
-              qty,
-              numTPs: order.takeProfits.length,
-              minOrderQty
-            });
-            // Don't throw error - let the monitor handle TP placement later
-            logger.warn('TP orders will be placed by monitor after entry fills', {
-              channel,
-              symbol,
-              orderId
-            });
-          }
-
-          // Determine opposite side for TP orders based on actual position side
-          // For a Long position (Buy side), TP is Sell
-          // For a Short position (Sell side), TP is Buy
-          const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
-
-          // Prepare batch order requests using only valid TP orders
-          // Always use reduceOnly=true since we have a confirmed position
-          const batchOrders = validTPOrders.map((tpOrder) => ({
-          category: 'linear' as const,
-          symbol: symbol,
-          side: tpSide as 'Buy' | 'Sell',
-          orderType: 'Limit' as const,
-          qty: formatQuantity(tpOrder.quantity, decimalPrecision),
-          price: tpOrder.price.toString(),
-          timeInForce: 'GTC' as const,
-          reduceOnly: true, // Always reduce-only since we have a position
-            closeOnTrigger: false,
-            positionIdx: 0 as 0 | 1 | 2,
-          }));
-
-          // Log TP order parameters before sending to Bybit
-          logger.debug('Take profit orders parameters being sent to Bybit', {
-          channel,
-          symbol,
-          positionSide,
-          tpSide,
-          numTPs: batchOrders.length,
-          expectedTPs: order.takeProfits.length,
-          batchOrders: JSON.stringify(batchOrders, null, 2),
-          batchOrdersFormatted: batchOrders.map((order, i) => ({
-            index: validTPOrders[i].index,
-            ...order,
-              tpPrice: validTPOrders[i].price,
-              tpQty: validTPOrders[i].quantity
-            }))
-          });
-
-          // Try batch placement first (more atomic)
-          let batchSuccess = false;
-          const batchRequestParams = {
-            category: 'linear',
-            request: batchOrders
-          };
-          try {
-            // Check if batchPlaceOrder method exists
-            if (typeof (bybitClient as any).batchPlaceOrder === 'function') {
-            logger.debug('Batch take profit orders request parameters being sent to Bybit', {
-              channel,
-              symbol,
-              batchRequestParams: JSON.stringify(batchRequestParams, null, 2),
-              batchRequestParamsFormatted: batchRequestParams
-            });
-            
-            const batchResponse = await (bybitClient as any).batchPlaceOrder(batchRequestParams);
-
-            if (batchResponse.retCode === 0 && batchResponse.result && batchResponse.result.list && Array.isArray(batchResponse.result.list)) {
-              batchSuccess = true;
-              // Collect order IDs from batch response
-              batchResponse.result.list.forEach((result: any, i: number) => {
-                const orderId = getBybitField<string>(result, 'orderId', 'order_id');
-                if (orderId && i < validTPOrders.length) {
-                  tpOrderIds.push({
-                    index: validTPOrders[i].index - 1, // Convert to 0-based for array compatibility
-                    orderId: orderId,
-                    price: validTPOrders[i].price,
-                    quantity: validTPOrders[i].quantity,
-                    tpIndex: validTPOrders[i].index // Store 1-based TP index for database
-                  });
-                }
-              });
-              logger.info('Take profit orders placed via batch', {
-                symbol,
-                numTPs: validTPOrders.length,
-                expectedTPs: order.takeProfits.length,
-                orderIds: tpOrderIds.map(tp => tp.orderId)
-              });
-            } else {
-              logger.warn('Batch TP order placement failed, falling back to individual orders', {
-                symbol,
-                parameters: batchRequestParams,
-                error: JSON.stringify(batchResponse)
-              });
-            }
-          }
-        } catch (batchError) {
-          logger.warn('Batch placement not available or failed, using individual orders', {
-            symbol,
-            parameters: batchRequestParams,
-            error: batchError instanceof Error ? batchError.message : String(batchError)
-          });
-          }
-
-          // Fallback to individual orders if batch failed or not available
-          if (!batchSuccess) {
-          let tpSuccessCount = 0;
-          const tpErrors: Array<{ index: number; error: string }> = [];
-
-          for (let i = 0; i < validTPOrders.length; i++) {
-            const tpOrder = validTPOrders[i];
-
-            try {
-              // Log individual TP order parameters before sending
-              logger.debug('Individual take profit order parameters being sent to Bybit', {
-                channel,
-                symbol,
-                tpIndex: tpOrder.index,
-                orderParams: JSON.stringify(batchOrders[i], null, 2),
-                orderParamsFormatted: batchOrders[i],
-                tpPrice: tpOrder.price,
-                tpQty: tpOrder.quantity
+                entryPriceForValidation,
+                actualEntryPrice,
+                finalEntryPrice,
+                originalTPs: roundedTPPrices,
+                stopLoss: order.stopLoss,
+                signalType: order.signalType,
+                note: 'All TP prices were invalid, closing position immediately'
               });
               
-              const tpOrderResponse = await bybitClient.submitOrder(batchOrders[i]);
-
-              if (tpOrderResponse.retCode === 0 && tpOrderResponse.result) {
-                tpSuccessCount++;
-                const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
-                if (tpOrderId) {
-                  tpOrderIds.push({
-                    index: tpOrder.index - 1, // Convert to 0-based for array compatibility
-                    orderId: tpOrderId,
-                    price: tpOrder.price,
-                    quantity: tpOrder.quantity,
-                    tpIndex: tpOrder.index // Store 1-based TP index for database
+              // Close the position using reduce-only market order
+              if (!isSimulation && bybitClient && actualPositionQty) {
+                const closeSide = order.signalType === 'long' ? 'Sell' : 'Buy';
+                const closeOrderParams = {
+                  category: 'linear' as const,
+                  symbol: symbol,
+                  side: closeSide as 'Buy' | 'Sell',
+                  orderType: 'Market' as const,
+                  qty: actualPositionQty.toString(),
+                  timeInForce: 'IOC' as const,
+                  reduceOnly: true,
+                  closeOnTrigger: false
+                };
+                try {
+                  const closeOrder = await bybitClient.submitOrder(closeOrderParams);
+                  
+                  if (closeOrder.retCode === 0 && closeOrder.result) {
+                    const closeOrderId = getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown';
+                    logger.info('Position closed due to invalid TP prices', {
+                      channel,
+                      symbol,
+                      tradeId,
+                      entryOrderId: orderId,
+                      closeOrderId
+                    });
+                    
+                    // Update trade status
+                    if (tradeId) {
+                      try {
+                        await db.updateTrade(tradeId, {
+                          status: 'closed',
+                          exit_filled_at: dayjs().toISOString()
+                        });
+                      } catch (error) {
+                        logger.warn('Could not update trade status after closing position', {
+                          channel,
+                          symbol,
+                          tradeId,
+                          error: error instanceof Error ? error.message : String(error)
+                        });
+                      }
+                    }
+                    
+                    // Don't place TP orders - position is already closed
+                    return;
+                  } else {
+                    throw new Error(`Failed to close position: ${JSON.stringify(closeOrder)}`);
+                  }
+                } catch (error) {
+                  logger.error('Failed to close position with invalid TPs', {
+                    channel,
+                    symbol,
+                    tradeId,
+                    orderId,
+                    parameters: closeOrderParams,
+                    error: error instanceof Error ? error.message : String(error)
                   });
+                  throw error;
                 }
-                logger.info('Take profit order placed', {
+              } else {
+                // Simulation mode - mark trade as closed
+                if (tradeId) {
+                  try {
+                    await db.updateTrade(tradeId, {
+                      status: 'closed',
+                      exit_filled_at: dayjs().toISOString()
+                    });
+                  } catch (error) {
+                    logger.warn('Could not update trade status in simulation', {
+                      channel,
+                      symbol,
+                      tradeId,
+                      error: error instanceof Error ? error.message : String(error)
+                    });
+                  }
+                }
+                logger.info('Simulated position close due to invalid TP prices', {
+                  channel,
+                  symbol,
+                  tradeId
+                });
+                return;
+              }
+            }
+            
+            // Step 5: Deduplicate valid TP prices (in case validation didn't catch duplicates)
+            const deduplicatedValidTPs = deduplicateTakeProfits(validTPPrices, order.signalType);
+            
+            // Step 6: Recalculate TP quantities for remaining valid TPs
+            // Use the deduplicated valid TP prices and recalculate quantities
+            roundedTPPrices = deduplicatedValidTPs;
+            
+            if (deduplicatedValidTPs.length < validTPPrices.length) {
+              logger.info('Removed duplicate TP prices after validation', {
+                channel,
+                symbol,
+                beforeDedupCount: validTPPrices.length,
+                afterDedupCount: deduplicatedValidTPs.length,
+                removedCount: validTPPrices.length - deduplicatedValidTPs.length
+              });
+            }
+            
+            logger.info('Using filtered TP prices after validation', {
+              channel,
+              symbol,
+              originalTPCount: order.takeProfits.length,
+              validTPCount: roundedTPPrices.length,
+              validTPPrices: roundedTPPrices
+            });
+          
+            // Verify position side matches expected side
+            const expectedPositionSide = order.signalType === 'long' ? 'Buy' : 'Sell';
+          if (positionSide !== expectedPositionSide) {
+            logger.error('Position side mismatch', {
+              channel,
+              symbol,
+              orderId,
+              expectedPositionSide,
+              actualPositionSide: positionSide,
+              note: 'TP orders may fail due to side mismatch'
+            });
+          }
+
+            // Distribute quantity evenly across remaining valid TPs (last TP rounded up)
+            const tpQuantities = distributeQuantityAcrossTPs(
+              qty,
+              validTPPrices.length, // Use filtered count, not original
+              decimalPrecision
+            );
+
+            // Validate and redistribute TP quantities (handles qtyStep rounding, minOrderQty, maxOrderQty, and redistribution)
+            // Note: Last TP will use remaining quantity to ensure full position coverage (exchange determines final size)
+            const validTPOrders = validateAndRedistributeTPQuantities(
+              tpQuantities,
+              roundedTPPrices,
+              qty,
+              qtyStep,
+              minOrderQty,
+              maxOrderQty,
+              decimalPrecision
+            );
+            
+            // Log that last TP uses remaining quantity (similar to SL with tpslMode='Full')
+            if (validTPOrders.length > 0) {
+              const lastTP = validTPOrders[validTPOrders.length - 1];
+              const allocatedQty = validTPOrders.slice(0, -1).reduce((sum, tp) => sum + tp.quantity, 0);
+              const remainingQty = qty - allocatedQty;
+              logger.info('Last TP order uses remaining quantity to close entire position', {
+                channel,
+                symbol,
+                lastTPIndex: lastTP.index,
+                lastTPQuantity: lastTP.quantity,
+                remainingQuantity: remainingQty,
+                totalPositionQty: qty,
+                allocatedQty,
+                note: 'Bybit will automatically adjust last TP quantity to match available position size when executing (similar to SL with tpslMode=Full)'
+              });
+            }
+
+            // Log redistribution if fewer TPs than expected
+            if (validTPOrders.length < order.takeProfits.length) {
+              const skippedCount = order.takeProfits.length - validTPOrders.length;
+              const skippedIndices: number[] = [];
+              const validIndices = validTPOrders.map(tp => tp.index);
+              for (let i = 1; i <= order.takeProfits.length; i++) {
+                if (!validIndices.includes(i)) {
+                  skippedIndices.push(i);
+                }
+              }
+              
+              if (skippedIndices.length > 0 && validTPOrders.length > 0) {
+                logger.info('Redistributed skipped TP quantities to remaining TPs', {
+                  channel,
+                  symbol,
+                  skippedTPs: skippedIndices,
+                  redistributedTo: validIndices
+                });
+              }
+              
+              logger.warn('Placing fewer TP orders than expected due to quantity constraints', {
+                channel,
+                symbol,
+                expectedTPs: order.takeProfits.length,
+                actualTPs: validTPOrders.length,
+                skipped: skippedCount,
+                note: 'Some portion of the position may not have TP orders'
+              });
+            }
+
+            // Log fallback usage for any TP orders that used minOrderQty
+            for (const tpOrder of validTPOrders) {
+              const originalQty = tpQuantities[tpOrder.index - 1];
+              const effectiveQtyStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+              const roundedQty = Math.floor(originalQty / effectiveQtyStep) * effectiveQtyStep;
+              if (tpOrder.quantity === minOrderQty && (roundedQty === 0 || (minOrderQty !== undefined && minOrderQty > 0 && roundedQty < minOrderQty))) {
+                logger.warn('Using minimum order quantity as fallback for TP order', {
+                  channel,
                   symbol,
                   tpIndex: tpOrder.index,
                   tpPrice: tpOrder.price,
-                  tpQty: tpOrder.quantity,
-                  tpOrderId
+                  originalQty: roundedQty,
+                  minOrderQty,
+                  note: 'Bybit will adjust quantity to available position size if needed'
+                });
+              }
+            }
+
+            if (validTPOrders.length === 0) {
+              logger.error('No valid TP orders to place - all quantities are zero or below minimum', {
+                channel,
+                symbol,
+                qty,
+                numTPs: order.takeProfits.length,
+                minOrderQty
+              });
+              // Don't throw error - let the monitor handle TP placement later
+              logger.warn('TP orders will be placed by monitor after entry fills', {
+                channel,
+                symbol,
+                orderId
+              });
+            }
+
+            // Determine opposite side for TP orders based on actual position side
+            // For a Long position (Buy side), TP is Sell
+            // For a Short position (Sell side), TP is Buy
+            const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
+
+            // Prepare batch order requests using only valid TP orders
+            // Always use reduceOnly=true since we have a confirmed position
+            const batchOrders = validTPOrders.map((tpOrder) => ({
+            category: 'linear' as const,
+            symbol: symbol,
+            side: tpSide as 'Buy' | 'Sell',
+            orderType: 'Limit' as const,
+            qty: formatQuantity(tpOrder.quantity, decimalPrecision),
+            price: tpOrder.price.toString(),
+            timeInForce: 'GTC' as const,
+            reduceOnly: true, // Always reduce-only since we have a position
+              closeOnTrigger: false,
+              positionIdx: 0 as 0 | 1 | 2,
+            }));
+
+            // Log TP order parameters before sending to Bybit
+            logger.debug('Take profit orders parameters being sent to Bybit', {
+            channel,
+            symbol,
+            positionSide,
+            tpSide,
+            numTPs: batchOrders.length,
+            expectedTPs: order.takeProfits.length,
+            batchOrders: JSON.stringify(batchOrders, null, 2),
+            batchOrdersFormatted: batchOrders.map((order, i) => ({
+              index: validTPOrders[i].index,
+              ...order,
+                tpPrice: validTPOrders[i].price,
+                tpQty: validTPOrders[i].quantity
+              }))
+            });
+
+            // Try batch placement first (more atomic)
+            let batchSuccess = false;
+            const batchRequestParams = {
+              category: 'linear',
+              request: batchOrders
+            };
+            try {
+              // Check if batchPlaceOrder method exists
+              if (typeof (bybitClient as any).batchPlaceOrder === 'function') {
+              logger.debug('Batch take profit orders request parameters being sent to Bybit', {
+                channel,
+                symbol,
+                batchRequestParams: JSON.stringify(batchRequestParams, null, 2),
+                batchRequestParamsFormatted: batchRequestParams
+              });
+              
+              const batchResponse = await (bybitClient as any).batchPlaceOrder(batchRequestParams);
+
+              if (batchResponse.retCode === 0 && batchResponse.result && batchResponse.result.list && Array.isArray(batchResponse.result.list)) {
+                batchSuccess = true;
+                // Collect order IDs from batch response
+                batchResponse.result.list.forEach((result: any, i: number) => {
+                  const orderId = getBybitField<string>(result, 'orderId', 'order_id');
+                  if (orderId && i < validTPOrders.length) {
+                    tpOrderIds.push({
+                      index: validTPOrders[i].index - 1, // Convert to 0-based for array compatibility
+                      orderId: orderId,
+                      price: validTPOrders[i].price,
+                      quantity: validTPOrders[i].quantity,
+                      tpIndex: validTPOrders[i].index // Store 1-based TP index for database
+                    });
+                  }
+                });
+                logger.info('Take profit orders placed via batch', {
+                  symbol,
+                  numTPs: validTPOrders.length,
+                  expectedTPs: order.takeProfits.length,
+                  orderIds: tpOrderIds.map(tp => tp.orderId)
                 });
               } else {
+                logger.warn('Batch TP order placement failed, falling back to individual orders', {
+                  symbol,
+                  parameters: batchRequestParams,
+                  error: JSON.stringify(batchResponse)
+                });
+              }
+            }
+          } catch (batchError) {
+            logger.warn('Batch placement not available or failed, using individual orders', {
+              symbol,
+              parameters: batchRequestParams,
+              error: batchError instanceof Error ? batchError.message : String(batchError)
+            });
+            }
+
+            // Fallback to individual orders if batch failed or not available
+            if (!batchSuccess) {
+            let tpSuccessCount = 0;
+            const tpErrors: Array<{ index: number; error: string }> = [];
+
+            for (let i = 0; i < validTPOrders.length; i++) {
+              const tpOrder = validTPOrders[i];
+
+              try {
+                // Log individual TP order parameters before sending
+                logger.debug('Individual take profit order parameters being sent to Bybit', {
+                  channel,
+                  symbol,
+                  tpIndex: tpOrder.index,
+                  orderParams: JSON.stringify(batchOrders[i], null, 2),
+                  orderParamsFormatted: batchOrders[i],
+                  tpPrice: tpOrder.price,
+                  tpQty: tpOrder.quantity
+                });
+                
+                const tpOrderResponse = await bybitClient.submitOrder(batchOrders[i]);
+
+                if (tpOrderResponse.retCode === 0 && tpOrderResponse.result) {
+                  tpSuccessCount++;
+                  const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
+                  if (tpOrderId) {
+                    tpOrderIds.push({
+                      index: tpOrder.index - 1, // Convert to 0-based for array compatibility
+                      orderId: tpOrderId,
+                      price: tpOrder.price,
+                      quantity: tpOrder.quantity,
+                      tpIndex: tpOrder.index // Store 1-based TP index for database
+                    });
+                  }
+                  logger.info('Take profit order placed', {
+                    symbol,
+                    tpIndex: tpOrder.index,
+                    tpPrice: tpOrder.price,
+                    tpQty: tpOrder.quantity,
+                    tpOrderId
+                  });
+                } else {
+                  tpErrors.push({
+                    index: tpOrder.index,
+                    error: JSON.stringify(tpOrderResponse)
+                  });
+                  logger.warn('Failed to place take profit order', {
+                    symbol,
+                    tpIndex: tpOrder.index,
+                    tpPrice: tpOrder.price,
+                    tpQty: tpOrder.quantity,
+                    parameters: batchOrders[i],
+                    error: JSON.stringify(tpOrderResponse)
+                  });
+                }
+                } catch (error) {
+                const serialized = serializeError(error);
                 tpErrors.push({
                   index: tpOrder.index,
-                  error: JSON.stringify(tpOrderResponse)
+                  error: serialized.error
                 });
-                logger.warn('Failed to place take profit order', {
+                logger.warn('Error placing take profit order', {
                   symbol,
                   tpIndex: tpOrder.index,
                   tpPrice: tpOrder.price,
                   tpQty: tpOrder.quantity,
                   parameters: batchOrders[i],
-                  error: JSON.stringify(tpOrderResponse)
+                  ...serializeError(error)
                 });
               }
-              } catch (error) {
-              const serialized = serializeError(error);
-              tpErrors.push({
-                index: tpOrder.index,
-                error: serialized.error
-              });
-              logger.warn('Error placing take profit order', {
-                symbol,
-                tpIndex: tpOrder.index,
-                tpPrice: tpOrder.price,
-                tpQty: tpOrder.quantity,
-                parameters: batchOrders[i],
-                ...serializeError(error)
-              });
             }
-          }
 
-          // If all TP orders failed, consider cancelling entry order
-          if (tpSuccessCount === 0 && validTPOrders.length > 0) {
-            logger.error('All take profit orders failed', {
-              symbol,
-              orderId,
-              errors: tpErrors
-            });
-            // Try to cancel entry order if still pending
-            try {
-              const orderStatus = await bybitClient.getActiveOrders({
-                category: 'linear',
-                symbol: symbol,
-                orderId: orderId
+            // If all TP orders failed, consider cancelling entry order
+            if (tpSuccessCount === 0 && validTPOrders.length > 0) {
+              logger.error('All take profit orders failed', {
+                symbol,
+                orderId,
+                errors: tpErrors
               });
-              if (orderStatus.retCode === 0 && orderStatus.result && orderStatus.result.list && orderStatus.result.list.length > 0) {
-                await bybitClient.cancelOrder({
+              // Try to cancel entry order if still pending
+              try {
+                const orderStatus = await bybitClient.getActiveOrders({
                   category: 'linear',
                   symbol: symbol,
                   orderId: orderId
                 });
-                logger.warn('Cancelled entry order due to all TP orders failing', {
+                if (orderStatus.retCode === 0 && orderStatus.result && orderStatus.result.list && orderStatus.result.list.length > 0) {
+                  await bybitClient.cancelOrder({
+                    category: 'linear',
+                    symbol: symbol,
+                    orderId: orderId
+                  });
+                  logger.warn('Cancelled entry order due to all TP orders failing', {
+                    symbol,
+                    orderId
+                  });
+                  throw new Error('Entry order cancelled: all take profit orders failed');
+                }
+              } catch (cancelError) {
+                // Order may already be filled, log warning but continue
+                logger.warn('Could not cancel entry order (may already be filled)', {
                   symbol,
-                  orderId
+                  orderId,
+                  error: cancelError instanceof Error ? cancelError.message : String(cancelError)
                 });
-                throw new Error('Entry order cancelled: all take profit orders failed');
               }
-            } catch (cancelError) {
-              // Order may already be filled, log warning but continue
-              logger.warn('Could not cancel entry order (may already be filled)', {
+            } else if (tpSuccessCount < validTPOrders.length) {
+              logger.warn('Some take profit orders failed', {
                 symbol,
                 orderId,
-                error: cancelError instanceof Error ? cancelError.message : String(cancelError)
+                successful: tpSuccessCount,
+                attempted: validTPOrders.length,
+                expected: order.takeProfits.length,
+                errors: tpErrors
               });
             }
-          } else if (tpSuccessCount < validTPOrders.length) {
-            logger.warn('Some take profit orders failed', {
-              symbol,
-              orderId,
-              successful: tpSuccessCount,
-              attempted: validTPOrders.length,
-              expected: order.takeProfits.length,
-              errors: tpErrors
-            });
-          }
-          }
+            }
+          } // End of if (shouldPlaceTPOrders) block
         } else {
           logger.info('Limit order (IOC) placed but no position detected yet, TP orders will be placed by monitor', {
             channel,
@@ -1709,17 +1732,48 @@ const executeTradeForAccount = async (
 
     // Store take profit orders (if not in simulation and we have order IDs)
     if (!isSimulation && tpOrderIds.length > 0) {
+      // Get existing orders to check for duplicates
+      const existingOrders = await db.getOrdersByTradeId(tradeId);
+      const existingTPOrdersByIndex = new Map(
+        existingOrders
+          .filter(o => o.order_type === 'take_profit' && o.tp_index !== undefined)
+          .map(o => [o.tp_index!, o])
+      );
+
       for (const tpOrder of tpOrderIds) {
         try {
+          const tpIndex = (tpOrder as any).tpIndex || tpOrder.index + 1; // Use 1-based TP index if available, otherwise convert from 0-based
+          
+          // Check if TP order with this index already exists
+          if (existingTPOrdersByIndex.has(tpIndex)) {
+            const existingOrder = existingTPOrdersByIndex.get(tpIndex)!;
+            logger.warn('Skipping duplicate take profit order - order with same tp_index already exists', {
+              tradeId,
+              tpIndex,
+              existingOrderId: existingOrder.id,
+              existingOrderOrderId: existingOrder.order_id,
+              newOrderId: tpOrder.orderId,
+              existingPrice: existingOrder.price,
+              newPrice: tpOrder.price
+            });
+            continue;
+          }
+
           await db.insertOrder({
             trade_id: tradeId,
             order_type: 'take_profit',
             order_id: tpOrder.orderId,
             price: tpOrder.price,
-            tp_index: (tpOrder as any).tpIndex || tpOrder.index + 1, // Use 1-based TP index if available, otherwise convert from 0-based
+            tp_index: tpIndex,
             quantity: tpOrder.quantity,
             status: 'pending'
           });
+          
+          // Add to map to prevent duplicates within this batch
+          existingTPOrdersByIndex.set(tpIndex, {
+            id: 0, // Placeholder
+            tp_index: tpIndex
+          } as any);
         } catch (error) {
           logger.warn('Failed to store take profit order', {
             tradeId,

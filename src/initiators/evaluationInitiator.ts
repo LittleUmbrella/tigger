@@ -244,16 +244,39 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
 
   // Store take profit orders with quantity 0 (will be recalculated later, use rounded prices)
   if (roundedTPPrices && roundedTPPrices.length > 0) {
+    // Get existing orders to check for duplicates
+    const existingOrders = await db.getOrdersByTradeId(tradeId);
+    const existingTPOrdersByIndex = new Set(
+      existingOrders
+        .filter(o => o.order_type === 'take_profit' && o.tp_index !== undefined)
+        .map(o => o.tp_index!)
+    );
+
     for (let i = 0; i < roundedTPPrices.length; i++) {
+      const tpIndex = i + 1; // Use 1-based TP index
+      
+      // Check if TP order with this index already exists
+      if (existingTPOrdersByIndex.has(tpIndex)) {
+        logger.warn('Skipping duplicate take profit order - order with same tp_index already exists', {
+          tradeId,
+          tpIndex,
+          price: roundedTPPrices[i]
+        });
+        continue;
+      }
+
       try {
         await db.insertOrder({
           trade_id: tradeId,
           order_type: 'take_profit',
           price: roundedTPPrices[i],
-          tp_index: i,
+          tp_index: tpIndex,
           quantity: 0, // Will be recalculated later
           status: 'pending'
         });
+        
+        // Add to set to prevent duplicates within this batch
+        existingTPOrdersByIndex.add(tpIndex);
       } catch (error) {
         logger.warn('Failed to store take profit order', {
           tradeId,
