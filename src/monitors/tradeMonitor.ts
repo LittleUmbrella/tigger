@@ -772,7 +772,7 @@ const placeTakeProfitOrders = async (
 
     // Check if TP orders already exist first (before checking bybitClient)
     // This allows the function to work in simulation mode where orders are created by the initiator/mock exchange
-    const existingOrders = await db.getOrdersByTradeId(trade.id);
+    let existingOrders = await db.getOrdersByTradeId(trade.id);
     const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
     if (existingTPOrders.length > 0) {
       logger.debug('Take profit orders already exist, skipping placement', {
@@ -1015,8 +1015,93 @@ const placeTakeProfitOrders = async (
 
     // Place TP orders
     const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
+    
+    // Reuse existingOrders from earlier check (re-query if needed for fresh data)
+    // Note: We already checked for any TP orders above and returned early if found,
+    // but we re-query here to get fresh data in case orders were added between checks
+    existingOrders = await db.getOrdersByTradeId(trade.id);
+    const existingTPOrdersByIndex = new Set(
+      existingOrders
+        .filter(o => o.order_type === 'take_profit' && o.tp_index !== undefined)
+        .map(o => o.tp_index!)
+    );
+    
+    // Also check exchange for active TP orders to prevent race conditions
+    // This catches cases where orders were placed but not yet stored in DB
+    let exchangeTPOrdersByPrice: Map<number, boolean> = new Map();
+    try {
+      const openOrdersResponse = await bybitClient.getActiveOrders({
+        category: 'linear',
+        symbol: symbol
+      });
+      
+      if (openOrdersResponse.retCode === 0 && openOrdersResponse.result?.list) {
+        const openOrders = openOrdersResponse.result.list;
+        // Filter for TP orders (reduce-only limit orders matching our TP side)
+        const tpOrdersOnExchange = openOrders.filter((o: any) => {
+          const orderSide = getBybitField<string>(o, 'side');
+          const reduceOnly = getBybitField<boolean>(o, 'reduceOnly', 'reduce_only');
+          const orderType = getBybitField<string>(o, 'orderType', 'order_type');
+          // TP orders are reduce-only limit orders on the opposite side of position
+          return reduceOnly === true && 
+                 orderType === 'Limit' && 
+                 orderSide === tpSide;
+        });
+        
+        // Map TP prices to detect duplicates
+        for (const order of tpOrdersOnExchange) {
+          const price = parseFloat(getBybitField<string>(order, 'price') || '0');
+          if (price > 0) {
+            exchangeTPOrdersByPrice.set(price, true);
+          }
+        }
+        
+        if (tpOrdersOnExchange.length > 0) {
+          logger.info('Found existing TP orders on exchange', {
+            tradeId: trade.id,
+            symbol,
+            exchangeTPCount: tpOrdersOnExchange.length,
+            exchangeTPPrices: Array.from(exchangeTPOrdersByPrice.keys())
+          });
+        }
+      }
+    } catch (error) {
+      logger.warn('Could not check exchange for existing TP orders', {
+        tradeId: trade.id,
+        symbol,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      // Continue anyway - we'll rely on DB check
+    }
 
     for (const tpOrder of validTPOrders) {
+      // Check if TP order with this index already exists in database
+      if (existingTPOrdersByIndex.has(tpOrder.index)) {
+        const existingTPOrder = existingOrders.find(
+          o => o.order_type === 'take_profit' && o.tp_index === tpOrder.index
+        )!;
+        logger.warn('Skipping duplicate take profit order - order with same tp_index already exists in database', {
+          tradeId: trade.id,
+          tpIndex: tpOrder.index,
+          existingOrderId: existingTPOrder.id,
+          existingOrderOrderId: existingTPOrder.order_id,
+          existingPrice: existingTPOrder.price,
+          newPrice: tpOrder.price
+        });
+        continue; // Skip this TP order
+      }
+      
+      // Check if TP order with same price already exists on exchange (prevents race conditions)
+      if (exchangeTPOrdersByPrice.has(tpOrder.price)) {
+        logger.warn('Skipping duplicate take profit order - order with same price already exists on exchange', {
+          tradeId: trade.id,
+          tpIndex: tpOrder.index,
+          tpPrice: tpOrder.price,
+          note: 'This prevents race conditions where orders were placed but not yet stored in database'
+        });
+        continue; // Skip this TP order
+      }
+
       const tpOrderParams = {
         category: 'linear' as const,
         symbol: symbol,
@@ -1066,6 +1151,9 @@ const placeTakeProfitOrders = async (
             quantity: tpOrder.quantity,
             status: 'pending'
           });
+          
+          // Add to set to prevent duplicates within this batch
+          existingTPOrdersByIndex.add(tpOrder.index);
 
           logger.info('Take profit order placed by monitor', {
             tradeId: trade.id,

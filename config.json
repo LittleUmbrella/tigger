@@ -72,8 +72,7 @@
       "type": "bybit",
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
-      "pollInterval": 3000,
-      "entryTimeoutMinutes": 1440
+      "pollInterval": 3000
     }
   ],
   "channels": [
@@ -82,6 +81,7 @@
       "harvester": "main_harvester",
       "parser": "vip_crypto_signals",
       "breakevenAfterTPs": 2,
+      "entryTimeoutMinutes": 1440,
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
@@ -92,6 +92,7 @@
       "harvester": "ronnie_harvester",
       "parser": "ronnie_crypto_signals",
       "breakevenAfterTPs": 2,
+      "entryTimeoutMinutes": 1440,
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
