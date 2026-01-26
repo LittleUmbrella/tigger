@@ -9,6 +9,7 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 import { getDecimalPrecision } from '../utils/positionSizing.js';
 import { getAssetVariant } from '../utils/assetNormalizer.js';
+import { getCachedResponse, setCachedResponse } from '../utils/bybitCache.js';
 
 export interface SymbolInfo {
   qtyPrecision?: number;
@@ -18,12 +19,18 @@ export interface SymbolInfo {
   qtyStep?: number;
 }
 
+// In-memory cache for validation results (valid for the duration of the run)
+// Key: symbol string, Value: validation result
+const validationCache = new Map<string, { valid: boolean; error?: string; actualSymbol?: string }>();
+
 /**
  * Get symbol information from Bybit to determine precision
+ * @param useCache - If true, use disk cache for API calls (only use in evaluation mode)
  */
 export async function getSymbolInfo(
   bybitClient: RestClientV5,
-  symbol: string
+  symbol: string,
+  useCache: boolean = false
 ): Promise<SymbolInfo | null> {
   try {
     // Try linear first (futures), then spot
@@ -35,8 +42,22 @@ export async function getSymbolInfo(
     
     for (const category of categories) {
       try {
-        // First try with the full symbol
-        let instruments = await bybitClient.getInstrumentsInfo({ category, symbol });
+        // First try with the full symbol - check cache first if enabled
+        const cacheParams = { category, symbol };
+        let instruments: any = null;
+        
+        if (useCache) {
+          instruments = await getCachedResponse('getInstrumentsInfo', cacheParams);
+        }
+        
+        if (!instruments) {
+          // Not in cache or caching disabled, make API call
+          instruments = await bybitClient.getInstrumentsInfo({ category, symbol });
+          // Cache successful responses only if caching is enabled
+          if (useCache && instruments.retCode === 0) {
+            await setCachedResponse('getInstrumentsInfo', cacheParams, instruments);
+          }
+        }
         
         // If that fails or returns empty, try without symbol parameter to get all instruments
         if (instruments.retCode !== 0 || !instruments.result?.list || instruments.result.list.length === 0) {
@@ -45,7 +66,25 @@ export async function getSymbolInfo(
             category,
             retCode: instruments.retCode
           });
-          instruments = await bybitClient.getInstrumentsInfo({ category });
+          
+          // Check cache for all instruments call if enabled
+          const allInstrumentsCacheParams = { category };
+          let allInstruments: any = null;
+          
+          if (useCache) {
+            allInstruments = await getCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams);
+          }
+          
+          if (!allInstruments) {
+            // Not in cache or caching disabled, make API call
+            allInstruments = await bybitClient.getInstrumentsInfo({ category });
+            // Cache successful responses only if caching is enabled
+            if (useCache && allInstruments.retCode === 0) {
+              await setCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams, allInstruments);
+            }
+          }
+          
+          instruments = allInstruments;
         }
         
         if (instruments.retCode === 0 && instruments.result && instruments.result.list) {
@@ -173,13 +212,26 @@ export async function getSymbolInfo(
  * Validate if a symbol exists on Bybit
  * Tries USDT first, then USDC if USDT doesn't exist
  * Also tries asset variant (e.g., "1000SHIB" -> "SHIB1000") as fallback
+ * @param useCache - If true, use disk cache for API calls (only use in evaluation mode)
  */
 export async function validateBybitSymbol(
   bybitClient: RestClientV5,
-  symbol: string
+  symbol: string,
+  useCache: boolean = false
 ): Promise<{ valid: boolean; error?: string; actualSymbol?: string }> {
   try {
     let normalizedSymbol = symbol.replace('/', '').toUpperCase();
+    
+    // Check in-memory cache first
+    if (validationCache.has(normalizedSymbol)) {
+      const cached = validationCache.get(normalizedSymbol)!;
+      logger.debug('Using cached validation result', {
+        symbol: normalizedSymbol,
+        valid: cached.valid,
+        actualSymbol: cached.actualSymbol
+      });
+      return cached;
+    }
     
     // Ensure symbol ends with USDT or USDC
     const baseSymbol = normalizedSymbol.replace(/USDT$|USDC$/, '');
@@ -202,10 +254,25 @@ export async function validateBybitSymbol(
     for (const symbolToCheck of symbolsToTry) {
       for (const category of categories) {
         try {
-          const instruments = await bybitClient.getInstrumentsInfo({ 
+          // Check cache first if enabled
+          const cacheParams = { 
             category: category as 'spot' | 'linear', 
             symbol: symbolToCheck 
-          });
+          };
+          let instruments: any = null;
+          
+          if (useCache) {
+            instruments = await getCachedResponse('getInstrumentsInfo', cacheParams);
+          }
+          
+          if (!instruments) {
+            // Not in cache or caching disabled, make API call
+            instruments = await bybitClient.getInstrumentsInfo(cacheParams);
+            // Cache successful responses only if caching is enabled
+            if (useCache && instruments.retCode === 0) {
+              await setCachedResponse('getInstrumentsInfo', cacheParams, instruments);
+            }
+          }
           
           if (instruments.retCode === 0 && instruments.result?.list) {
             const instrument = instruments.result.list.find(
@@ -215,15 +282,16 @@ export async function validateBybitSymbol(
             if (instrument) {
               // Check if symbol is active for trading
               const status = (instrument as any).status;
-              if (status === 'Trading') {
-                return { valid: true, actualSymbol: symbolToCheck };
-              } else {
-                return { 
-                  valid: false, 
-                  error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
-                  actualSymbol: symbolToCheck
-                };
-              }
+              const result = status === 'Trading' 
+                ? { valid: true, actualSymbol: symbolToCheck }
+                : { 
+                    valid: false, 
+                    error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
+                    actualSymbol: symbolToCheck
+                  };
+              // Cache the result
+              validationCache.set(normalizedSymbol, result);
+              return result;
             }
           }
           
@@ -253,10 +321,25 @@ export async function validateBybitSymbol(
       for (const symbolToCheck of variantSymbolsToTry) {
         for (const category of categories) {
           try {
-            const instruments = await bybitClient.getInstrumentsInfo({ 
+            // Check cache first if enabled
+            const cacheParams = { 
               category: category as 'spot' | 'linear', 
               symbol: symbolToCheck 
-            });
+            };
+            let instruments: any = null;
+            
+            if (useCache) {
+              instruments = await getCachedResponse('getInstrumentsInfo', cacheParams);
+            }
+            
+            if (!instruments) {
+              // Not in cache or caching disabled, make API call
+              instruments = await bybitClient.getInstrumentsInfo(cacheParams);
+              // Cache successful responses only if caching is enabled
+              if (useCache && instruments.retCode === 0) {
+                await setCachedResponse('getInstrumentsInfo', cacheParams, instruments);
+              }
+            }
             
             if (instruments.retCode === 0 && instruments.result?.list) {
               const instrument = instruments.result.list.find(
@@ -266,20 +349,25 @@ export async function validateBybitSymbol(
               if (instrument) {
                 // Check if symbol is active for trading
                 const status = (instrument as any).status;
+                const result = status === 'Trading'
+                  ? { valid: true, actualSymbol: symbolToCheck }
+                  : { 
+                      valid: false, 
+                      error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
+                      actualSymbol: symbolToCheck
+                    };
+                
                 if (status === 'Trading') {
                   logger.info('Found symbol using asset variant', {
                     originalSymbol: baseSymbol,
                     variant: assetVariant,
                     actualSymbol: symbolToCheck
                   });
-                  return { valid: true, actualSymbol: symbolToCheck };
-                } else {
-                  return { 
-                    valid: false, 
-                    error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
-                    actualSymbol: symbolToCheck
-                  };
                 }
+                
+                // Cache the result
+                validationCache.set(normalizedSymbol, result);
+                return result;
               }
             }
             
@@ -299,10 +387,13 @@ export async function validateBybitSymbol(
     const triedSymbols = assetVariant 
       ? [...symbolsToTry, `${assetVariant}USDT`, `${assetVariant}USDC`]
       : symbolsToTry;
-    return { 
+    const result = { 
       valid: false, 
       error: `Symbol ${baseSymbol} not found on Bybit (tried ${triedSymbols.join(', ')})` 
     };
+    // Cache the negative result too
+    validationCache.set(normalizedSymbol, result);
+    return result;
   } catch (error) {
     logger.warn('Error validating symbol', {
       symbol,
@@ -341,8 +432,9 @@ export async function validateSymbolWithPriceProvider(
     const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
     
     // Try original symbol first
+    // Always use cache in evaluation mode (validateSymbolWithPriceProvider is only used in evaluation)
     const originalSymbol = `${baseSymbol}${quoteCurrency}`;
-    const validation = await validateBybitSymbol(bybitClient, originalSymbol);
+    const validation = await validateBybitSymbol(bybitClient, originalSymbol, true);
     if (validation.valid) {
       return { valid: true };
     }
@@ -351,7 +443,7 @@ export async function validateSymbolWithPriceProvider(
     const assetVariant = getAssetVariant(baseSymbol);
     if (assetVariant) {
       const variantSymbol = `${assetVariant}${quoteCurrency}`;
-      const variantValidation = await validateBybitSymbol(bybitClient, variantSymbol);
+      const variantValidation = await validateBybitSymbol(bybitClient, variantSymbol, true);
       if (variantValidation.valid) {
         return { valid: true };
       }
