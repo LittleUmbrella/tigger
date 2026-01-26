@@ -120,7 +120,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     try {
       const bybitClient = priceProvider.getBybitClient();
       if (bybitClient) {
-        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair);
+        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true); // Use cache in evaluation mode
         pricePrecision = symbolInfo?.pricePrecision;
       }
     } catch (error) {
