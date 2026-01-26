@@ -18,11 +18,13 @@ import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from '../parsers/channels/3241720654/ronnie-crypto-signals.js';
+import { connect } from '../parsers/channels/2394142145/connect.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
 registerParser('vip_crypto_signals', vipCryptoSignals);
 registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
+registerParser('connect', connect);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];

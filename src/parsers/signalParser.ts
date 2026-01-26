@@ -8,6 +8,7 @@ import { parseWithLLMFallback, LLMParserResult } from './llmFallbackParser.js';
 import { parseManagementCommand } from '../managers/managementParser.js';
 import { vipCryptoSignals } from './channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from './channels/3241720654/ronnie-crypto-signals.js';
+import { connect } from './channels/2394142145/connect.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -15,20 +16,27 @@ registerParser('default', defaultParser);
 registerParser('default_parser', defaultParser); // Alias for backward compatibility
 registerParser('vip_crypto_signals', vipCryptoSignals);
 registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
+registerParser('connect', connect);
 
 /**
  * Parse a message using the specified parser name
- * Falls back to default parser if parser not found
+ * Returns null if parser not found (no fallback to default parser)
  */
 export const parseMessage = (content: string, parserName?: string, options?: { entryPriceStrategy?: 'worst' | 'average' }): ParsedOrder | null => {
-  const parser = parserName ? getParserSync(parserName) : null;
-  const actualParser = parser || defaultParser;
+  if (!parserName) {
+    return null; // No parser specified, return null
+  }
+  const parser = getParserSync(parserName);
+  if (!parser) {
+    return null; // Parser not found, return null (no fallback)
+  }
   
-  return actualParser(content, options);
+  return parser(content, options);
 };
 
 /**
- * Parse a message with fallback chain: configured parser -> default parser -> LLM fallback (if enabled)
+ * Parse a message with fallback chain: configured parser -> LLM fallback (if enabled)
+ * No default parser fallback - parsers should be strict and specific
  * This is the async version that supports LLM fallback
  */
 export const parseMessageWithFallback = async (
@@ -47,11 +55,7 @@ export const parseMessageWithFallback = async (
     }
   }
 
-  // Try default parser
-  const defaultResult = defaultParser(content, parserOptions);
-  if (defaultResult) {
-    return defaultResult;
-  }
+  // No fallback to default parser - parsers should be strict and specific
 
   // Try LLM fallback if configured
   if (config.ollama) {
@@ -89,12 +93,13 @@ export const parseUnparsedMessages = async (
   // Get the parser function for this parser config
   const parser = getParserSync(config.name);
   if (!parser) {
-    logger.warn('Parser not found, using default parser', {
+    logger.warn('Parser not found, skipping parsing', {
       parserName: config.name,
       channel: config.channel
     });
+    return; // Don't fall back to default parser - parsers should be strict and specific
   }
-  const parserFunction = parser || defaultParser;
+  const parserFunction = parser;
   
   // Prepare parser options from config
   const parserOptions = config.entryPriceStrategy ? { entryPriceStrategy: config.entryPriceStrategy } : undefined;
