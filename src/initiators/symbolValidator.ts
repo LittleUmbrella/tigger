@@ -317,9 +317,60 @@ export async function validateBybitSymbol(
 
 /**
  * Validate if a symbol exists using price provider (for evaluation mode)
+ * Uses Bybit client from price provider to check instruments list (more reliable than price data)
  * Tries asset variant (e.g., "1000SHIB" -> "SHIB1000") as fallback
  */
 export async function validateSymbolWithPriceProvider(
+  priceProvider: HistoricalPriceProvider,
+  tradingPair: string
+): Promise<{ valid: boolean; error?: string }> {
+  try {
+    // Get Bybit client from price provider
+    const bybitClient = priceProvider.getBybitClient();
+    if (!bybitClient) {
+      // Fallback to price-based validation if no client available
+      return await validateSymbolWithPriceData(priceProvider, tradingPair);
+    }
+    
+    // Use Bybit instruments API for validation (more reliable)
+    // Normalize trading pair
+    let normalizedPair = tradingPair.replace('/', '').toUpperCase();
+    
+    // Ensure symbol ends with USDT or USDC
+    const baseSymbol = normalizedPair.replace(/USDT$|USDC$/, '');
+    const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
+    
+    // Try original symbol first
+    const originalSymbol = `${baseSymbol}${quoteCurrency}`;
+    const validation = await validateBybitSymbol(bybitClient, originalSymbol);
+    if (validation.valid) {
+      return { valid: true };
+    }
+    
+    // If original didn't work, try asset variant as fallback
+    const assetVariant = getAssetVariant(baseSymbol);
+    if (assetVariant) {
+      const variantSymbol = `${assetVariant}${quoteCurrency}`;
+      const variantValidation = await validateBybitSymbol(bybitClient, variantSymbol);
+      if (variantValidation.valid) {
+        return { valid: true };
+      }
+    }
+    
+    return { 
+      valid: false, 
+      error: validation.error || `Symbol ${baseSymbol} not found on Bybit` 
+    };
+  } catch (error) {
+    // Fallback to price-based validation on error
+    return await validateSymbolWithPriceData(priceProvider, tradingPair);
+  }
+}
+
+/**
+ * Fallback validation using price data (used when Bybit client is not available)
+ */
+async function validateSymbolWithPriceData(
   priceProvider: HistoricalPriceProvider,
   tradingPair: string
 ): Promise<{ valid: boolean; error?: string }> {
