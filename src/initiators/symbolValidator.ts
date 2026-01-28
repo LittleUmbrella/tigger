@@ -293,13 +293,77 @@ export async function validateBybitSymbol(
               validationCache.set(normalizedSymbol, result);
               return result;
             }
+            
+            // If list is empty or symbol not found in list, try fetching all instruments as fallback
+            // This handles cases where Bybit returns success but empty list for symbol-specific queries
+            if (instruments.result.list.length === 0) {
+              logger.debug('Symbol-specific query returned empty list, trying all instruments', {
+                symbol: symbolToCheck,
+                category
+              });
+              
+              try {
+                // Check cache for all instruments call if enabled
+                const allInstrumentsCacheParams = { category };
+                let allInstruments: any = null;
+                
+                if (useCache) {
+                  allInstruments = await getCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams);
+                }
+                
+                if (!allInstruments) {
+                  allInstruments = await bybitClient.getInstrumentsInfo({ category: category as 'spot' | 'linear' });
+                  if (useCache && allInstruments.retCode === 0) {
+                    await setCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams, allInstruments);
+                  }
+                }
+                
+                if (allInstruments.retCode === 0 && allInstruments.result?.list) {
+                  const instrument = allInstruments.result.list.find(
+                    (s: any) => s.symbol === symbolToCheck
+                  );
+                  
+                  if (instrument) {
+                    const status = (instrument as any).status;
+                    const result = status === 'Trading' 
+                      ? { valid: true, actualSymbol: symbolToCheck }
+                      : { 
+                          valid: false, 
+                          error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
+                          actualSymbol: symbolToCheck
+                        };
+                    validationCache.set(normalizedSymbol, result);
+                    return result;
+                  }
+                }
+              } catch (fallbackError) {
+                logger.debug('Fallback to all instruments failed', {
+                  symbol: symbolToCheck,
+                  category,
+                  error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                });
+              }
+            }
           }
           
           // If we got a non-10001 error, don't try other categories for this symbol
+          // But log it for debugging
           if (instruments.retCode !== 0 && instruments.retCode !== 10001) {
+            logger.debug('API returned non-10001 error, trying next category', {
+              symbol: symbolToCheck,
+              category,
+              retCode: instruments.retCode,
+              retMsg: instruments.retMsg
+            });
             break; // Try next category
           }
         } catch (error) {
+          // Log exceptions instead of silently ignoring them
+          logger.warn('Exception during symbol validation, trying next category', {
+            symbol: symbolToCheck,
+            category,
+            error: error instanceof Error ? error.message : String(error)
+          });
           // Continue to next category
           continue;
         }
@@ -369,13 +433,84 @@ export async function validateBybitSymbol(
                 validationCache.set(normalizedSymbol, result);
                 return result;
               }
+              
+              // If list is empty or symbol not found in list, try fetching all instruments as fallback
+              if (instruments.result.list.length === 0) {
+                logger.debug('Symbol-specific query returned empty list for variant, trying all instruments', {
+                  symbol: symbolToCheck,
+                  category
+                });
+                
+                try {
+                  const allInstrumentsCacheParams = { category };
+                  let allInstruments: any = null;
+                  
+                  if (useCache) {
+                    allInstruments = await getCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams);
+                  }
+                  
+                  if (!allInstruments) {
+                    allInstruments = await bybitClient.getInstrumentsInfo({ category: category as 'spot' | 'linear' });
+                    if (useCache && allInstruments.retCode === 0) {
+                      await setCachedResponse('getInstrumentsInfo', allInstrumentsCacheParams, allInstruments);
+                    }
+                  }
+                  
+                  if (allInstruments.retCode === 0 && allInstruments.result?.list) {
+                    const instrument = allInstruments.result.list.find(
+                      (s: any) => s.symbol === symbolToCheck
+                    );
+                    
+                    if (instrument) {
+                      const status = (instrument as any).status;
+                      const result = status === 'Trading'
+                        ? { valid: true, actualSymbol: symbolToCheck }
+                        : { 
+                            valid: false, 
+                            error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
+                            actualSymbol: symbolToCheck
+                          };
+                      
+                      if (status === 'Trading') {
+                        logger.info('Found symbol using asset variant (via all instruments fallback)', {
+                          originalSymbol: baseSymbol,
+                          variant: assetVariant,
+                          actualSymbol: symbolToCheck
+                        });
+                      }
+                      
+                      validationCache.set(normalizedSymbol, result);
+                      return result;
+                    }
+                  }
+                } catch (fallbackError) {
+                  logger.debug('Fallback to all instruments failed for variant', {
+                    symbol: symbolToCheck,
+                    category,
+                    error: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+                  });
+                }
+              }
             }
             
             // If we got a non-10001 error, don't try other categories for this symbol
+            // But log it for debugging
             if (instruments.retCode !== 0 && instruments.retCode !== 10001) {
+              logger.debug('API returned non-10001 error for variant, trying next category', {
+                symbol: symbolToCheck,
+                category,
+                retCode: instruments.retCode,
+                retMsg: instruments.retMsg
+              });
               break; // Try next category
             }
           } catch (error) {
+            // Log exceptions instead of silently ignoring them
+            logger.warn('Exception during variant symbol validation, trying next category', {
+              symbol: symbolToCheck,
+              category,
+              error: error instanceof Error ? error.message : String(error)
+            });
             // Continue to next category
             continue;
           }

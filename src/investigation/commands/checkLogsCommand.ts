@@ -47,10 +47,9 @@ export async function checkLogsCommandHandler(context: CommandContext): Promise<
       const fromTime = new Date(new Date(timestamp).getTime() - timeframe * 60 * 1000).toISOString();
       const untilTime = new Date(new Date(timestamp).getTime() + timeframe * 60 * 1000).toISOString();
 
-      const result = await context.logglyClient.searchByMessageId(msgId, channel, {
-        from: fromTime,
-        until: untilTime
-      });
+      // Use windowed search (defaults to 5 days back) instead of explicit time range
+      // This is faster and more reliable than large time ranges
+      const result = await context.logglyClient.searchByMessageId(msgId, channel, undefined, 5);
 
       // Also search for errors around that time
       const errorLogs = await context.logglyClient.searchErrorsAroundTime(timestamp, timeframe);

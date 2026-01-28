@@ -11,17 +11,35 @@
  *   npm run query-loggly -- errors "2025-01-15T10:30:00Z" 5
  */
 
-import { createLogglyClient } from '../utils/logglyClient.js';
+import { createLogglyApiClient } from '../utils/logglyApiClient.js';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 
-dotenv.config();
+// Load .env-investigation first, then fall back to .env
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../..');
+
+const envInvestigationPath = path.join(projectRoot, '.env-investigation');
+const envPath = path.join(projectRoot, '.env');
+
+if (fs.existsSync(envInvestigationPath)) {
+  dotenv.config({ path: envInvestigationPath });
+} else if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+} else {
+  dotenv.config();
+}
 
 async function main() {
-  const client = createLogglyClient();
+  const client = createLogglyApiClient();
   
   if (!client) {
-    console.error('Error: Loggly client not configured.');
-    console.error('Set LOGGLY_SUBDOMAIN and LOGGLY_API_TOKEN (or LOGGLY_TOKEN) environment variables.');
+    console.error('Error: Loggly API client not configured.');
+    console.error('Set LOGGLY_SUBDOMAIN and LOGGLY_API_TOKEN environment variables.');
+    console.error('Note: LOGGLY_API_TOKEN is for API calls (reading logs), separate from LOGGLY_TOKEN (for logging).');
     process.exit(1);
   }
 

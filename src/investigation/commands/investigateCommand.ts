@@ -43,15 +43,29 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const msgId = ctx.args.messageId;
       const ch = ctx.args.channel;
       
-      const traceResult = await traceMessage(msgId, ch);
-      
-      return {
-        success: !traceResult.failurePoint,
-        message: traceResult.failurePoint 
-          ? `Trace found failure at: ${traceResult.failurePoint}`
-          : 'Trace completed - all steps passed',
-        data: traceResult
-      };
+      try {
+        const traceResult = await traceMessage(msgId, ch);
+        
+        return {
+          success: !traceResult.failurePoint,
+          message: traceResult.failurePoint 
+            ? `Trace found failure at: ${traceResult.failurePoint}`
+            : 'Trace completed - all steps passed',
+          data: traceResult,
+          error: traceResult.failurePoint ? `Failure at: ${traceResult.failurePoint}` : undefined
+        };
+      } catch (error) {
+        logger.error('Error in trace step', {
+          messageId: msgId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return {
+          success: false,
+          message: 'Failed to trace message',
+          error: error instanceof Error ? error.message : String(error),
+          data: { messageId: msgId, channel: ch }
+        };
+      }
     }
   });
 
@@ -217,13 +231,29 @@ export async function investigateCommandHandler(context: CommandContext): Promis
 
   // Extract findings and recommendations from analysis step
   const analysisResult = result.steps.find(s => s.step.id === 'analyze')?.result;
+  const traceResult = result.steps.find(s => s.step.id === 'trace')?.result;
+  
   const findings = analysisResult?.data?.findings || [];
   const recommendations = analysisResult?.data?.recommendations || [];
 
+  // If trace step failed, include its error in findings
+  if (traceResult && !traceResult.success) {
+    if (findings.length === 0) {
+      findings.push(`Trace step failed: ${traceResult.message}`);
+      if (traceResult.error) {
+        findings.push(`Error: ${traceResult.error}`);
+      }
+      if (traceResult.data?.failurePoint) {
+        findings.push(`Failure point: ${traceResult.data.failurePoint}`);
+      }
+    }
+  }
+
   // Generate next steps
   const nextSteps: string[] = [];
-  if (analysisResult?.data?.failurePoint) {
-    if (analysisResult.data.failurePoint.includes('Entry Order')) {
+  const failurePoint = analysisResult?.data?.failurePoint || traceResult?.data?.failurePoint;
+  if (failurePoint) {
+    if (failurePoint.includes('Entry Order')) {
       nextSteps.push('/check-balance');
       nextSteps.push('/query-loggly "Bybit API error" timeframe:10');
     }
@@ -239,7 +269,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     data: {
       workflowResult: result,
       findings,
-      failurePoint: analysisResult?.data?.failurePoint
+      failurePoint
     },
     recommendations,
     nextSteps
