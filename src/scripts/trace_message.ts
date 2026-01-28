@@ -226,7 +226,7 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
       recommendations.push('Message may not be a trade signal (could be management command or unrelated message)');
       return {
         messageId,
-        channel,
+        channel: channel || 'unknown',
         steps,
         failurePoint: 'Message Parsing',
         recommendations
@@ -240,7 +240,7 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
       details: {}
     });
 
-    const trades = await db.getTradesByMessageId(messageId, channel);
+    const trades = await db.getTradesByMessageId(messageId, channel || 'unknown');
     if (trades.length === 0) {
       steps[2].status = 'failure';
       steps[2].error = 'No trade created for this message';

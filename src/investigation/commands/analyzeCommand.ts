@@ -16,6 +16,7 @@ import { getBybitField } from '../../utils/bybitFieldHelper.js';
 import { RestClientV5 } from 'bybit-api';
 import fs from 'fs-extra';
 import { BotConfig } from '../../types/config.js';
+import { Order } from '../../db/schema.js';
 
 function normalizeBybitSymbol(tradingPair: string): string {
   let normalized = tradingPair.replace('/', '').toUpperCase();
@@ -190,7 +191,7 @@ export async function analyzeCommandHandler(context: CommandContext): Promise<Co
     const orders = await db.getOrdersByTradeId(trade.id);
     if (orders.length > 0) {
       findings.push(`Found ${orders.length} TP/SL orders`);
-      analysis.orders = orders.map(o => ({
+      analysis.orders = orders.map((o: Order) => ({
         type: o.order_type,
         orderId: o.order_id,
         status: o.status,

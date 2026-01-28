@@ -17,6 +17,7 @@ export interface SymbolInfo {
   minOrderQty?: number;
   maxOrderQty?: number;
   qtyStep?: number;
+  tickSize?: number;
 }
 
 // In-memory cache for validation results (valid for the duration of the run)
@@ -142,7 +143,9 @@ export async function getSymbolInfo(
           // Extract price precision from tick_size (try both formats)
           const tickSize = priceFilter?.tick_size ?? priceFilter?.tickSize;
           if (tickSize !== undefined && tickSize !== null) {
-            symbolInfo.pricePrecision = getDecimalPrecision(parseFloat(String(tickSize)));
+            const parsedTickSize = parseFloat(String(tickSize));
+            symbolInfo.tickSize = parsedTickSize;
+            symbolInfo.pricePrecision = getDecimalPrecision(parsedTickSize);
           }
           
           // Extract min order quantity (try both formats)
