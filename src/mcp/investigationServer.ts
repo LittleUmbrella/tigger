@@ -235,16 +235,28 @@ class InvestigationMCPServer {
   }
 
   async run(): Promise<void> {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('Investigation MCP server running on stdio');
+    try {
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      console.error('Investigation MCP server running on stdio');
+      
+      // Log available commands
+      const commands = commandRegistry.listCommands();
+      console.error(`Registered ${commands.length} investigation commands: ${commands.map(c => c.name).join(', ')}`);
+    } catch (error) {
+      console.error('Error starting Investigation MCP server:', error);
+      process.exit(1);
+    }
   }
 }
 
 // Run server if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = new InvestigationMCPServer();
-  server.run().catch(console.error);
+  server.run().catch((error) => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
 }
 
 export { InvestigationMCPServer };
