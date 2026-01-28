@@ -106,12 +106,39 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 Add to Cursor's MCP settings (check Cursor documentation for exact location):
 
+**Option 1: Use .env or .env-investigation (Recommended)**
+
+If your `LOGGLY_SUBDOMAIN` and `LOGGLY_API_TOKEN` are in `.env` or `.env-investigation`, you don't need to specify them in the MCP config. The server will automatically load from `.env-investigation` first, then fall back to `.env`.
+
+**Important:** Use `npx` to run `tsx` so it finds the locally installed version:
+
 ```json
 {
   "mcpServers": {
     "loggly": {
-      "command": "tsx",
+      "command": "npx",
       "args": [
+        "tsx",
+        "src/mcp/logglyServer.ts"
+      ]
+    }
+  }
+}
+```
+
+**Note:** `cwd` is optional - the server resolves paths relative to the script file, so it works regardless of the working directory.
+
+**Option 2: Specify in MCP config**
+
+If you prefer to specify them directly in the MCP config (or want to override .env values):
+
+```json
+{
+  "mcpServers": {
+    "loggly": {
+      "command": "npx",
+      "args": [
+        "tsx",
         "src/mcp/logglyServer.ts"
       ],
       "env": {
@@ -122,6 +149,11 @@ Add to Cursor's MCP settings (check Cursor documentation for exact location):
   }
 }
 ```
+
+**Note:** 
+- The `env` section is optional. If omitted, the server will read from `.env-investigation` (if it exists) or `.env` files.
+- `cwd` is optional - the server resolves paths relative to the script file.
+- If `npx` doesn't work, you can also use the full path: `"command": "/home/toby/code/tigger/node_modules/.bin/tsx"`
 
 ## Testing the Integration
 

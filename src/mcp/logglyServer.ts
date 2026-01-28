@@ -19,8 +19,29 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { LogglyClient, createLogglyClient } from '../utils/logglyClient.js';
 import dotenv from 'dotenv';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 
-dotenv.config();
+// Load .env-investigation first, then fall back to .env
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../..');
+
+// Try .env-investigation first, then .env
+const envInvestigationPath = path.join(projectRoot, '.env-investigation');
+const envPath = path.join(projectRoot, '.env');
+
+// Load .env-investigation if it exists, otherwise load .env
+if (fs.existsSync(envInvestigationPath)) {
+  dotenv.config({ path: envInvestigationPath });
+  console.error('Loaded environment variables from .env-investigation');
+} else if (fs.existsSync(envPath)) {
+  dotenv.config({ path: envPath });
+  console.error('Loaded environment variables from .env');
+} else {
+  dotenv.config(); // Fallback to default behavior
+}
 
 class LogglyMCPServer {
   private server: Server;
@@ -301,16 +322,30 @@ class LogglyMCPServer {
   }
 
   async run(): Promise<void> {
-    const transport = new StdioServerTransport();
-    await this.server.connect(transport);
-    console.error('Loggly MCP server running on stdio');
+    try {
+      const transport = new StdioServerTransport();
+      await this.server.connect(transport);
+      console.error('Loggly MCP server running on stdio');
+      
+      if (!this.logglyClient) {
+        console.error('Warning: Loggly client not configured. Set LOGGLY_SUBDOMAIN and LOGGLY_API_TOKEN environment variables.');
+      } else {
+        console.error('Loggly client initialized successfully');
+      }
+    } catch (error) {
+      console.error('Error starting Loggly MCP server:', error);
+      process.exit(1);
+    }
   }
 }
 
 // Run server if executed directly
 if (import.meta.url === `file://${process.argv[1]}`) {
   const server = new LogglyMCPServer();
-  server.run().catch(console.error);
+  server.run().catch((error) => {
+    console.error('Fatal error:', error);
+    process.exit(1);
+  });
 }
 
 export { LogglyMCPServer };
