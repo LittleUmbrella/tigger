@@ -379,15 +379,37 @@ const executeTradeForAccount = async (
         decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       }
       pricePrecision = symbolInfo?.pricePrecision;
+      tickSize = symbolInfo?.tickSize;
       minOrderQty = symbolInfo?.minOrderQty;
       maxOrderQty = symbolInfo?.maxOrderQty;
       qtyStep = symbolInfo?.qtyStep;
-      // Note: tickSize would need to be extracted from symbolInfo if available
-      // For now, we'll use pricePrecision for rounding
     } else if (finalEntryPrice > 0 && positionSize > 0) {
       const riskAmountInAsset = positionSize / finalEntryPrice;
       decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
       pricePrecision = getDecimalPrecision(finalEntryPrice);
+    }
+    
+    // Fallback: if pricePrecision is 0 but price has decimal places, calculate from price
+    // This handles cases where tickSize is an integer (e.g., 1) but price is fractional
+    // Also handle case where tickSize exists but is larger than the price (invalid)
+    if (pricePrecision === 0 && finalEntryPrice > 0) {
+      const priceHasDecimals = finalEntryPrice % 1 !== 0;
+      // If tickSize is undefined or larger than price, use price's precision
+      if (priceHasDecimals && (!tickSize || tickSize > finalEntryPrice)) {
+        pricePrecision = getDecimalPrecision(finalEntryPrice);
+        // If tickSize is invalid (larger than price), clear it so roundPrice uses precision instead
+        if (tickSize && tickSize > finalEntryPrice) {
+          tickSize = undefined;
+        }
+        logger.warn('Adjusted pricePrecision from price value', {
+          channel,
+          symbol,
+          originalPricePrecision: 0,
+          adjustedPricePrecision: pricePrecision,
+          entryPrice: finalEntryPrice,
+          tickSize: tickSize || 'undefined'
+        });
+      }
     }
     
     // Round entry price to exchange precision

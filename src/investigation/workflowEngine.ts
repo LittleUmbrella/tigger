@@ -29,7 +29,7 @@ export interface WorkflowStepResult {
 export interface WorkflowContext {
   db: DatabaseManager;
   logglyClient?: LogglyApiClient;
-  getBybitClient?: (accountName?: string) => RestClientV5 | undefined;
+  getBybitClient?: (accountName?: string) => Promise<RestClientV5 | undefined>;
   args: Record<string, any>;
   stepResults: Map<string, WorkflowStepResult>;
   [key: string]: any;
