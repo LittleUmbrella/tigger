@@ -222,13 +222,20 @@ export async function validateBybitSymbol(
   try {
     let normalizedSymbol = symbol.replace('/', '').toUpperCase();
     
+    // Log validation attempt - critical for investigations
+    logger.debug('Starting symbol validation', {
+      symbol: normalizedSymbol,
+      useCache
+    });
+    
     // Check in-memory cache first
     if (validationCache.has(normalizedSymbol)) {
       const cached = validationCache.get(normalizedSymbol)!;
       logger.debug('Using cached validation result', {
         symbol: normalizedSymbol,
         valid: cached.valid,
-        actualSymbol: cached.actualSymbol
+        actualSymbol: cached.actualSymbol,
+        cached: true
       });
       return cached;
     }
@@ -246,6 +253,15 @@ export async function validateBybitSymbol(
       // Try USDT first, then USDC as fallback
       symbolsToTry = [`${baseSymbol}USDT`, `${baseSymbol}USDC`];
     }
+    
+    // Log what symbols will be tried - critical for investigations
+    logger.debug('Symbol validation: trying symbols and categories', {
+      originalSymbol: normalizedSymbol,
+      baseSymbol,
+      quoteCurrency,
+      symbolsToTry,
+      categories: ['spot', 'linear']
+    });
     
     // Try both spot and linear categories
     const categories = ['spot', 'linear'];
@@ -289,6 +305,18 @@ export async function validateBybitSymbol(
                     error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
                     actualSymbol: symbolToCheck
                   };
+              
+              // Log validation result - critical for investigations
+              logger.info('Symbol validation result', {
+                symbol: normalizedSymbol,
+                symbolChecked: symbolToCheck,
+                category,
+                valid: result.valid,
+                actualSymbol: result.actualSymbol,
+                status: status,
+                error: result.error
+              });
+              
               // Cache the result
               validationCache.set(normalizedSymbol, result);
               return result;
@@ -332,6 +360,19 @@ export async function validateBybitSymbol(
                           error: `Symbol ${symbolToCheck} exists but is not trading (status: ${status}, category: ${category})`,
                           actualSymbol: symbolToCheck
                         };
+                    
+                    // Log validation result from fallback search - critical for investigations
+                    logger.info('Symbol validation result (via all instruments fallback)', {
+                      symbol: normalizedSymbol,
+                      symbolChecked: symbolToCheck,
+                      category,
+                      valid: result.valid,
+                      actualSymbol: result.actualSymbol,
+                      status: status,
+                      error: result.error,
+                      method: 'all-instruments-fallback'
+                    });
+                    
                     validationCache.set(normalizedSymbol, result);
                     return result;
                   }
@@ -522,6 +563,17 @@ export async function validateBybitSymbol(
     const triedSymbols = assetVariant 
       ? [...symbolsToTry, `${assetVariant}USDT`, `${assetVariant}USDC`]
       : symbolsToTry;
+    
+    // Log validation failure - critical for investigations
+    logger.warn('Symbol validation failed: symbol not found on Bybit', {
+      symbol: normalizedSymbol,
+      baseSymbol,
+      symbolsTried: triedSymbols,
+      categoriesTried: categories,
+      assetVariantTried: assetVariant || false,
+      reason: 'Symbol does not exist on Bybit in any category (spot/linear) or quote currency (USDT/USDC)'
+    });
+    
     const result = { 
       valid: false, 
       error: `Symbol ${baseSymbol} not found on Bybit (tried ${triedSymbols.join(', ')})` 
@@ -530,9 +582,10 @@ export async function validateBybitSymbol(
     validationCache.set(normalizedSymbol, result);
     return result;
   } catch (error) {
-    logger.warn('Error validating symbol', {
+    logger.error('Exception during symbol validation', {
       symbol,
-      error: error instanceof Error ? error.message : String(error)
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined
     });
     return { 
       valid: false, 

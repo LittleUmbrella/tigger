@@ -218,6 +218,16 @@ export const processMessages = async (
 
   const processMessage = async (message: Message): Promise<void> => {
     try {
+      // Log message processing start - critical for tracing flow in Loggly
+      logger.info('Processing message for trade initiation', {
+        channel,
+        messageId: message.message_id,
+        messageDate: message.date,
+        contentPreview: message.content.substring(0, 150),
+        parserName: parserName || 'default',
+        initiatorName
+      });
+
       // In simulation mode, set price provider time to message time
       if (isSimulation && priceProvider) {
         const messageTime = dayjs(message.date);
@@ -226,6 +236,17 @@ export const processMessages = async (
 
       const parsed = parseMessage(message.content, parserName);
       if (parsed) {
+        // Log successful parsing - critical for investigations
+        logger.info('Message parsed successfully', {
+          channel,
+          messageId: message.message_id,
+          tradingPair: parsed.tradingPair,
+          signalType: parsed.signalType,
+          entryPrice: parsed.entryPrice,
+          stopLoss: parsed.stopLoss,
+          takeProfits: parsed.takeProfits?.length || 0,
+          parserName: parserName || 'default'
+        });
         // Merge channel-specific baseLeverage with initiator config
         // Channel-specific baseLeverage takes precedence over initiator config
         const mergedInitiatorConfig: InitiatorConfig = {
@@ -249,11 +270,31 @@ export const processMessages = async (
         };
 
         try {
+          // Log trade initiation start - critical for investigations
+          logger.info('Initiating trade', {
+            channel,
+            messageId: message.message_id,
+            tradingPair: parsed.tradingPair,
+            signalType: parsed.signalType,
+            initiatorName,
+            accountCount: accounts?.length || 0,
+            accountNames: accounts?.map(a => a.name) || []
+          });
+
           // Call the registered initiator function
           await initiatorFunction(context);
           
           // Mark message as parsed after successful initiation
           await db.markMessageParsed(message.id);
+          
+          // Log successful completion - critical for investigations
+          logger.info('Trade initiated successfully, message marked as parsed', {
+            channel,
+            messageId: message.message_id,
+            tradingPair: parsed.tradingPair,
+            signalType: parsed.signalType,
+            initiatorName
+          });
         } catch (initiatorError) {
           const isRetryable = isRetryableError(initiatorError);
           
@@ -275,13 +316,36 @@ export const processMessages = async (
               channel,
               messageId: message.message_id,
               tradingPair: parsed.tradingPair,
-              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError)
+              signalType: parsed.signalType,
+              initiatorName,
+              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError),
+              errorType: 'non-retryable',
+              reason: 'Permanent failure - will not succeed on retry'
+            });
+          } else {
+            // Log retryable errors - don't mark as parsed, allow retry
+            logger.warn('Trade initiation failed with retryable error, message will be retried', {
+              channel,
+              messageId: message.message_id,
+              tradingPair: parsed.tradingPair,
+              signalType: parsed.signalType,
+              initiatorName,
+              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError),
+              errorType: 'retryable',
+              reason: 'Temporary failure - will retry on next iteration'
             });
           }
           // For retryable errors, don't mark as parsed - allow retry on next iteration
         }
       } else {
         // Message couldn't be parsed - mark as parsed to avoid reprocessing
+        logger.warn('Message parsing failed, marking as parsed to avoid reprocessing', {
+          channel,
+          messageId: message.message_id,
+          contentPreview: message.content.substring(0, 150),
+          parserName: parserName || 'default',
+          reason: 'Parse returned null - message format not recognized'
+        });
         await db.markMessageParsed(message.id);
       }
     } catch (error) {

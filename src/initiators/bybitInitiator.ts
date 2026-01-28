@@ -113,6 +113,21 @@ const executeTradeForAccount = async (
   const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config } = context;
 
   try {
+    // Log trade initiation start for this account - critical for investigations
+    logger.info('Starting Bybit trade initiation for account', {
+      channel,
+      messageId: message.message_id,
+      tradingPair: order.tradingPair,
+      signalType: order.signalType,
+      accountName: accountName || 'default',
+      accountConfig: account ? {
+        name: account.name,
+        testnet: account.testnet,
+        demo: account.demo
+      } : null,
+      isSimulation
+    });
+
     // Get API credentials for this account
     // For backward compatibility, use testnet from config if account is null
     const fallbackTestnet = account === null ? ((config as any).testnet || false) : false;
@@ -191,13 +206,26 @@ const executeTradeForAccount = async (
     // Validate symbol exists before creating trade
     // Validation will try both USDT and USDC if needed
     if (!isSimulation && bybitClient) {
+      // Log symbol validation attempt - critical for investigations
+      logger.info('Validating symbol before trade creation', {
+        channel,
+        messageId: message.message_id,
+        tradingPair: order.tradingPair,
+        symbol,
+        accountName: accountName || 'default'
+      });
+
       const validation = await validateBybitSymbol(bybitClient, symbol);
       if (!validation.valid) {
         logger.error('Invalid symbol, skipping trade', {
           channel,
+          messageId: message.message_id,
           symbol,
           tradingPair: order.tradingPair,
-          error: validation.error
+          signalType: order.signalType,
+          accountName: accountName || 'default',
+          error: validation.error,
+          reason: 'Symbol validation failed - symbol does not exist or is not trading on Bybit'
         });
         throw new Error(`Invalid symbol: ${validation.error}`);
       }
@@ -205,14 +233,24 @@ const executeTradeForAccount = async (
       if (validation.actualSymbol && validation.actualSymbol !== symbol) {
         symbol = validation.actualSymbol;
         logger.info('Using alternative symbol format', {
+          channel,
+          messageId: message.message_id,
           originalSymbol: order.tradingPair.replace('/', ''),
           actualSymbol: symbol,
+          tradingPair: order.tradingPair,
+          accountName: accountName || 'default',
           reason: symbol.endsWith('USDC') && !order.tradingPair.includes('USDC') 
             ? 'alternative quote currency' 
             : 'asset variant'
         });
       }
-      logger.debug('Symbol validated', { originalTradingPair: order.tradingPair, normalizedSymbol: symbol });
+      logger.info('Symbol validated successfully', {
+        channel,
+        messageId: message.message_id,
+        originalTradingPair: order.tradingPair,
+        normalizedSymbol: symbol,
+        accountName: accountName || 'default'
+      });
     }
     
     // Check for existing open positions for the same symbol to prevent multiple positions
@@ -226,12 +264,15 @@ const executeTradeForAccount = async (
     if (existingTradeForSymbol) {
       logger.info('Skipping trade - existing open position for symbol', {
         channel,
+        messageId: message.message_id,
         symbol,
         tradingPair: order.tradingPair,
+        signalType: order.signalType,
+        accountName: accountName || 'default',
         existingTradeId: existingTradeForSymbol.id,
         existingTradeStatus: existingTradeForSymbol.status,
         existingTradeCreatedAt: existingTradeForSymbol.created_at,
-        messageId: message.message_id
+        reason: 'Prevents multiple positions for same symbol - stop loss applies to 100% of position'
       });
       // Mark message as parsed to avoid reprocessing
       await db.markMessageParsed(message.id);
