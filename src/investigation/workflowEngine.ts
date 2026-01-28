@@ -6,7 +6,7 @@
  */
 
 import { DatabaseManager } from '../db/schema.js';
-import { LogglyClient, createLogglyClient } from '../utils/logglyClient.js';
+import { LogglyApiClient, createLogglyApiClient } from '../utils/logglyApiClient.js';
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../utils/logger.js';
 import { traceMessage } from '../scripts/trace_message.js';
@@ -28,7 +28,7 @@ export interface WorkflowStepResult {
 
 export interface WorkflowContext {
   db: DatabaseManager;
-  logglyClient?: LogglyClient;
+  logglyClient?: LogglyApiClient;
   getBybitClient?: (accountName?: string) => RestClientV5 | undefined;
   args: Record<string, any>;
   stepResults: Map<string, WorkflowStepResult>;
@@ -166,7 +166,7 @@ export async function createWorkflowContext(
   const db = new DatabaseManager();
   await db.initialize();
 
-  const logglyClient = createLogglyClient();
+  const logglyClient = createLogglyApiClient();
 
   // Helper to get Bybit client (loads config and creates client)
   const getBybitClient = async (accountName?: string): Promise<RestClientV5 | undefined> => {

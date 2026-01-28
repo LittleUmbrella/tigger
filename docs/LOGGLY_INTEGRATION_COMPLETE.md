@@ -76,9 +76,9 @@ If you want to use MCP with Claude Desktop or Cursor:
 ### Direct Client Usage
 
 ```typescript
-import { createLogglyClient } from './src/utils/logglyClient.js';
+import { createLogglyApiClient } from './src/utils/logglyClient.js';
 
-const client = createLogglyClient();
+const client = createLogglyApiClient();
 if (client) {
   // Search by message ID
   const results = await client.searchByMessageId(12345, '2394142145');

@@ -52,9 +52,9 @@ npm install
 Use the Loggly client directly in scripts or custom prompts:
 
 ```typescript
-import { createLogglyClient } from './src/utils/logglyClient.js';
+import { createLogglyApiClient } from './src/utils/logglyClient.js';
 
-const client = createLogglyClient();
+const client = createLogglyApiClient();
 if (client) {
   const results = await client.searchByMessageId(12345, '2394142145');
   console.log(results);
@@ -162,12 +162,12 @@ If you prefer to specify them directly in the MCP config (or want to override .e
 ```bash
 # Create a test script
 cat > test_loggly.js << 'EOF'
-import { createLogglyClient } from './src/utils/logglyClient.js';
+import { createLogglyApiClient } from './src/utils/logglyClient.js';
 import dotenv from 'dotenv';
 
 dotenv.config();
 
-const client = createLogglyClient();
+const client = createLogglyApiClient();
 if (!client) {
   console.error('Loggly client not configured');
   process.exit(1);

@@ -17,7 +17,7 @@ import {
   ListResourcesRequestSchema,
   ReadResourceRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { LogglyClient, createLogglyClient } from '../utils/logglyClient.js';
+import { LogglyApiClient, createLogglyApiClient } from '../utils/logglyApiClient.js';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -45,7 +45,7 @@ if (fs.existsSync(envInvestigationPath)) {
 
 class LogglyMCPServer {
   private server: Server;
-  private logglyClient: LogglyClient | null;
+  private logglyClient: LogglyApiClient | null;
 
   constructor() {
     this.server = new Server(
@@ -61,7 +61,7 @@ class LogglyMCPServer {
       }
     );
 
-    this.logglyClient = createLogglyClient();
+    this.logglyClient = createLogglyApiClient();
 
     this.setupHandlers();
   }

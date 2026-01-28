@@ -132,6 +132,18 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
   const db = new DatabaseManager();
   await db.initialize();
 
+  // Load config to get parser name for channel
+  const configPath = process.env.CONFIG_PATH || 'config.json';
+  let config: BotConfig | null = null;
+  if (fs.existsSync(configPath)) {
+    try {
+      const configContent = await fs.readFile(configPath, 'utf-8');
+      config = JSON.parse(configContent);
+    } catch (error) {
+      logger.warn('Failed to load config', { error });
+    }
+  }
+
   try {
     // Step 1: Find message in database
     steps.push({
@@ -187,7 +199,16 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
       details: {}
     });
 
-    const parsedOrder = parseMessage(message.content);
+    // Get parser name from config for this channel
+    let parserName: string | undefined;
+    if (config && channel) {
+      const channelConfig = config.channels?.find(ch => ch.channel === channel);
+      if (channelConfig?.parser) {
+        parserName = channelConfig.parser;
+      }
+    }
+
+    const parsedOrder = parseMessage(message.content, parserName);
     if (parsedOrder) {
       steps[1].status = 'success';
       steps[1].details = {
@@ -228,7 +249,7 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
       recommendations.push('Verify initiator configuration is correct');
       return {
         messageId,
-        channel,
+        channel: channel || 'unknown',
         steps,
         failurePoint: 'Trade Creation',
         recommendations
@@ -441,7 +462,7 @@ export const traceMessage = async (messageId: number, channel?: string): Promise
 
     return {
       messageId,
-      channel,
+      channel: channel || 'unknown',
       steps,
       failurePoint,
       recommendations
@@ -518,39 +539,43 @@ const printTraceResults = (result: TraceResult): void => {
   console.log('  - Check account credentials and API permissions\n');
 };
 
-// Main execution
-const messageId = process.argv[2] ? parseInt(process.argv[2], 10) : null;
-const channel = process.argv[3];
-const outputFormat = process.argv[4] === '--json' ? 'json' : 'text';
+// Main execution - only run if this file is executed directly
+const isMainModule = process.argv[1] && (process.argv[1].endsWith('trace_message.ts') || process.argv[1].endsWith('trace_message.js') || __filename === process.argv[1]);
 
-if (!messageId || isNaN(messageId)) {
-  console.error('Usage: npm run trace-message <message_id> [channel] [--json]');
-  console.error('Example: npm run trace-message 12345 2394142145');
-  console.error('Example: npm run trace-message 12345 2394142145 --json');
-  process.exit(1);
-}
+if (isMainModule) {
+  const messageId = process.argv[2] ? parseInt(process.argv[2], 10) : null;
+  const channel = process.argv[3];
+  const outputFormat = process.argv[4] === '--json' ? 'json' : 'text';
 
-traceMessage(messageId, channel)
-  .then(result => {
-    if (outputFormat === 'json') {
-      // Output JSON for use with custom prompts
-      console.log(JSON.stringify(result, null, 2));
-    } else {
-      // Output human-readable format
-      printTraceResults(result);
-    }
-    
-    // Exit with error code if failure detected
-    if (result.failurePoint) {
-      process.exit(1);
-    }
-  })
-  .catch(error => {
-    logger.error('Fatal error tracing message', {
-      messageId,
-      error: error instanceof Error ? error.message : String(error),
-      stack: error instanceof Error ? error.stack : undefined
-    });
+  if (!messageId || isNaN(messageId)) {
+    console.error('Usage: npm run trace-message <message_id> [channel] [--json]');
+    console.error('Example: npm run trace-message 12345 2394142145');
+    console.error('Example: npm run trace-message 12345 2394142145 --json');
     process.exit(1);
-  });
+  }
+
+  traceMessage(messageId, channel)
+    .then(result => {
+      if (outputFormat === 'json') {
+        // Output JSON for use with custom prompts
+        console.log(JSON.stringify(result, null, 2));
+      } else {
+        // Output human-readable format
+        printTraceResults(result);
+      }
+      
+      // Exit with error code if failure detected
+      if (result.failurePoint) {
+        process.exit(1);
+      }
+    })
+    .catch(error => {
+      logger.error('Fatal error tracing message', {
+        messageId,
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined
+      });
+      process.exit(1);
+    });
+}
 
