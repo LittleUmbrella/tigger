@@ -13,7 +13,9 @@ import dayjs from 'dayjs';
 
 interface PriceDataPoint {
   timestamp: number;
-  price: number;
+  price: number; // Close price (for backward compatibility)
+  high?: number; // High price of the candle (for TP/SL checks)
+  low?: number; // Low price of the candle (for TP/SL checks)
 }
 
 interface MockExchangeState {
@@ -140,15 +142,19 @@ export function createMockExchange(
     }
   };
 
-  const shouldFillEntry = (price: number): boolean => {
+  const shouldFillEntry = (pricePoint: PriceDataPoint): boolean => {
     const tolerance = state.trade.entry_price * 0.001; // 0.1% tolerance
     
     if (state.isLong) {
-      // For LONG: fill when price is at or below entry (buy low)
-      return price <= state.trade.entry_price + tolerance;
+      // For LONG: fill when candle LOW is at or below entry (buy low)
+      // Use low if available, otherwise fall back to close price
+      const checkPrice = pricePoint.low ?? pricePoint.price;
+      return checkPrice <= state.trade.entry_price + tolerance;
     } else {
-      // For SHORT: fill when price is at or above entry (sell high)
-      return price >= state.trade.entry_price - tolerance;
+      // For SHORT: fill when candle HIGH is at or above entry (sell high)
+      // Use high if available, otherwise fall back to close price
+      const checkPrice = pricePoint.high ?? pricePoint.price;
+      return checkPrice >= state.trade.entry_price - tolerance;
     }
   };
 
@@ -274,11 +280,17 @@ export function createMockExchange(
     }
   };
 
-  const shouldFillStopLoss = (price: number): boolean => {
+  const shouldFillStopLoss = (pricePoint: PriceDataPoint): boolean => {
     if (state.isLong) {
-      return price <= state.currentStopLoss;
+      // For LONG: SL fills when candle LOW hits SL price
+      // Use low if available, otherwise fall back to close price
+      const checkPrice = pricePoint.low ?? pricePoint.price;
+      return checkPrice <= state.currentStopLoss;
     } else {
-      return price >= state.currentStopLoss;
+      // For SHORT: SL fills when candle HIGH hits SL price
+      // Use high if available, otherwise fall back to close price
+      const checkPrice = pricePoint.high ?? pricePoint.price;
+      return checkPrice >= state.currentStopLoss;
     }
   };
 
@@ -398,13 +410,19 @@ export function createMockExchange(
     });
   };
 
-  const shouldFillTakeProfit = (tpIndex: number, price: number): boolean => {
+  const shouldFillTakeProfit = (tpIndex: number, pricePoint: PriceDataPoint): boolean => {
     const tpPrice = state.takeProfits[tpIndex];
     
     if (state.isLong) {
-      return price >= tpPrice;
+      // For LONG: TP fills when candle HIGH reaches TP price
+      // Use high if available, otherwise fall back to close price
+      const checkPrice = pricePoint.high ?? pricePoint.price;
+      return checkPrice >= tpPrice;
     } else {
-      return price <= tpPrice;
+      // For SHORT: TP fills when candle LOW reaches TP price
+      // Use low if available, otherwise fall back to close price
+      const checkPrice = pricePoint.low ?? pricePoint.price;
+      return checkPrice <= tpPrice;
     }
   };
 
@@ -796,21 +814,25 @@ export function createMockExchange(
         }
         
         // Check if price is within tolerance for entry fill
-        if (shouldFillEntry(price)) {
+        if (shouldFillEntry(pricePoint)) {
           // Track best price within tolerance window
-          // For LONG: best = lowest price (best buy)
-          // For SHORT: best = highest price (best sell)
+          // For LONG: best = lowest price (best buy) - use low if available
+          // For SHORT: best = highest price (best sell) - use high if available
+          const entryCheckPrice = state.isLong 
+            ? (pricePoint.low ?? pricePoint.price)
+            : (pricePoint.high ?? pricePoint.price);
+          
           if (bestEntryPrice === null) {
-            bestEntryPrice = price;
+            bestEntryPrice = entryCheckPrice;
             bestEntryTime = priceTime;
             bestEntryIndex = i;
           } else {
             const isBetter = state.isLong 
-              ? price < bestEntryPrice  // LONG: lower is better
-              : price > bestEntryPrice; // SHORT: higher is better
+              ? entryCheckPrice < bestEntryPrice  // LONG: lower is better
+              : entryCheckPrice > bestEntryPrice; // SHORT: higher is better
             
             if (isBetter) {
-              bestEntryPrice = price;
+              bestEntryPrice = entryCheckPrice;
               bestEntryTime = priceTime;
               bestEntryIndex = i;
             }
@@ -838,16 +860,24 @@ export function createMockExchange(
 
       // Only check stop loss and take profits after entry is filled
       if (state.entryFilled && !state.stopLossFilled) {
-        // Check if stop loss should fill
-        if (shouldFillStopLoss(price)) {
-          await fillStopLoss(price, priceTime);
+        // Check if stop loss should fill (use high/low from candle)
+        if (shouldFillStopLoss(pricePoint)) {
+          // Use the actual price that triggered SL (low for LONG, high for SHORT)
+          const slFillPrice = state.isLong 
+            ? (pricePoint.low ?? pricePoint.price)
+            : (pricePoint.high ?? pricePoint.price);
+          await fillStopLoss(slFillPrice, priceTime);
           return true; // Trade is done
         }
 
-        // Check if take profits should fill
+        // Check if take profits should fill (use high/low from candle)
         for (let tpIndex = 0; tpIndex < state.takeProfits.length; tpIndex++) {
-          if (!state.filledTakeProfits.has(tpIndex) && shouldFillTakeProfit(tpIndex, price)) {
-            await fillTakeProfit(tpIndex, price, priceTime);
+          if (!state.filledTakeProfits.has(tpIndex) && shouldFillTakeProfit(tpIndex, pricePoint)) {
+            // Use the actual price that triggered TP (high for LONG, low for SHORT)
+            const tpFillPrice = state.isLong
+              ? (pricePoint.high ?? pricePoint.price)
+              : (pricePoint.low ?? pricePoint.price);
+            await fillTakeProfit(tpIndex, tpFillPrice, priceTime);
             
             // Move stop loss to breakeven after N TPs are filled
             // Count filled TPs (including the one we just filled)

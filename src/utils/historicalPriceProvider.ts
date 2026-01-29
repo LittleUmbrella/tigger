@@ -6,7 +6,9 @@ import { getCachedResponse, setCachedResponse } from './bybitCache.js';
 
 interface PriceDataPoint {
   timestamp: number;
-  price: number;
+  price: number; // Close price (for backward compatibility and general price tracking)
+  high?: number; // High price of the candle (for TP/SL checks)
+  low?: number; // Low price of the candle (for TP/SL checks)
 }
 
 interface HistoricalPriceProviderState {
@@ -370,6 +372,8 @@ async function tryFetchWithCategory(
             for (const kline of klineResponse.result.list) {
               const klineTime = parseFloat(kline[0] || '0');
               const klineOpen = parseFloat(kline[1] || '0');
+              const klineHigh = parseFloat(kline[2] || '0');
+              const klineLow = parseFloat(kline[3] || '0');
               const klineClose = parseFloat(kline[4] || '0');
               
               if (klineTime >= startTimestamp && klineTime <= endTimestamp) {
@@ -377,7 +381,9 @@ async function tryFetchWithCategory(
                 if (price > 0) {
                   pricePoints.push({
                     timestamp: klineTime,
-                    price
+                    price,
+                    high: klineHigh > 0 ? klineHigh : undefined,
+                    low: klineLow > 0 ? klineLow : undefined
                   });
                 }
               }
@@ -504,6 +510,8 @@ async function tryFetchWithCategory(
               for (const kline of klineResponse.result.list) {
                 const klineTime = parseFloat(kline[0] || '0');
                 const klineOpen = parseFloat(kline[1] || '0');
+                const klineHigh = parseFloat(kline[2] || '0');
+                const klineLow = parseFloat(kline[3] || '0');
                 const klineClose = parseFloat(kline[4] || '0');
                 
                 if (klineTime >= startTimestamp && klineTime <= endTimestamp) {
@@ -511,7 +519,9 @@ async function tryFetchWithCategory(
                   if (price > 0) {
                     pricePoints.push({
                       timestamp: klineTime,
-                      price
+                      price,
+                      high: klineHigh > 0 ? klineHigh : undefined,
+                      low: klineLow > 0 ? klineLow : undefined
                     });
                   }
                 }
