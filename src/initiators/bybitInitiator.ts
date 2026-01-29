@@ -417,6 +417,33 @@ const executeTradeForAccount = async (
     
     // Validate rounded entry price is valid (must be > 0)
     if (!roundedEntryPrice || roundedEntryPrice <= 0 || !isFinite(roundedEntryPrice)) {
+      // Log all relevant parameters before throwing error for debugging
+      logger.error('Invalid rounded entry price - logging all parameters', {
+        channel,
+        symbol,
+        accountName,
+        roundedEntryPrice,
+        originalEntryPrice: finalEntryPrice,
+        pricePrecision,
+        tickSize,
+        symbolInfo: {
+          qtyPrecision: decimalPrecision,
+          pricePrecision,
+          tickSize,
+          minOrderQty,
+          maxOrderQty,
+          qtyStep
+        },
+        orderDetails: {
+          signalType: order.signalType,
+          entryPrice: order.entryPrice,
+          stopLoss: order.stopLoss,
+          takeProfits: order.takeProfits,
+          leverage: order.leverage
+        },
+        positionSize,
+        balance
+      });
       throw new Error(`Invalid rounded entry price: ${roundedEntryPrice} (original: ${finalEntryPrice}, pricePrecision: ${pricePrecision}, tickSize: ${tickSize})`);
     }
     
