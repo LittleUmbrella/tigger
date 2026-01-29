@@ -9,6 +9,7 @@ import { parseManagementCommand } from '../managers/managementParser.js';
 import { vipCryptoSignals } from './channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from './channels/3241720654/ronnie-crypto-signals.js';
 import { connect } from './channels/2394142145/connect.js';
+import { schoolParser } from './schoolParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -17,6 +18,7 @@ registerParser('default_parser', defaultParser); // Alias for backward compatibi
 registerParser('vip_crypto_signals', vipCryptoSignals);
 registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
 registerParser('connect', connect);
+registerParser('school', schoolParser);
 
 /**
  * Parse a message using the specified parser name
