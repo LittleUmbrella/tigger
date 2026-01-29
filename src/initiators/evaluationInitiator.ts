@@ -253,7 +253,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     );
 
     for (let i = 0; i < roundedTPPrices.length; i++) {
-      const tpIndex = i + 1; // Use 1-based TP index
+      const tpIndex = i; // Use 0-based TP index to match mockExchange and evaluationOrchestrator
       
       // Check if TP order with this index already exists
       if (existingTPOrdersByIndex.has(tpIndex)) {
