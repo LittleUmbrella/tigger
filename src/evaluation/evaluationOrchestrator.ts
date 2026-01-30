@@ -540,7 +540,8 @@ async function recalculateQuantitiesHistorically(
       const bybitClient = priceProvider.getBybitClient();
       if (bybitClient) {
         const normalizedTradingPair = trade.trading_pair.replace('/', '').toUpperCase();
-        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair);
+        // Use cache in evaluation mode (recalculateQuantitiesHistorically is only called during evaluation)
+        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true);
         if (symbolInfo?.qtyPrecision !== undefined) {
           decimalPrecision = symbolInfo.qtyPrecision;
         }

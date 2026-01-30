@@ -13,6 +13,7 @@ interface PriceDataPoint {
 
 interface HistoricalPriceProviderState {
   priceCache: Map<string, PriceDataPoint[]>;
+  inFlightRequests: Map<string, Promise<PriceDataPoint[]>>; // Track in-flight requests to prevent duplicate API calls
   currentTime: dayjs.Dayjs;
   speedMultiplier: number;
   startTime: dayjs.Dayjs;
@@ -677,75 +678,98 @@ async function fetchPriceData(
     return state.priceCache.get(cacheKey)!;
   }
   
-  // Try both spot and linear categories
-  const categories: Array<'spot' | 'linear'> = ['spot', 'linear'];
-  let pricePoints: PriceDataPoint[] = [];
-  const categoryResults: Record<string, { success: boolean; dataPoints: number; error?: any }> = {};
+  // Check if there's already an in-flight request for this data
+  // This prevents duplicate API calls when multiple parallel requests come in
+  if (state.inFlightRequests.has(cacheKey)) {
+    logger.debug('Waiting for in-flight request', {
+      symbol: normalizedSymbol,
+      cacheKey: cacheKey.substring(0, 50)
+    });
+    return await state.inFlightRequests.get(cacheKey)!;
+  }
   
-  for (const category of categories) {
-    const result = await tryFetchWithCategory(
-      state,
-      normalizedSymbol,
-      startTime.valueOf(),
-      endTime.valueOf(),
-      category
-    );
-    
-    if (result && result.length > 0) {
-      pricePoints = result;
-      categoryResults[category] = { success: true, dataPoints: pricePoints.length };
-      logger.info('Fetched price data using category', {
+  // Create the fetch promise and store it
+  const fetchPromise = (async () => {
+    try {
+      // Try both spot and linear categories
+      const categories: Array<'spot' | 'linear'> = ['spot', 'linear'];
+      let pricePoints: PriceDataPoint[] = [];
+      const categoryResults: Record<string, { success: boolean; dataPoints: number; error?: any }> = {};
+      
+      for (const category of categories) {
+        const result = await tryFetchWithCategory(
+          state,
+          normalizedSymbol,
+          startTime.valueOf(),
+          endTime.valueOf(),
+          category
+        );
+        
+        if (result && result.length > 0) {
+          pricePoints = result;
+          categoryResults[category] = { success: true, dataPoints: pricePoints.length };
+          logger.info('Fetched price data using category', {
+            symbol: normalizedSymbol,
+            category,
+            dataPoints: pricePoints.length,
+            startTime: startTime.toISOString(),
+            endTime: endTime.toISOString()
+          });
+          break;
+        } else {
+          categoryResults[category] = { 
+            success: false, 
+            dataPoints: result?.length || 0,
+            error: result === null ? 'API returned null' : 'Empty result list'
+          };
+          logger.debug('Category attempt returned no data, will try next category', {
+            symbol: normalizedSymbol,
+            category,
+            result: result === null ? 'null' : `empty list (${result?.length || 0} items)`,
+            nextCategory: category === 'spot' ? 'linear' : 'none'
+          });
+        }
+      }
+      
+      if (pricePoints.length === 0) {
+        // Log detailed information about what was tried
+        const triedCategories = Object.keys(categoryResults);
+        logger.warn('No price data found for symbol in any category', {
+          symbol: normalizedSymbol,
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          triedCategories,
+          categoryResults,
+          note: triedCategories.length < 2 ? 'Not all categories were attempted - this may indicate an early return' : 'All categories attempted'
+        });
+        state.priceCache.set(cacheKey, []);
+        return [];
+      }
+      
+      // Sort by timestamp
+      pricePoints.sort((a, b) => a.timestamp - b.timestamp);
+      
+      // Cache the results
+      state.priceCache.set(cacheKey, pricePoints);
+      
+      logger.info('Fetched historical price data', {
         symbol: normalizedSymbol,
-        category,
         dataPoints: pricePoints.length,
         startTime: startTime.toISOString(),
         endTime: endTime.toISOString()
       });
-      break;
-    } else {
-      categoryResults[category] = { 
-        success: false, 
-        dataPoints: result?.length || 0,
-        error: result === null ? 'API returned null' : 'Empty result list'
-      };
-      logger.debug('Category attempt returned no data, will try next category', {
-        symbol: normalizedSymbol,
-        category,
-        result: result === null ? 'null' : `empty list (${result?.length || 0} items)`,
-        nextCategory: category === 'spot' ? 'linear' : 'none'
-      });
+      
+      return pricePoints;
+    } finally {
+      // Remove from in-flight requests when done (success or failure)
+      state.inFlightRequests.delete(cacheKey);
     }
-  }
+  })();
   
-  if (pricePoints.length === 0) {
-    // Log detailed information about what was tried
-    const triedCategories = Object.keys(categoryResults);
-    logger.warn('No price data found for symbol in any category', {
-      symbol: normalizedSymbol,
-      startTime: startTime.toISOString(),
-      endTime: endTime.toISOString(),
-      triedCategories,
-      categoryResults,
-      note: triedCategories.length < 2 ? 'Not all categories were attempted - this may indicate an early return' : 'All categories attempted'
-    });
-    state.priceCache.set(cacheKey, []);
-    return [];
-  }
+  // Store the promise so other concurrent requests can wait for it
+  state.inFlightRequests.set(cacheKey, fetchPromise);
   
-  // Sort by timestamp
-  pricePoints.sort((a, b) => a.timestamp - b.timestamp);
-  
-  // Cache the results
-  state.priceCache.set(cacheKey, pricePoints);
-  
-  logger.info('Fetched historical price data', {
-    symbol: normalizedSymbol,
-    dataPoints: pricePoints.length,
-    startTime: startTime.toISOString(),
-    endTime: endTime.toISOString()
-  });
-  
-  return pricePoints;
+  return await fetchPromise;
 }
 
 export function createHistoricalPriceProvider(
@@ -763,6 +787,7 @@ export function createHistoricalPriceProvider(
   
   const state: HistoricalPriceProviderState = {
     priceCache: new Map(),
+    inFlightRequests: new Map(),
     currentTime: dayjs(startDate),
     speedMultiplier,
     startTime: dayjs(startDate),
