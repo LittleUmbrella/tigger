@@ -8,6 +8,7 @@
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { Client, GatewayIntentBits, TextChannel } from 'discord.js';
+import { Client as SelfBotClient, TextChannel as SelfBotTextChannel } from 'discord.js-selfbot-v13';
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { downloadMessageImages } from '../utils/imageDownloader.js';
@@ -15,11 +16,12 @@ import dayjs from 'dayjs';
 
 export interface HarvestOptions {
   channel: string;
-  platform?: 'telegram' | 'discord'; // Platform type (default: 'telegram' for backward compatibility)
+  platform?: 'telegram' | 'discord' | 'discord-selfbot'; // Platform type (default: 'telegram' for backward compatibility)
   // Telegram-specific fields
   accessHash?: string;
   // Discord-specific fields
   botToken?: string; // Discord bot token (can also use DISCORD_BOT_TOKEN env var)
+  userToken?: string; // Discord user token for self-bot (can also use DISCORD_USER_TOKEN env var)
   // Common fields
   startDate?: string; // ISO date string
   endDate?: string; // ISO date string
@@ -48,6 +50,8 @@ export async function harvestMessages(
 
   if (platform === 'discord') {
     return harvestDiscordMessages(db, options);
+  } else if (platform === 'discord-selfbot') {
+    return harvestDiscordSelfBotMessages(db, options);
   } else {
     return harvestTelegramMessages(db, options);
   }
@@ -783,6 +787,280 @@ async function harvestDiscordMessages(
     }
 
     logger.info('Message harvesting completed', {
+      channel: options.channel,
+      ...result
+    });
+
+    return result;
+  } finally {
+    await client.destroy();
+  }
+}
+
+/**
+ * Harvest historical messages from a Discord channel using self-bot (user token)
+ */
+async function harvestDiscordSelfBotMessages(
+  db: DatabaseManager,
+  options: HarvestOptions
+): Promise<HarvestResult> {
+  const userToken = options.userToken || process.env.DISCORD_USER_TOKEN;
+  if (!userToken) {
+    throw new Error('DISCORD_USER_TOKEN environment variable or userToken in options is required');
+  }
+
+  const client = new SelfBotClient();
+
+  try {
+    await client.login(userToken);
+    logger.info('Connected to Discord (self-bot) for message harvesting', {
+      channel: options.channel,
+      username: client.user?.username || 'Unknown',
+      userId: client.user?.id || 'Unknown'
+    });
+
+    // Log warning about ToS
+    logger.warn('Discord self-bot usage violates Discord Terms of Service. Use at your own risk.', {
+      channel: options.channel
+    });
+
+    // Resolve channel
+    let channelId = options.channel;
+    if (channelId.startsWith('<#') && channelId.endsWith('>')) {
+      channelId = channelId.slice(2, -1);
+    }
+    
+    const channel = await client.channels.fetch(channelId);
+    if (!channel) {
+      throw new Error(`Channel not found: ${channelId}`);
+    }
+
+    // Check if channel is text-based (self-bot package may have different API)
+    const channelType = (channel as any).type;
+    if (channelType !== 0 && channelType !== 5 && channelType !== 'GUILD_TEXT' && channelType !== 'GUILD_NEWS') {
+      throw new Error(`Channel ${channelId} is not a valid text channel`);
+    }
+
+    const textChannel = channel as SelfBotTextChannel;
+    logger.info('Resolved Discord channel (self-bot)', {
+      channel: options.channel,
+      channelName: (textChannel as any).name || 'Unknown'
+    });
+
+    // Parse date filters
+    const startDate = options.startDate ? dayjs(options.startDate) : null;
+    const endDate = options.endDate ? dayjs(options.endDate) : null;
+
+    // Get last message ID from database
+    const existingMessages = await db.getMessagesByChannel(options.channel);
+    let lastMessageId: string | null = null;
+    if (existingMessages.length > 0) {
+      logger.info('Found existing messages in database', {
+        channel: options.channel,
+        existingMessageCount: existingMessages.length
+      });
+    }
+
+    const result: HarvestResult = {
+      totalMessages: 0,
+      newMessages: 0,
+      skippedMessages: 0,
+      errors: 0,
+      lastMessageId: 0,
+    };
+
+    let batchCount = 0;
+    let shouldStop = false;
+
+    while (!shouldStop) {
+      batchCount++;
+      
+      const delayMs = options.delay === 'auto'
+        ? Math.floor(Math.random() * (700 - 300 + 1)) + 300
+        : (options.delay || 0);
+
+      try {
+        const limit = Math.min(100, options.limit && options.limit > 0 ? options.limit - result.newMessages : 100);
+        const fetchOptions: any = { limit };
+        
+        if (lastMessageId) {
+          fetchOptions.before = lastMessageId;
+        }
+
+        const messages: any = await textChannel.messages.fetch(fetchOptions);
+        
+        // Handle both Collection and array-like responses
+        const messageArray = messages.size !== undefined 
+          ? Array.from(messages.values())
+          : Array.isArray(messages) 
+            ? messages 
+            : [];
+        
+        if (messageArray.length === 0) {
+          logger.info('No more messages to harvest', { channel: options.channel });
+          break;
+        }
+
+        // Discord returns messages newest-first, reverse to process oldest-first
+        const ordered: any[] = messageArray.reverse();
+        let batchNewMessages = 0;
+        let batchSkipped = 0;
+
+        for (const msg of ordered) {
+          if (!msg.content && (!msg.attachments || (msg.attachments.size === 0 && !Array.isArray(msg.attachments)))) {
+            batchSkipped++;
+            continue;
+          }
+
+          const msgId = msg.id;
+          const msgDate = msg.createdAt;
+
+          // Apply date filters
+          if (startDate && dayjs(msgDate).isBefore(startDate)) {
+            batchSkipped++;
+            continue;
+          }
+          if (endDate && dayjs(msgDate).isAfter(endDate)) {
+            batchSkipped++;
+            continue;
+          }
+
+          // Apply keyword filters
+          if (options.keywords && options.keywords.length > 0) {
+            const messageText = (msg.content || '').toLowerCase();
+            const hasKeyword = options.keywords.some(k => messageText.includes(k.toLowerCase()));
+            if (!hasKeyword) {
+              batchSkipped++;
+              continue;
+            }
+          }
+
+          // Extract reply_to information
+          let replyToMessageId: number | undefined;
+          if (msg.reference && msg.reference.messageId) {
+            const refId = msg.reference.messageId;
+            const parsedRefId = parseInt(refId, 10);
+            if (!isNaN(parsedRefId)) {
+              replyToMessageId = parsedRefId;
+            }
+          }
+
+          // Download images if enabled
+          let imagePaths: string[] = [];
+          const attachments = msg.attachments;
+          if (options.downloadImages && attachments) {
+            try {
+              // Handle both Collection and array-like attachments
+              let attachmentArray: any[] = [];
+              if (attachments.size !== undefined) {
+                attachmentArray = Array.from(attachments.values());
+              } else if (Array.isArray(attachments)) {
+                attachmentArray = attachments;
+              } else if (typeof attachments === 'object') {
+                attachmentArray = Object.values(attachments);
+              }
+              
+              const imageAttachments = attachmentArray.filter((att: any) => {
+                const contentType = att.contentType || att.content_type || att.type;
+                return contentType?.startsWith('image/');
+              });
+              
+              for (const attachment of imageAttachments) {
+                const url = attachment.url || attachment.proxy_url || attachment.proxyURL;
+                if (url) {
+                  imagePaths.push(url);
+                }
+              }
+            } catch (error) {
+              logger.warn('Failed to process images for message', {
+                channel: options.channel,
+                messageId: msgId,
+                error: error instanceof Error ? error.message : String(error)
+              });
+            }
+          }
+
+          // Insert message into database
+          try {
+            const messageIdNum = hashDiscordId(msgId);
+            
+            await db.insertMessage({
+              message_id: messageIdNum,
+              channel: options.channel,
+              content: (msg.content || '').replace(/\s+/g, ' ').trim(),
+              sender: msg.author?.id || '',
+              date: msgDate.toISOString(),
+              reply_to_message_id: replyToMessageId,
+              image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
+            });
+            batchNewMessages++;
+            result.newMessages++;
+            result.lastMessageId = Math.max(result.lastMessageId, messageIdNum);
+            lastMessageId = msgId;
+          } catch (error) {
+            if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+              shouldStop = true;
+              break;
+            } else {
+              logger.warn('Failed to insert message', {
+                channel: options.channel,
+                messageId: msgId,
+                error: error instanceof Error ? error.message : String(error)
+              });
+              result.errors++;
+            }
+          }
+
+          // Check limit
+          if (options.limit && options.limit > 0 && result.newMessages >= options.limit) {
+            logger.info('Reached message limit', {
+              channel: options.channel,
+              limit: options.limit
+            });
+            shouldStop = true;
+            break;
+          }
+        }
+
+        result.totalMessages += messageArray.length;
+        result.skippedMessages += batchSkipped;
+
+        if (batchNewMessages > 0) {
+          logger.info('Harvested batch (self-bot)', {
+            channel: options.channel,
+            batch: batchCount,
+            newMessages: batchNewMessages,
+            skipped: batchSkipped,
+            totalNew: result.newMessages
+          });
+        }
+
+        if (shouldStop) {
+          break;
+        }
+
+        // Prepare next batch - use the oldest message ID as the before parameter
+        if (messageArray.length === 0) {
+          break;
+        }
+        lastMessageId = messageArray[messageArray.length - 1]?.id || lastMessageId;
+
+        // Delay between batches
+        if (delayMs > 0) {
+          await sleep(delayMs);
+        }
+      } catch (error) {
+        logger.error('Error fetching message batch (self-bot)', {
+          channel: options.channel,
+          batch: batchCount,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        result.errors++;
+        await sleep(5000);
+      }
+    }
+
+    logger.info('Message harvesting completed (self-bot)', {
       channel: options.channel,
       ...result
     });

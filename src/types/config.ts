@@ -8,7 +8,7 @@
 export interface HarvesterConfig {
   name: string;
   channel: string;
-  platform?: 'telegram' | 'discord'; // Platform type (default: 'telegram' for backward compatibility)
+  platform?: 'telegram' | 'discord' | 'discord-selfbot'; // Platform type (default: 'telegram' for backward compatibility)
   // Telegram-specific fields
   apiId?: number; // Required for Telegram
   phone?: string;
@@ -20,6 +20,7 @@ export interface HarvesterConfig {
     accessHash?: string; // Name of environment variable containing Telegram access hash (for private channels)
     session?: string; // Name of environment variable containing Telegram session string (allows multiple harvesters with different sessions)
     botToken?: string; // Name of environment variable containing Discord bot token
+    userToken?: string; // Name of environment variable containing Discord user token (for self-bot harvesters)
   };
   // Deprecated: Direct credentials (for backward compatibility only)
   // Use envVarNames instead for security

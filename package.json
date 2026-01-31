@@ -47,6 +47,7 @@
     "csv-writer": "^1.6.0",
     "dayjs": "^1.11.19",
     "discord.js": "^14.14.1",
+    "discord.js-selfbot-v13": "^3.7.1",
     "dotenv": "^17.2.3",
     "fast-redact": "^3.5.0",
     "fs-extra": "^11.3.2",

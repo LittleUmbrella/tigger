@@ -40,9 +40,10 @@ program
   .command('harvest')
   .description('Harvest historical messages from a Telegram or Discord channel')
   .requiredOption('-c, --channel <channel>', 'Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)')
-  .option('-p, --platform <platform>', 'Platform type: telegram or discord (default: telegram)', 'telegram')
+  .option('-p, --platform <platform>', 'Platform type: telegram, discord, or discord-selfbot (default: telegram)', 'telegram')
   .option('-a, --access-hash <hash>', 'Access hash for private Telegram channels')
   .option('--bot-token <token>', 'Discord bot token (can also use DISCORD_BOT_TOKEN env var)')
+  .option('--user-token <token>', 'Discord user token for self-bot (can also use DISCORD_USER_TOKEN env var)')
   .option('-s, --start-date <date>', 'Start date (YYYY-MM-DD or ISO format)')
   .option('-e, --end-date <date>', 'End date (YYYY-MM-DD or ISO format)')
   .option('-k, --keywords <keywords>', 'Comma-separated keywords to filter messages')
@@ -61,11 +62,16 @@ program
       });
       await db.initialize();
 
+      const platform = options.platform === 'discord' ? 'discord' 
+        : options.platform === 'discord-selfbot' ? 'discord-selfbot'
+        : 'telegram';
+
       const harvestOptions: HarvestOptions = {
         channel: options.channel,
-        platform: options.platform === 'discord' ? 'discord' : 'telegram',
+        platform: platform,
         accessHash: options.accessHash,
         botToken: options.botToken,
+        userToken: options.userToken,
         startDate: options.startDate,
         endDate: options.endDate,
         keywords: options.keywords ? options.keywords.split(',').map((k: string) => k.trim()) : undefined,

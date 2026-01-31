@@ -3,5 +3,6 @@ dist/
 logs/
 data/
 .env
+.env-investigation
 *.log
 .DS_Store

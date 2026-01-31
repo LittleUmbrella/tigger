@@ -32,7 +32,7 @@ npm run evaluate harvest -- \
   --limit 1000
 ```
 
-**Discord:**
+**Discord (App Bot):**
 ```bash
 npm run evaluate harvest -- \
   --channel "1234567890123456789" \
@@ -43,13 +43,25 @@ npm run evaluate harvest -- \
   --limit 1000
 ```
 
+**Discord (Self-Bot):**
+```bash
+npm run evaluate harvest -- \
+  --channel "1234567890123456789" \
+  --platform discord-selfbot \
+  --user-token "your-user-token" \
+  --start-date "2024-01-01" \
+  --end-date "2024-12-31" \
+  --limit 1000
+```
+
 Options:
 - `-c, --channel`: Channel identifier (required)
   - Telegram: username, invite link, or channel ID
   - Discord: channel ID (numeric string)
-- `-p, --platform`: Platform type - `telegram` or `discord` (default: `telegram`)
+- `-p, --platform`: Platform type - `telegram`, `discord`, or `discord-selfbot` (default: `telegram`)
 - `-a, --access-hash`: Access hash for private Telegram channels
 - `--bot-token`: Discord bot token (can also use `DISCORD_BOT_TOKEN` env var)
+- `--user-token`: Discord user token for self-bot (can also use `DISCORD_USER_TOKEN` env var)
 - `-s, --start-date`: Start date (YYYY-MM-DD or ISO format)
 - `-e, --end-date`: End date (YYYY-MM-DD or ISO format)
 - `-k, --keywords`: Comma-separated keywords to filter messages

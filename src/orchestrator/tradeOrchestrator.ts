@@ -2,6 +2,7 @@ import { BotConfig, AccountConfig, MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { startSignalHarvester } from '../harvesters/signalHarvester.js';
 import { startDiscordHarvester } from '../harvesters/discordHarvester.js';
+import { startDiscordSelfBotHarvester } from '../harvesters/discordSelfBotHarvester.js';
 import { startCSVHarvester } from '../harvesters/csvHarvester.js';
 import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
@@ -20,6 +21,7 @@ import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from '../parsers/channels/3241720654/ronnie-crypto-signals.js';
 import { connect } from '../parsers/channels/2394142145/connect.js';
 import { schoolParser } from '../parsers/schoolParser.js';
+import { bigParser } from '../parsers/bigParser.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -27,6 +29,7 @@ registerParser('vip_crypto_signals', vipCryptoSignals);
 registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
 registerParser('connect', connect);
 registerParser('school', schoolParser);
+registerParser('big', bigParser);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];
@@ -203,6 +206,8 @@ export const startTradeOrchestrator = async (
         const platform = harvester.platform || 'telegram'; // Default to telegram for backward compatibility
         if (platform === 'discord') {
           stopHarvester = await startDiscordHarvester(harvester, db);
+        } else if (platform === 'discord-selfbot') {
+          stopHarvester = await startDiscordSelfBotHarvester(harvester, db);
         } else {
           stopHarvester = await startSignalHarvester(harvester, db);
         }
