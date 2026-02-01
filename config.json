@@ -24,6 +24,26 @@
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
+    },
+    {
+      "name": "big_harvester",
+      "channel": "2385521106",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_BIG"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
+    },
+    {
+      "name": "gold_scalps_harvester",
+      "channel": "1441399338805891174",
+      "platform": "discord-selfbot",
+      "envVarNames": {
+        "userToken": "DISCORD_USER_TOKEN"
+      }      
     }
   ],
   "parsers": [
@@ -34,6 +54,14 @@
     {
       "name": "ronnie_crypto_signals",
       "channel": "3272135406"
+    },
+    {
+      "name": "gold_scalps",
+      "channel": "1441399338805891174"
+    },
+    {
+      "name": "big",
+      "channel": "2385521106"
     }
   ],
   "accounts": [
@@ -97,6 +125,28 @@
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
       "baseLeverage": 50
+    },
+    {
+      "channel": "1441399338805891174",
+      "harvester": "gold_scalps_harvester",
+      "parser": "gold_scalps",
+      "breakevenAfterTPs": 1,
+      "entryTimeoutMinutes": 60,
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 20
+    },
+    {
+      "channel": "2385521106",
+      "harvester": "big_harvester",
+      "parser": "big",
+      "breakevenAfterTPs": 1,
+      "entryTimeoutMinutes": 60,
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 20
     }
   ],
   "database": {
