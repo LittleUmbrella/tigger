@@ -9,7 +9,7 @@ dns.setDefaultResultOrder('ipv4first');
 
 export interface Message {
   id: number;
-  message_id: number;
+  message_id: string; // Message ID from source (Discord snowflake, Telegram ID, GUID, etc.)
   channel: string;
   content: string;
   sender: string;
@@ -17,7 +17,7 @@ export interface Message {
   created_at: string;
   parsed: boolean;
   analyzed?: boolean; // Whether message has been analyzed for format identification
-  reply_to_message_id?: number; // Telegram message ID this message is replying to (if any)
+  reply_to_message_id?: string; // Message ID this message is replying to (if any)
   old_content?: string; // Previous content if message was edited (deprecated - use message_versions table)
   edited_at?: string; // Timestamp when message was last edited (deprecated - use message_versions table)
   image_paths?: string; // JSON array of image file paths (relative to data directory)
@@ -34,7 +34,7 @@ export interface MessageVersion {
 
 export interface Trade {
   id: number;
-  message_id: number; // Source message ID that triggered this trade
+  message_id: string; // Source message ID that triggered this trade
   channel: string;
   trading_pair: string;
   leverage: number;
@@ -117,17 +117,17 @@ interface DatabaseAdapter {
   getMessagesByChannel(channel: string, limit?: number): Promise<Message[]>;
   markMessageParsed(id: number): Promise<void>;
   markMessageAnalyzed(id: number): Promise<void>;
-  updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void>;
-  insertMessageVersion(messageId: number, channel: string, content: string): Promise<number>;
-  getMessageVersions(messageId: number, channel: string): Promise<MessageVersion[]>;
-  getMessageByMessageId(messageId: number, channel: string): Promise<Message | null>;
-  getMessagesByReplyTo(replyToMessageId: number, channel: string): Promise<Message[]>;
-  getMessageReplyChain(messageId: number, channel: string): Promise<Message[]>;
+  updateMessage(messageId: string, channel: string, updates: Partial<Message>): Promise<void>;
+  insertMessageVersion(messageId: string, channel: string, content: string): Promise<number>;
+  getMessageVersions(messageId: string, channel: string): Promise<MessageVersion[]>;
+  getMessageByMessageId(messageId: string, channel: string): Promise<Message | null>;
+  getMessagesByReplyTo(replyToMessageId: string, channel: string): Promise<Message[]>;
+  getMessageReplyChain(messageId: string, channel: string): Promise<Message[]>;
   insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number>;
   getActiveTrades(): Promise<Trade[]>;
   getClosedTrades(): Promise<Trade[]>;
   getTradesByStatus(status: Trade['status']): Promise<Trade[]>;
-  getTradesByMessageId(messageId: number, channel: string): Promise<Trade[]>;
+  getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]>;
   getTradeWithMessage(tradeId: number): Promise<TradeWithMessage | null>;
   getTradesWithMessages(status?: Trade['status']): Promise<TradeWithMessage[]>;
   updateTrade(id: number, updates: Partial<Trade>): Promise<void>;
@@ -156,7 +156,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
         channel TEXT NOT NULL,
         content TEXT NOT NULL,
         sender TEXT,
@@ -164,12 +164,56 @@ class SQLiteAdapter implements DatabaseAdapter {
         created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
         parsed BOOLEAN NOT NULL DEFAULT 0,
         analyzed BOOLEAN NOT NULL DEFAULT 0,
-        reply_to_message_id INTEGER,
+        reply_to_message_id TEXT,
         old_content TEXT,
         edited_at TEXT,
         UNIQUE(message_id, channel)
       )
     `);
+    
+    // Migrate message_id and reply_to_message_id from INTEGER to TEXT if needed (SQLite)
+    try {
+      // Check if table exists and has INTEGER columns
+      const tableInfo = this.db.prepare("PRAGMA table_info(messages)").all() as Array<{name: string, type: string}>;
+      const messageIdCol = tableInfo.find(col => col.name === 'message_id');
+      const replyToCol = tableInfo.find(col => col.name === 'reply_to_message_id');
+      
+      if (messageIdCol && messageIdCol.type.toUpperCase().includes('INTEGER')) {
+        // Need to migrate - SQLite doesn't support ALTER COLUMN, so recreate table
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS messages_migrate (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            content TEXT NOT NULL,
+            sender TEXT,
+            date TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            parsed BOOLEAN NOT NULL DEFAULT 0,
+            analyzed BOOLEAN NOT NULL DEFAULT 0,
+            reply_to_message_id TEXT,
+            old_content TEXT,
+            edited_at TEXT,
+            image_paths TEXT
+          )
+        `);
+        this.db.exec(`
+          INSERT INTO messages_migrate 
+          SELECT id, CAST(message_id AS TEXT), channel, content, sender, date, created_at, parsed, 
+                 COALESCE(analyzed, 0), CAST(reply_to_message_id AS TEXT), old_content, edited_at, image_paths
+          FROM messages
+        `);
+        this.db.exec(`DROP TABLE messages`);
+        this.db.exec(`ALTER TABLE messages_migrate RENAME TO messages`);
+        this.db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_message_id_channel ON messages(message_id, channel)`);
+        logger.info('Migrated SQLite messages table: message_id and reply_to_message_id to TEXT');
+      }
+    } catch (migrateError: any) {
+      // Migration failed, but table might already be TEXT - continue
+      logger.warn('Failed to migrate SQLite message_id to TEXT', {
+        error: migrateError instanceof Error ? migrateError.message : String(migrateError)
+      });
+    }
     
     // Add analyzed column if it doesn't exist (for backward compatibility)
     try {
@@ -194,7 +238,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     
     // Add reply_to_message_id column if it doesn't exist (migration)
     try {
-      this.db.exec(`ALTER TABLE messages ADD COLUMN reply_to_message_id INTEGER`);
+      this.db.exec(`ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`);
     } catch (error) {
       // Column already exists, ignore
     }
@@ -222,7 +266,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS trades (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        message_id INTEGER NOT NULL,
+        message_id TEXT NOT NULL,
         channel TEXT NOT NULL,
         trading_pair TEXT NOT NULL,
         leverage INTEGER NOT NULL,
@@ -248,6 +292,57 @@ class SQLiteAdapter implements DatabaseAdapter {
         expires_at TEXT NOT NULL
       )
     `);
+    
+    // Migrate trades.message_id from INTEGER to TEXT if needed (SQLite)
+    try {
+      const test = this.db.prepare('SELECT message_id FROM trades LIMIT 1').get();
+      // If we got here, table exists - try to migrate
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS trades_migrate (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          trading_pair TEXT NOT NULL,
+          leverage INTEGER NOT NULL,
+          entry_price REAL NOT NULL,
+          stop_loss REAL NOT NULL,
+          take_profits TEXT NOT NULL,
+          risk_percentage REAL NOT NULL,
+          quantity REAL,
+          exchange TEXT NOT NULL,
+          account_name TEXT,
+          order_id TEXT,
+          position_id TEXT,
+          entry_order_type TEXT,
+          direction TEXT,
+          status TEXT NOT NULL DEFAULT 'pending',
+          entry_filled_at TEXT,
+          exit_price REAL,
+          exit_filled_at TEXT,
+          pnl REAL,
+          pnl_percentage REAL,
+          stop_loss_breakeven BOOLEAN NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at TEXT NOT NULL
+        )
+      `);
+      this.db.exec(`
+        INSERT INTO trades_migrate 
+        SELECT id, CAST(message_id AS TEXT), channel, trading_pair, leverage, entry_price, stop_loss, take_profits,
+               risk_percentage, quantity, exchange, account_name, order_id, position_id, entry_order_type, direction,
+               status, entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage, stop_loss_breakeven,
+               created_at, updated_at, expires_at
+        FROM trades
+      `);
+      this.db.exec(`DROP TABLE trades`);
+      this.db.exec(`ALTER TABLE trades_migrate RENAME TO trades`);
+    } catch (migrateError: any) {
+      // Migration failed, but table might already be TEXT - continue
+      logger.warn('Failed to migrate SQLite trades.message_id to TEXT', {
+        error: migrateError instanceof Error ? migrateError.message : String(migrateError)
+      });
+    }
 
     // Add account_name column if it doesn't exist (migration)
     try {
@@ -448,7 +543,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     stmt.run(id);
   }
 
-  async updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void> {
+  async updateMessage(messageId: string, channel: string, updates: Partial<Message>): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
 
@@ -480,7 +575,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     stmt.run(...values);
   }
 
-  async insertMessageVersion(messageId: number, channel: string, content: string): Promise<number> {
+  async insertMessageVersion(messageId: string, channel: string, content: string): Promise<number> {
     // Get the internal message ID from Telegram message_id
     const message = await this.getMessageByMessageId(messageId, channel);
     if (!message) {
@@ -503,7 +598,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     return result.lastInsertRowid as number;
   }
 
-  async getMessageVersions(messageId: number, channel: string): Promise<MessageVersion[]> {
+  async getMessageVersions(messageId: string, channel: string): Promise<MessageVersion[]> {
     // Get the internal message ID from Telegram message_id
     const message = await this.getMessageByMessageId(messageId, channel);
     if (!message) {
@@ -595,28 +690,28 @@ class SQLiteAdapter implements DatabaseAdapter {
     return stmt.all(status) as Trade[];
   }
 
-  async getTradesByMessageId(messageId: number, channel: string): Promise<Trade[]> {
+  async getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]> {
     const stmt = this.db.prepare(
       'SELECT * FROM trades WHERE message_id = ? AND channel = ? ORDER BY created_at ASC'
     );
     return stmt.all(messageId, channel) as Trade[];
   }
 
-  async getMessageByMessageId(messageId: number, channel: string): Promise<Message | null> {
+  async getMessageByMessageId(messageId: string, channel: string): Promise<Message | null> {
     const stmt = this.db.prepare('SELECT * FROM messages WHERE message_id = ? AND channel = ?');
     const result = stmt.get(messageId, channel) as Message | undefined;
     return result || null;
   }
 
-  async getMessagesByReplyTo(replyToMessageId: number, channel: string): Promise<Message[]> {
+  async getMessagesByReplyTo(replyToMessageId: string, channel: string): Promise<Message[]> {
     const stmt = this.db.prepare('SELECT * FROM messages WHERE reply_to_message_id = ? AND channel = ? ORDER BY date ASC');
     return stmt.all(replyToMessageId, channel) as Message[];
   }
 
-  async getMessageReplyChain(messageId: number, channel: string): Promise<Message[]> {
+  async getMessageReplyChain(messageId: string, channel: string): Promise<Message[]> {
     const chain: Message[] = [];
-    let currentMessageId: number | null = messageId;
-    const visited = new Set<number>();
+    let currentMessageId: string | null = messageId;
+    const visited = new Set<string>();
 
     while (currentMessageId && !visited.has(currentMessageId)) {
       visited.add(currentMessageId);
@@ -1100,7 +1195,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       await client.query(`
         CREATE TABLE IF NOT EXISTS messages (
           id SERIAL PRIMARY KEY,
-          message_id INTEGER NOT NULL,
+          message_id TEXT NOT NULL,
           channel TEXT NOT NULL,
           content TEXT NOT NULL,
           sender TEXT,
@@ -1108,10 +1203,48 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           parsed BOOLEAN NOT NULL DEFAULT FALSE,
           analyzed BOOLEAN NOT NULL DEFAULT FALSE,
-          reply_to_message_id INTEGER,
+          reply_to_message_id TEXT,
           UNIQUE(message_id, channel)
         )
       `);
+      
+      // Migrate message_id from INTEGER/BIGINT to TEXT if needed
+      try {
+        await client.query(`
+          ALTER TABLE messages 
+          ALTER COLUMN message_id TYPE TEXT USING message_id::TEXT
+        `);
+      } catch (error: any) {
+        // Column might already be TEXT, ignore migration errors
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (!errorMsg.includes('does not exist') && 
+            !errorMsg.includes('type') && 
+            !errorMsg.includes('text') &&
+            !errorMsg.includes('already')) {
+          logger.warn('Failed to migrate message_id to TEXT', {
+            error: error.message
+          });
+        }
+      }
+      
+      // Migrate reply_to_message_id from INTEGER/BIGINT to TEXT if needed
+      try {
+        await client.query(`
+          ALTER TABLE messages 
+          ALTER COLUMN reply_to_message_id TYPE TEXT USING reply_to_message_id::TEXT
+        `);
+      } catch (error: any) {
+        // Column might already be TEXT or doesn't exist yet, ignore migration errors
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (!errorMsg.includes('does not exist') && 
+            !errorMsg.includes('type') && 
+            !errorMsg.includes('text') &&
+            !errorMsg.includes('already')) {
+          logger.warn('Failed to migrate reply_to_message_id to TEXT', {
+            error: error.message
+          });
+        }
+      }
       
       // Add analyzed column if it doesn't exist (for backward compatibility)
       try {
@@ -1125,7 +1258,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       
       // Add reply_to_message_id column if it doesn't exist (migration)
       try {
-        await client.query(`ALTER TABLE messages ADD COLUMN reply_to_message_id INTEGER`);
+        await client.query(`ALTER TABLE messages ADD COLUMN reply_to_message_id TEXT`);
       } catch (error: any) {
         // Column already exists, ignore
         if (!error.message?.includes('already exists')) {
@@ -1176,7 +1309,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       await client.query(`
         CREATE TABLE IF NOT EXISTS trades (
           id SERIAL PRIMARY KEY,
-          message_id INTEGER NOT NULL,
+          message_id TEXT NOT NULL,
           channel TEXT NOT NULL,
           trading_pair TEXT NOT NULL,
           leverage INTEGER NOT NULL,
@@ -1202,6 +1335,25 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           expires_at TIMESTAMP NOT NULL
         )
       `);
+      
+      // Migrate trades.message_id from INTEGER/BIGINT to TEXT if needed
+      try {
+        await client.query(`
+          ALTER TABLE trades 
+          ALTER COLUMN message_id TYPE TEXT USING message_id::TEXT
+        `);
+      } catch (error: any) {
+        // Column might already be TEXT, ignore migration errors
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (!errorMsg.includes('does not exist') && 
+            !errorMsg.includes('type') && 
+            !errorMsg.includes('text') &&
+            !errorMsg.includes('already')) {
+          logger.warn('Failed to migrate trades.message_id to TEXT', {
+            error: error.message
+          });
+        }
+      }
 
       // Add account_name column if it doesn't exist (migration)
       try {
@@ -1443,7 +1595,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     await this.pool.query('UPDATE messages SET analyzed = TRUE WHERE id = $1', [id]);
   }
 
-  async updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void> {
+  async updateMessage(messageId: string, channel: string, updates: Partial<Message>): Promise<void> {
     const fields: string[] = [];
     const values: any[] = [];
     let paramIndex = 1;
@@ -1476,7 +1628,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     );
   }
 
-  async insertMessageVersion(messageId: number, channel: string, content: string): Promise<number> {
+  async insertMessageVersion(messageId: string, channel: string, content: string): Promise<number> {
     // Get the internal message ID from Telegram message_id
     const message = await this.getMessageByMessageId(messageId, channel);
     if (!message) {
@@ -1501,7 +1653,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return result.rows[0].id;
   }
 
-  async getMessageVersions(messageId: number, channel: string): Promise<MessageVersion[]> {
+  async getMessageVersions(messageId: string, channel: string): Promise<MessageVersion[]> {
     // Get the internal message ID from Telegram message_id
     const message = await this.getMessageByMessageId(messageId, channel);
     if (!message) {
@@ -1525,7 +1677,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     })) as MessageVersion[];
   }
 
-  async getMessageByMessageId(messageId: number, channel: string): Promise<Message | null> {
+  async getMessageByMessageId(messageId: string, channel: string): Promise<Message | null> {
     const result = await this.pool.query(
       'SELECT * FROM messages WHERE message_id = $1 AND channel = $2',
       [messageId, channel]
@@ -1541,7 +1693,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     } as Message;
   }
 
-  async getMessagesByReplyTo(replyToMessageId: number, channel: string): Promise<Message[]> {
+  async getMessagesByReplyTo(replyToMessageId: string, channel: string): Promise<Message[]> {
     const result = await this.pool.query(
       'SELECT * FROM messages WHERE reply_to_message_id = $1 AND channel = $2 ORDER BY date ASC',
       [replyToMessageId, channel]
@@ -1555,10 +1707,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     })) as Message[];
   }
 
-  async getMessageReplyChain(messageId: number, channel: string): Promise<Message[]> {
+  async getMessageReplyChain(messageId: string, channel: string): Promise<Message[]> {
     const chain: Message[] = [];
-    let currentMessageId: number | null = messageId;
-    const visited = new Set<number>();
+    let currentMessageId: string | null = messageId;
+    const visited = new Set<string>();
 
     while (currentMessageId && !visited.has(currentMessageId)) {
       visited.add(currentMessageId);
@@ -1690,7 +1842,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return this.normalizeTrades(result.rows);
   }
 
-  async getTradesByMessageId(messageId: number, channel: string): Promise<Trade[]> {
+  async getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]> {
     const result = await this.pool.query(
       'SELECT * FROM trades WHERE message_id = $1 AND channel = $2 ORDER BY created_at ASC',
       [messageId, channel]
@@ -2026,27 +2178,27 @@ export class DatabaseManager {
     return this.adapter.markMessageAnalyzed(id);
   }
 
-  updateMessage(messageId: number, channel: string, updates: Partial<Message>): Promise<void> {
+  updateMessage(messageId: string, channel: string, updates: Partial<Message>): Promise<void> {
     return this.adapter.updateMessage(messageId, channel, updates);
   }
 
-  insertMessageVersion(messageId: number, channel: string, content: string): Promise<number> {
+  insertMessageVersion(messageId: string, channel: string, content: string): Promise<number> {
     return this.adapter.insertMessageVersion(messageId, channel, content);
   }
 
-  getMessageVersions(messageId: number, channel: string): Promise<MessageVersion[]> {
+  getMessageVersions(messageId: string, channel: string): Promise<MessageVersion[]> {
     return this.adapter.getMessageVersions(messageId, channel);
   }
 
-  getMessageByMessageId(messageId: number, channel: string): Promise<Message | null> {
+  getMessageByMessageId(messageId: string, channel: string): Promise<Message | null> {
     return this.adapter.getMessageByMessageId(messageId, channel);
   }
 
-  getMessagesByReplyTo(replyToMessageId: number, channel: string): Promise<Message[]> {
+  getMessagesByReplyTo(replyToMessageId: string, channel: string): Promise<Message[]> {
     return this.adapter.getMessagesByReplyTo(replyToMessageId, channel);
   }
 
-  getMessageReplyChain(messageId: number, channel: string): Promise<Message[]> {
+  getMessageReplyChain(messageId: string, channel: string): Promise<Message[]> {
     return this.adapter.getMessageReplyChain(messageId, channel);
   }
 
@@ -2070,7 +2222,7 @@ export class DatabaseManager {
     return this.adapter.getTradesByStatus(status);
   }
 
-  getTradesByMessageId(messageId: number, channel: string): Promise<Trade[]> {
+  getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]> {
     return this.adapter.getTradesByMessageId(messageId, channel);
   }
 
