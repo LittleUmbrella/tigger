@@ -11,6 +11,7 @@ import { ronnieCryptoSignals } from './channels/3241720654/ronnie-crypto-signals
 import { connect } from './channels/2394142145/connect.js';
 import { schoolParser } from './schoolParser.js';
 import { bigParser } from './bigParser.js';
+import { goldScalpsParser } from './goldScalpsParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -21,6 +22,7 @@ registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
 registerParser('connect', connect);
 registerParser('school', schoolParser);
 registerParser('big', bigParser);
+registerParser('gold_scalps', goldScalpsParser);
 
 /**
  * Parse a message using the specified parser name

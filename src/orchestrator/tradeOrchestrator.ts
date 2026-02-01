@@ -22,6 +22,7 @@ import { ronnieCryptoSignals } from '../parsers/channels/3241720654/ronnie-crypt
 import { connect } from '../parsers/channels/2394142145/connect.js';
 import { schoolParser } from '../parsers/schoolParser.js';
 import { bigParser } from '../parsers/bigParser.js';
+import { goldScalpsParser } from '../parsers/goldScalpsParser.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -30,6 +31,7 @@ registerParser('ronnie_crypto_signals', ronnieCryptoSignals);
 registerParser('connect', connect);
 registerParser('school', schoolParser);
 registerParser('big', bigParser);
+registerParser('gold_scalps', goldScalpsParser);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];
