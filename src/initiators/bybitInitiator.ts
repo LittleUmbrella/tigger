@@ -67,12 +67,91 @@ const getAccountCredentials = (account: AccountConfig | null, fallbackTestnet: b
 };
 
 /**
+ * Check if an order matches a filter rule
+ */
+const matchesFilterRule = (order: ParsedOrder, rule: { tradingPairs?: string[]; minLeverage?: number; maxLeverage?: number; signalTypes?: ('long' | 'short')[] }): boolean => {
+  // Check trading pair match
+  if (rule.tradingPairs && rule.tradingPairs.length > 0) {
+    const normalizedTradingPair = order.tradingPair.toUpperCase();
+    const matchesTradingPair = rule.tradingPairs.some(tp => {
+      const normalizedTp = tp.toUpperCase().replace('/', '');
+      return normalizedTradingPair.includes(normalizedTp) || normalizedTp.includes(normalizedTradingPair.replace('/', ''));
+    });
+    if (!matchesTradingPair) {
+      return false;
+    }
+  }
+
+  // Check leverage range
+  if (rule.minLeverage !== undefined && order.leverage < rule.minLeverage) {
+    return false;
+  }
+  if (rule.maxLeverage !== undefined && order.leverage > rule.maxLeverage) {
+    return false;
+  }
+
+  // Check signal type
+  if (rule.signalTypes && rule.signalTypes.length > 0) {
+    if (!rule.signalTypes.includes(order.signalType)) {
+      return false;
+    }
+  }
+
+  return true;
+};
+
+/**
  * Get list of accounts to use for this initiator
+ * Supports signal-based account filtering via accountFilters
  */
 const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] => {
-  const { config, accounts } = context;
+  const { config, accounts, accountFilters, order } = context;
   
-  // If accounts config is provided and initiator specifies accounts
+  // First, check if accountFilters are provided (channel-level signal-based filtering)
+  if (accountFilters && accountFilters.length > 0 && accounts) {
+    const accountMap = new Map(accounts.map(acc => [acc.name, acc]));
+    
+    // Evaluate filters in order - first match wins
+    for (const filter of accountFilters) {
+      if (matchesFilterRule(order, filter.rules)) {
+        const accountNames = Array.isArray(filter.accounts) ? filter.accounts : [filter.accounts];
+        const selectedAccounts: (AccountConfig | null)[] = [];
+        
+        for (const accountName of accountNames) {
+          const account = accountMap.get(accountName);
+          if (account && account.exchange === 'bybit') {
+            selectedAccounts.push(account);
+          } else {
+            logger.warn('Account not found or wrong exchange type in filter', {
+              accountName,
+              filterRules: filter.rules,
+              availableAccounts: Array.from(accountMap.keys())
+            });
+          }
+        }
+        
+        if (selectedAccounts.length > 0) {
+          logger.info('Account filter matched', {
+            tradingPair: order.tradingPair,
+            leverage: order.leverage,
+            signalType: order.signalType,
+            matchedAccounts: selectedAccounts.map(acc => acc?.name || 'default'),
+            filterRules: filter.rules
+          });
+          return selectedAccounts;
+        }
+      }
+    }
+    
+    // No filters matched - log and fall through to initiator-level accounts
+    logger.debug('No account filters matched, falling back to initiator accounts', {
+      tradingPair: order.tradingPair,
+      leverage: order.leverage,
+      signalType: order.signalType
+    });
+  }
+  
+  // Fallback: use initiator-level accounts configuration
   if (accounts && config.accounts) {
     const accountNames = Array.isArray(config.accounts) ? config.accounts : [config.accounts];
     const accountMap = new Map(accounts.map(acc => [acc.name, acc]));
@@ -95,7 +174,7 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
     }
   }
   
-  // Fallback: use default account (null means use env vars)
+  // Final fallback: use default account (null means use env vars)
   // For backward compatibility, if testnet is set in config, preserve it
   // We'll pass it to getAccountCredentials when account is null
   return [null]; // null means use environment variables

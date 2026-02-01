@@ -1,4 +1,4 @@
-import { InitiatorConfig, AccountConfig } from '../types/config.js';
+import { InitiatorConfig, AccountConfig, AccountFilter } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
@@ -88,7 +88,8 @@ export const processUnparsedMessages = async (
   accounts?: AccountConfig[],
   startDate?: string,
   channelBaseLeverage?: number, // Per-channel override for baseLeverage
-  maxStalenessMinutes?: number // Maximum age of messages to process in minutes
+  maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
+  accountFilters?: AccountFilter[] // Channel-level account filtering rules
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -169,7 +170,8 @@ export const processUnparsedMessages = async (
     accounts,
     channelBaseLeverage,
     initiatorFunction,
-    initiatorName
+    initiatorName,
+    accountFilters
   );
   
   logger.debug('Finished processing messages', {
@@ -194,7 +196,8 @@ export const processMessages = async (
   accounts?: AccountConfig[],
   channelBaseLeverage?: number,
   initiatorFunction?: (context: InitiatorContext) => Promise<void>,
-  initiatorName?: string
+  initiatorName?: string,
+  accountFilters?: AccountFilter[]
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -266,7 +269,8 @@ export const processMessages = async (
           isSimulation,
           priceProvider,
           config: mergedInitiatorConfig,
-          accounts
+          accounts,
+          accountFilters
         };
 
         try {

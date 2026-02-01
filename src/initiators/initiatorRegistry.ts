@@ -1,4 +1,4 @@
-import { InitiatorConfig, AccountConfig } from '../types/config.js';
+import { InitiatorConfig, AccountConfig, AccountFilter } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -18,6 +18,7 @@ export interface InitiatorContext {
   priceProvider?: HistoricalPriceProvider;
   config: InitiatorConfig; // Full initiator config for initiator-specific settings
   accounts?: AccountConfig[]; // Available accounts configuration
+  accountFilters?: AccountFilter[]; // Channel-level account filtering rules
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
 }
 

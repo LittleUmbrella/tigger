@@ -789,7 +789,8 @@ export const startTradeOrchestrator = async (
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
-          channelConfig.maxMessageStalenessMinutes // Pass channel-specific message staleness limit
+          channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
+          channelConfig.accountFilters // Pass channel-level account filtering rules
         );
       }
     };
@@ -840,7 +841,8 @@ export const startTradeOrchestrator = async (
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
-          channelConfig.maxMessageStalenessMinutes // Pass channel-specific message staleness limit
+          channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
+          channelConfig.accountFilters // Pass channel-level account filtering rules
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

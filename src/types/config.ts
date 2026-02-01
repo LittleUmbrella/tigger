@@ -104,6 +104,18 @@ export interface MonitorConfig {
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
 }
 
+export interface AccountFilterRule {
+  tradingPairs?: string[]; // Array of trading pairs to match (e.g., ["BTC/USDT", "ETH/USDT"])
+  minLeverage?: number; // Minimum leverage to match
+  maxLeverage?: number; // Maximum leverage to match
+  signalTypes?: ('long' | 'short')[]; // Signal types to match
+}
+
+export interface AccountFilter {
+  accounts: string | string[]; // Account name(s) to use when rule matches
+  rules: AccountFilterRule; // Filtering rules based on order properties
+}
+
 export interface ChannelSetConfig {
   channel: string;
   harvester: string; // Reference to harvester name
@@ -114,6 +126,7 @@ export interface ChannelSetConfig {
   entryTimeoutMinutes?: number; // Per-channel override for minutes to wait for entry before cancelling (overrides monitor config)
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
+  accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
 }
 
 export interface SimulationConfig {
