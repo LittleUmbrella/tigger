@@ -143,9 +143,12 @@ const fetchNewMessages = async (
     const limit = 100; // Discord API limit
     const options: any = { limit };
     
+    // For live harvester: only use 'after' if we have a lastMessageId (resuming from previous poll)
+    // On startup without lastMessageId, fetch recent messages and rely on age filtering
     if (lastMessageId) {
-      options.after = lastMessageId;
+      options.after = lastMessageId; // Fetch messages AFTER this ID (newer messages)
     }
+    // If no lastMessageId, fetch most recent messages (Discord returns newest-first)
     
     const messages: any = await channel.messages.fetch(options);
     
@@ -319,15 +322,26 @@ export const startDiscordSelfBotHarvester = async (
       channelName: channel.name
     });
 
-    // Initialize lastMessageId from database to avoid reprocessing existing messages on startup
+    // For live harvester: Initialize by fetching recent messages and finding the latest one
+    // We can't directly map hashed message IDs back to Discord IDs, so we:
+    // 1. Fetch recent messages from Discord
+    // 2. Check which ones exist in database (via UNIQUE constraint)
+    // 3. Use age filtering to skip old messages on startup
+    // 4. After first successful fetch, use lastMessageId for subsequent polls
     const existingMessages = await db.getMessagesByChannel(config.channel);
     if (existingMessages.length > 0) {
-      logger.info('Found existing messages in database', {
+      logger.info('Found existing messages in database, will use age filtering on startup', {
         channel: config.channel,
         existingMessageCount: existingMessages.length
       });
-      // Note: We'll fetch recent messages and let UNIQUE constraint handle duplicates
-      // The age filtering will skip old messages on startup
+      // Note: We'll fetch recent messages and:
+      // - Age filtering will skip messages older than maxMessageAgeMinutes
+      // - UNIQUE constraint will handle duplicates
+      // - After first fetch, lastMessageId will be set for subsequent polls
+    } else {
+      logger.info('No existing messages in database, will fetch recent messages', {
+        channel: config.channel
+      });
     }
 
     // Set up event handler for message updates (edits)

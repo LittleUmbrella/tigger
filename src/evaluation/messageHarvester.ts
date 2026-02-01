@@ -597,16 +597,24 @@ async function harvestDiscordMessages(
     const startDate = options.startDate ? dayjs(options.startDate) : null;
     const endDate = options.endDate ? dayjs(options.endDate) : null;
 
-    // Get last message ID from database
+    // For evaluation harvester (app-bot):
+    // - If no messages exist: start from newest and go backward to get ALL messages
+    // - If messages exist: continue going backward to fill gaps and get new messages
+    // We use 'before' parameter to paginate backward through all messages
     const existingMessages = await db.getMessagesByChannel(options.channel);
     let lastMessageId: string | null = null;
     if (existingMessages.length > 0) {
-      // For Discord, we'll fetch recent messages and match by content/date
-      // Start from the beginning and let UNIQUE constraint handle duplicates
-      logger.info('Found existing messages in database', {
+      logger.info('Found existing messages in database, will continue backward to fill gaps', {
         channel: options.channel,
         existingMessageCount: existingMessages.length
       });
+      // Note: We don't set lastMessageId here - we'll start from newest and go backward
+      // UNIQUE constraints will handle duplicates, and we'll stop after consecutive duplicate batches
+    } else {
+      logger.info('No existing messages in database, will harvest all messages from beginning', {
+        channel: options.channel
+      });
+      // Start from newest (no 'before' parameter) and paginate backward
     }
 
     const result: HarvestResult = {
@@ -619,6 +627,8 @@ async function harvestDiscordMessages(
 
     let batchCount = 0;
     let shouldStop = false;
+    let consecutiveDuplicateBatches = 0;
+    const MAX_CONSECUTIVE_DUPLICATE_BATCHES = 3;
 
     while (!shouldStop) {
       batchCount++;
@@ -638,7 +648,7 @@ async function harvestDiscordMessages(
         const messages: any = await textChannel.messages.fetch(fetchOptions);
         
         if (messages.size === 0) {
-          logger.info('No more messages to harvest', { channel: options.channel });
+          logger.info('No more messages to harvest (reached beginning of channel)', { channel: options.channel });
           break;
         }
 
@@ -646,6 +656,7 @@ async function harvestDiscordMessages(
         const ordered: any[] = Array.from(messages.values()).reverse();
         let batchNewMessages = 0;
         let batchSkipped = 0;
+        let duplicateCount = 0;
 
         for (const msg of ordered) {
           if (!msg.content && msg.attachments.size === 0) {
@@ -721,11 +732,15 @@ async function harvestDiscordMessages(
             batchNewMessages++;
             result.newMessages++;
             result.lastMessageId = Math.max(result.lastMessageId, messageIdNum);
+            // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {
             if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
-              shouldStop = true;
-              break;
+              // Duplicate message - continue processing, don't stop
+              duplicateCount++;
+              batchSkipped++;
+              // Still update lastMessageId to continue pagination
+              lastMessageId = msgId;
             } else {
               logger.warn('Failed to insert message', {
                 channel: options.channel,
@@ -751,13 +766,38 @@ async function harvestDiscordMessages(
         result.skippedMessages += batchSkipped;
 
         if (batchNewMessages > 0) {
+          // Reset counter when we find new messages
+          consecutiveDuplicateBatches = 0;
           logger.info('Harvested batch', {
             channel: options.channel,
             batch: batchCount,
             newMessages: batchNewMessages,
             skipped: batchSkipped,
+            duplicates: duplicateCount,
             totalNew: result.newMessages
           });
+        } else if (batchSkipped > 0) {
+          // All messages in batch were skipped (duplicates or filtered)
+          consecutiveDuplicateBatches++;
+          logger.info('Batch skipped entirely', {
+            channel: options.channel,
+            batch: batchCount,
+            totalMessages: messages.size,
+            skipped: batchSkipped,
+            duplicates: duplicateCount,
+            consecutiveDuplicateBatches
+          });
+
+          // Stop if we've encountered multiple consecutive batches with all duplicates
+          // This indicates we've reached already-harvested messages
+          if (consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES) {
+            logger.info('Stopping harvest: multiple consecutive batches were all duplicates', {
+              channel: options.channel,
+              consecutiveDuplicateBatches,
+              reason: 'reached_already_harvested_messages'
+            });
+            break;
+          }
         }
 
         if (shouldStop) {
@@ -765,11 +805,14 @@ async function harvestDiscordMessages(
         }
 
         // Prepare next batch - use the oldest message ID as the before parameter
+        // This ensures we paginate backward through all messages
         const messageIds: string[] = Array.from(messages.keys());
         if (messageIds.length === 0) {
           break;
         }
-        lastMessageId = messageIds[messageIds.length - 1]; // Oldest message ID
+        // Use the oldest message ID (last in the keys array, which corresponds to oldest in Collection)
+        // Discord Collections are ordered newest-first, so last key is oldest
+        lastMessageId = messageIds[messageIds.length - 1];
 
         // Delay between batches
         if (delayMs > 0) {
@@ -851,14 +894,24 @@ async function harvestDiscordSelfBotMessages(
     const startDate = options.startDate ? dayjs(options.startDate) : null;
     const endDate = options.endDate ? dayjs(options.endDate) : null;
 
-    // Get last message ID from database
+    // For evaluation harvester: 
+    // - If no messages exist: start from newest and go backward to get ALL messages
+    // - If messages exist: continue going backward to fill gaps and get new messages
+    // We use 'before' parameter to paginate backward through all messages
     const existingMessages = await db.getMessagesByChannel(options.channel);
     let lastMessageId: string | null = null;
     if (existingMessages.length > 0) {
-      logger.info('Found existing messages in database', {
+      logger.info('Found existing messages in database, will continue backward to fill gaps', {
         channel: options.channel,
         existingMessageCount: existingMessages.length
       });
+      // Note: We don't set lastMessageId here - we'll start from newest and go backward
+      // UNIQUE constraints will handle duplicates, and we'll stop after consecutive duplicate batches
+    } else {
+      logger.info('No existing messages in database, will harvest all messages from beginning', {
+        channel: options.channel
+      });
+      // Start from newest (no 'before' parameter) and paginate backward
     }
 
     const result: HarvestResult = {
@@ -871,6 +924,8 @@ async function harvestDiscordSelfBotMessages(
 
     let batchCount = 0;
     let shouldStop = false;
+    let consecutiveDuplicateBatches = 0;
+    const MAX_CONSECUTIVE_DUPLICATE_BATCHES = 3;
 
     while (!shouldStop) {
       batchCount++;
@@ -897,7 +952,7 @@ async function harvestDiscordSelfBotMessages(
             : [];
         
         if (messageArray.length === 0) {
-          logger.info('No more messages to harvest', { channel: options.channel });
+          logger.info('No more messages to harvest (reached beginning of channel)', { channel: options.channel });
           break;
         }
 
@@ -905,6 +960,7 @@ async function harvestDiscordSelfBotMessages(
         const ordered: any[] = messageArray.reverse();
         let batchNewMessages = 0;
         let batchSkipped = 0;
+        let duplicateCount = 0;
 
         for (const msg of ordered) {
           if (!msg.content && (!msg.attachments || (msg.attachments.size === 0 && !Array.isArray(msg.attachments)))) {
@@ -996,11 +1052,15 @@ async function harvestDiscordSelfBotMessages(
             batchNewMessages++;
             result.newMessages++;
             result.lastMessageId = Math.max(result.lastMessageId, messageIdNum);
+            // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {
             if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
-              shouldStop = true;
-              break;
+              // Duplicate message - continue processing, don't stop
+              duplicateCount++;
+              batchSkipped++;
+              // Still update lastMessageId to continue pagination
+              lastMessageId = msgId;
             } else {
               logger.warn('Failed to insert message', {
                 channel: options.channel,
@@ -1026,13 +1086,38 @@ async function harvestDiscordSelfBotMessages(
         result.skippedMessages += batchSkipped;
 
         if (batchNewMessages > 0) {
+          // Reset counter when we find new messages
+          consecutiveDuplicateBatches = 0;
           logger.info('Harvested batch (self-bot)', {
             channel: options.channel,
             batch: batchCount,
             newMessages: batchNewMessages,
             skipped: batchSkipped,
+            duplicates: duplicateCount,
             totalNew: result.newMessages
           });
+        } else if (batchSkipped > 0) {
+          // All messages in batch were skipped (duplicates or filtered)
+          consecutiveDuplicateBatches++;
+          logger.info('Batch skipped entirely (self-bot)', {
+            channel: options.channel,
+            batch: batchCount,
+            totalMessages: messageArray.length,
+            skipped: batchSkipped,
+            duplicates: duplicateCount,
+            consecutiveDuplicateBatches
+          });
+
+          // Stop if we've encountered multiple consecutive batches with all duplicates
+          // This indicates we've reached already-harvested messages
+          if (consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES) {
+            logger.info('Stopping harvest: multiple consecutive batches were all duplicates (self-bot)', {
+              channel: options.channel,
+              consecutiveDuplicateBatches,
+              reason: 'reached_already_harvested_messages'
+            });
+            break;
+          }
         }
 
         if (shouldStop) {
@@ -1040,10 +1125,19 @@ async function harvestDiscordSelfBotMessages(
         }
 
         // Prepare next batch - use the oldest message ID as the before parameter
+        // This ensures we paginate backward through all messages
         if (messageArray.length === 0) {
           break;
         }
-        lastMessageId = messageArray[messageArray.length - 1]?.id || lastMessageId;
+        // Use the oldest message ID (last in reversed array) for next pagination
+        const oldestMessage = messageArray[messageArray.length - 1];
+        if (oldestMessage && oldestMessage.id) {
+          lastMessageId = oldestMessage.id;
+        } else {
+          // Fallback: if we can't get oldest message ID, we've reached the beginning
+          logger.info('Cannot determine oldest message ID, stopping harvest', { channel: options.channel });
+          break;
+        }
 
         // Delay between batches
         if (delayMs > 0) {
