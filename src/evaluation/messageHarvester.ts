@@ -855,7 +855,50 @@ async function harvestDiscordSelfBotMessages(
   const client = new SelfBotClient();
 
   try {
-    await client.login(userToken);
+    try {
+      await client.login(userToken);
+    } catch (loginError) {
+      const errorMessage = loginError instanceof Error ? loginError.message : String(loginError);
+      const errorString = errorMessage.toLowerCase();
+      
+      // Check for common Discord security/verification issues
+      if (errorString.includes('401') || errorString.includes('unauthorized') || 
+          errorString.includes('invalid token') || errorString.includes('incorrect login')) {
+        logger.error('Discord authentication failed (self-bot) - evaluation harvester', {
+          channel: options.channel,
+          error: errorMessage,
+          possibleCauses: [
+            'Token may be invalid or expired',
+            'Discord may require email verification due to login from new location',
+            'Account may be locked or rate-limited',
+            'Token may have been revoked'
+          ],
+          troubleshooting: [
+            'Check your email for Discord verification requests',
+            'Try logging into Discord web/app from the same location first',
+            'Verify the token is still valid',
+            'Consider using a VPN or server in the same region as your normal login location'
+          ]
+        });
+      } else if (errorString.includes('403') || errorString.includes('forbidden')) {
+        logger.error('Discord access forbidden (self-bot) - evaluation harvester', {
+          channel: options.channel,
+          error: errorMessage,
+          possibleCauses: [
+            'Account may be flagged for suspicious activity',
+            'Discord may have detected automated login',
+            'Account may require additional verification'
+          ]
+        });
+      } else {
+        logger.error('Failed to connect to Discord (self-bot) - evaluation harvester', {
+          channel: options.channel,
+          error: errorMessage
+        });
+      }
+      throw loginError;
+    }
+    
     logger.info('Connected to Discord (self-bot) for message harvesting', {
       channel: options.channel,
       username: client.user?.username || 'Unknown',

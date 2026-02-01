@@ -84,10 +84,44 @@ const connectSelfBot = async (
       channel: config.channel
     });
   } catch (error) {
-    logger.error('Failed to connect to Discord (self-bot)', {
-      channel: config.channel,
-      error: error instanceof Error ? error.message : String(error)
-    });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorString = errorMessage.toLowerCase();
+    
+    // Check for common Discord security/verification issues
+    if (errorString.includes('401') || errorString.includes('unauthorized') || 
+        errorString.includes('invalid token') || errorString.includes('incorrect login')) {
+      logger.error('Discord authentication failed (self-bot)', {
+        channel: config.channel,
+        error: errorMessage,
+        possibleCauses: [
+          'Token may be invalid or expired',
+          'Discord may require email verification due to login from new location',
+          'Account may be locked or rate-limited',
+          'Token may have been revoked'
+        ],
+        troubleshooting: [
+          'Check your email for Discord verification requests',
+          'Try logging into Discord web/app from the same location first',
+          'Verify the token is still valid',
+          'Consider using a VPN or server in the same region as your normal login location'
+        ]
+      });
+    } else if (errorString.includes('403') || errorString.includes('forbidden')) {
+      logger.error('Discord access forbidden (self-bot)', {
+        channel: config.channel,
+        error: errorMessage,
+        possibleCauses: [
+          'Account may be flagged for suspicious activity',
+          'Discord may have detected automated login',
+          'Account may require additional verification'
+        ]
+      });
+    } else {
+      logger.error('Failed to connect to Discord (self-bot)', {
+        channel: config.channel,
+        error: errorMessage
+      });
+    }
     throw error;
   }
 };
