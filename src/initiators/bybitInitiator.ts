@@ -1,6 +1,7 @@
 import { RestClientV5 } from 'bybit-api';
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
+import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
