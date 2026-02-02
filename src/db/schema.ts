@@ -269,7 +269,7 @@ class SQLiteAdapter implements DatabaseAdapter {
         message_id TEXT NOT NULL,
         channel TEXT NOT NULL,
         trading_pair TEXT NOT NULL,
-        leverage INTEGER NOT NULL,
+        leverage REAL NOT NULL,
         entry_price REAL NOT NULL,
         stop_loss REAL NOT NULL,
         take_profits TEXT NOT NULL,
@@ -303,7 +303,7 @@ class SQLiteAdapter implements DatabaseAdapter {
           message_id TEXT NOT NULL,
           channel TEXT NOT NULL,
           trading_pair TEXT NOT NULL,
-          leverage INTEGER NOT NULL,
+          leverage REAL NOT NULL,
           entry_price REAL NOT NULL,
           stop_loss REAL NOT NULL,
           take_profits TEXT NOT NULL,
@@ -370,6 +370,63 @@ class SQLiteAdapter implements DatabaseAdapter {
       this.db.exec(`ALTER TABLE trades ADD COLUMN direction TEXT`);
     } catch (error) {
       // Column already exists, ignore
+    }
+
+    // Migrate leverage from INTEGER to REAL if needed (SQLite)
+    // SQLite doesn't support ALTER COLUMN, so we need to check and migrate if needed
+    try {
+      const tableInfo = this.db.prepare("PRAGMA table_info(trades)").all() as Array<{name: string, type: string}>;
+      const leverageCol = tableInfo.find(col => col.name === 'leverage');
+      
+      if (leverageCol && leverageCol.type.toUpperCase().includes('INTEGER')) {
+        // Need to migrate leverage from INTEGER to REAL
+        logger.info('Migrating SQLite trades.leverage from INTEGER to REAL');
+        this.db.exec(`
+          CREATE TABLE IF NOT EXISTS trades_leverage_migrate (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id TEXT NOT NULL,
+            channel TEXT NOT NULL,
+            trading_pair TEXT NOT NULL,
+            leverage REAL NOT NULL,
+            entry_price REAL NOT NULL,
+            stop_loss REAL NOT NULL,
+            take_profits TEXT NOT NULL,
+            risk_percentage REAL NOT NULL,
+            quantity REAL,
+            exchange TEXT NOT NULL,
+            account_name TEXT,
+            order_id TEXT,
+            position_id TEXT,
+            entry_order_type TEXT,
+            direction TEXT,
+            status TEXT NOT NULL DEFAULT 'pending',
+            entry_filled_at TEXT,
+            exit_price REAL,
+            exit_filled_at TEXT,
+            pnl REAL,
+            pnl_percentage REAL,
+            stop_loss_breakeven BOOLEAN NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            expires_at TEXT NOT NULL
+          )
+        `);
+        this.db.exec(`
+          INSERT INTO trades_leverage_migrate 
+          SELECT id, message_id, channel, trading_pair, CAST(leverage AS REAL), entry_price, stop_loss, take_profits,
+                 risk_percentage, quantity, exchange, account_name, order_id, position_id, entry_order_type, direction,
+                 status, entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage, stop_loss_breakeven,
+                 created_at, updated_at, expires_at
+          FROM trades
+        `);
+        this.db.exec(`DROP TABLE trades`);
+        this.db.exec(`ALTER TABLE trades_leverage_migrate RENAME TO trades`);
+        logger.info('Successfully migrated SQLite trades.leverage to REAL');
+      }
+    } catch (migrateError: any) {
+      logger.warn('Failed to migrate SQLite trades.leverage to REAL', {
+        error: migrateError instanceof Error ? migrateError.message : String(migrateError)
+      });
     }
 
     // Orders table - tracks SL/TP orders for trades
@@ -1312,7 +1369,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           message_id TEXT NOT NULL,
           channel TEXT NOT NULL,
           trading_pair TEXT NOT NULL,
-          leverage INTEGER NOT NULL,
+          leverage REAL NOT NULL,
           entry_price REAL NOT NULL,
           stop_loss REAL NOT NULL,
           take_profits TEXT NOT NULL,
@@ -1392,6 +1449,26 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         // Column already exists, ignore
         if (!error.message?.includes('already exists')) {
           throw error;
+        }
+      }
+
+      // Migrate leverage from INTEGER to REAL if needed (PostgreSQL)
+      try {
+        await client.query(`
+          ALTER TABLE trades 
+          ALTER COLUMN leverage TYPE REAL USING leverage::REAL
+        `);
+        logger.info('Successfully migrated PostgreSQL trades.leverage to REAL');
+      } catch (error: any) {
+        // Column might already be REAL, ignore migration errors
+        const errorMsg = error.message?.toLowerCase() || '';
+        if (!errorMsg.includes('does not exist') && 
+            !errorMsg.includes('type') && 
+            !errorMsg.includes('real') &&
+            !errorMsg.includes('already')) {
+          logger.warn('Failed to migrate PostgreSQL trades.leverage to REAL', {
+            error: error.message
+          });
         }
       }
 
