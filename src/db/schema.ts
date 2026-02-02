@@ -737,7 +737,7 @@ class SQLiteAdapter implements DatabaseAdapter {
     }
 
     const replyChain = message.reply_to_message_id
-      ? await this.getMessageReplyChain(message.id, trade.channel)
+      ? await this.getMessageReplyChain(message.message_id, trade.channel)
       : undefined;
 
     return {
@@ -1736,7 +1736,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     }
 
     const replyChain = message.reply_to_message_id
-      ? await this.getMessageReplyChain(message.id, trade.channel)
+      ? await this.getMessageReplyChain(message.message_id, trade.channel)
       : undefined;
 
     return {
