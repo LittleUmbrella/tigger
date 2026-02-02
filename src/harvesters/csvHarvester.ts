@@ -58,7 +58,7 @@ export const startCSVHarvester = async (
       }
 
       await db.insertMessage({
-        message_id: messageId,
+        message_id: String(messageId),
         channel: channel,
         content: record.message.trim(),
         sender: record.sender || '',

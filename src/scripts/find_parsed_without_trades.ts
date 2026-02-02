@@ -34,7 +34,7 @@ async function main() {
     // Get all parsed messages
     const channels = ['2427485240', '3241720654', '2394142145'];
     const results: Array<{
-      messageId: number;
+      messageId: string;
       channel: string;
       date: string;
       content: string;

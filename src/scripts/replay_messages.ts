@@ -63,7 +63,7 @@ program
         }
         
         // Create new message
-        const messageId = Date.now(); // Use timestamp as message_id for new messages
+        const messageId = String(Date.now()); // Use timestamp as message_id for new messages
         const date = new Date(options.date).toISOString();
         
         try {

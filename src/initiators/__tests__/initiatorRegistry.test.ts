@@ -83,7 +83,7 @@ describe('Initiator Registry', () => {
       entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
       message: {
         id: 1,
-        message_id: 123,
+        message_id: '123',
         channel: 'test_channel',
         content: 'test',
         sender: 'test',

@@ -42,7 +42,7 @@ export function createMockInitiatorContext(overrides: any = {}) {
     entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
     message: {
       id: 1,
-      message_id: 12345,
+      message_id: '12345',
       channel: 'test_channel',
       content: 'Test message',
       sender: 'test_sender',

@@ -7,7 +7,7 @@ import { ParsedOrder } from '../../types/order.js';
 
 export const mockMessage: Message = {
   id: 1,
-  message_id: 12345,
+  message_id: '12345',
   channel: 'test_channel',
   content: '⚡️© BTC/USDT ©⚡️ Signal Type: Regular (Long) Leverage: 10x Entry: 50000 Stop: 48000 TP: 52000, 54000, 56000',
   sender: 'test_sender',

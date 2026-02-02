@@ -55,7 +55,7 @@ interface TraceStep {
 }
 
 interface TraceResult {
-  messageId: number;
+  messageId: string;
   channel: string;
   steps: TraceStep[];
   failurePoint?: string;
@@ -114,7 +114,7 @@ const getAccountCredentials = async (
  * Generate Loggly search query for a message ID
  * Returns search query string and URL for manual checking
  */
-const getLogglySearchInfo = (messageId: number, channel: string, timeRange: { start: string; end: string }): { query: string; url: string } => {
+const getLogglySearchInfo = (messageId: string, channel: string, timeRange: { start: string; end: string }): { query: string; url: string } => {
   const subdomain = process.env.LOGGLY_SUBDOMAIN || 'your-subdomain';
   const query = `messageId:${messageId} AND channel:${channel}`;
   const url = `https://${subdomain}.loggly.com/search?q=${encodeURIComponent(query)}&from=${timeRange.start}&until=${timeRange.end}`;
@@ -124,7 +124,7 @@ const getLogglySearchInfo = (messageId: number, channel: string, timeRange: { st
 /**
  * Trace a message through the entire system
  */
-export const traceMessage = async (messageId: number, channel?: string): Promise<TraceResult> => {
+export const traceMessage = async (messageId: string, channel?: string): Promise<TraceResult> => {
   const steps: TraceStep[] = [];
   const recommendations: string[] = [];
 
@@ -543,18 +543,18 @@ const printTraceResults = (result: TraceResult): void => {
 const isMainModule = process.argv[1] && (process.argv[1].endsWith('trace_message.ts') || process.argv[1].endsWith('trace_message.js') || __filename === process.argv[1]);
 
 if (isMainModule) {
-  const messageId = process.argv[2] ? parseInt(process.argv[2], 10) : null;
+  const messageId = process.argv[2] || null;
   const channel = process.argv[3];
   const outputFormat = process.argv[4] === '--json' ? 'json' : 'text';
 
-  if (!messageId || isNaN(messageId)) {
+  if (!messageId) {
     console.error('Usage: npm run trace-message <message_id> [channel] [--json]');
     console.error('Example: npm run trace-message 12345 2394142145');
     console.error('Example: npm run trace-message 12345 2394142145 --json');
     process.exit(1);
   }
 
-  traceMessage(messageId, channel)
+  traceMessage(String(messageId), channel)
     .then(result => {
       if (outputFormat === 'json') {
         // Output JSON for use with custom prompts

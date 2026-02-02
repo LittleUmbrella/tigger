@@ -224,13 +224,9 @@ const fetchNewMessages = async (
       }
 
       // Extract reply_to information
-      let replyToMessageId: number | undefined;
+      let replyToMessageId: string | undefined;
       if (msg.reference && msg.reference.messageId) {
-        const refId = msg.reference.messageId;
-        const parsedRefId = parseInt(refId, 10);
-        if (!isNaN(parsedRefId)) {
-          replyToMessageId = parsedRefId;
-        }
+        replyToMessageId = String(msg.reference.messageId);
       }
 
       // Download images if enabled
@@ -272,10 +268,8 @@ const fetchNewMessages = async (
       }
 
       try {
-        const messageIdNum = hashDiscordId(msgId);
-        
         await db.insertMessage({
-          message_id: messageIdNum,
+          message_id: String(msgId),
           channel: config.channel,
           content: msg.content.replace(/\s+/g, ' ').trim(),
           sender: msg.author.id,
@@ -389,8 +383,8 @@ export const startDiscordSelfBotHarvester = async (
           await newMsg.fetch();
         }
 
-        const messageIdNum = hashDiscordId(newMsg.id);
-        const existingMessage = await db.getMessageByMessageId(messageIdNum, config.channel);
+        const messageIdStr = String(newMsg.id);
+        const existingMessage = await db.getMessageByMessageId(messageIdStr, config.channel);
         
         if (!existingMessage) {
           logger.debug('Edited message not found in database', {
@@ -408,7 +402,7 @@ export const startDiscordSelfBotHarvester = async (
 
         // Store the previous version in message_versions table
         try {
-          await db.insertMessageVersion(messageIdNum, config.channel, existingMessage.content);
+          await db.insertMessageVersion(messageIdStr, config.channel, existingMessage.content);
         } catch (error) {
           logger.warn('Failed to insert message version, continuing with update', {
             channel: config.channel,
@@ -418,7 +412,7 @@ export const startDiscordSelfBotHarvester = async (
         }
 
         // Update message in database with new content
-        await db.updateMessage(messageIdNum, config.channel, {
+        await db.updateMessage(messageIdStr, config.channel, {
           content: newContent,
           old_content: existingMessage.content,
           edited_at: new Date().toISOString(),

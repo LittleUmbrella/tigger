@@ -242,18 +242,12 @@ program
 
       const { analyzeChannelMessages } = await import('./messageAnalyzer.js');
       
-      // Parse message IDs if provided
-      let messageIds: number[] | undefined;
+      // Parse message IDs if provided (as strings)
+      let messageIds: string[] | undefined;
       if (options.messageIds) {
         messageIds = options.messageIds
           .split(',')
-          .map((id: string) => {
-            const parsed = parseInt(id.trim(), 10);
-            if (isNaN(parsed)) {
-              throw new Error(`Invalid message ID: ${id.trim()}`);
-            }
-            return parsed;
-          });
+          .map((id: string) => id.trim());
       }
       
       const result = await analyzeChannelMessages(db, options.channel, {

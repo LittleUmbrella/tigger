@@ -36,7 +36,7 @@ export interface HarvestResult {
   newMessages: number;
   skippedMessages: number;
   errors: number;
-  lastMessageId: number;
+  lastMessageId: string | number; // String for Discord, number for Telegram (legacy)
 }
 
 /**
@@ -104,10 +104,15 @@ async function harvestTelegramMessages(
     // Get last message ID from database for this channel
     // Use getMessagesByChannel to get ALL messages (not just unparsed) to find the true max message_id
     const existingMessages = await db.getMessagesByChannel(options.channel);
-    let lastMessageId = 0;
+    let lastMessageId: string | number = 0;
     if (existingMessages.length > 0) {
       // Get the highest message_id from existing messages
-      const maxMessageId = Math.max(...existingMessages.map(m => m.message_id));
+      // For Telegram (numeric), use Math.max; for Discord (string), convert and compare
+      const messageIds = existingMessages.map(m => {
+        const numId = typeof m.message_id === 'string' ? parseInt(m.message_id, 10) : m.message_id;
+        return isNaN(numId) ? 0 : numId;
+      });
+      const maxMessageId = Math.max(...messageIds);
       lastMessageId = maxMessageId;
       logger.info('Resuming from last message ID', {
         channel: options.channel,
@@ -126,7 +131,7 @@ async function harvestTelegramMessages(
     // Determine harvest direction:
     // - If lastMessageId > 0 and no startDate, fetch newer messages (forward)
     // - Otherwise, fetch historical messages going backward
-    const harvestNewerMessages = lastMessageId > 0 && !startDate;
+    const harvestNewerMessages = (typeof lastMessageId === 'number' ? lastMessageId > 0 : parseInt(String(lastMessageId), 10) > 0) && !startDate;
 
     // Log harvest mode (store startDate string before narrowing)
     const startDateStr = startDate ? startDate.format() : null;
@@ -147,8 +152,10 @@ async function harvestTelegramMessages(
     // offsetId is used for API pagination (messages older than this ID)
     // For newer messages, we start from 0 (newest) and process forward
     // For historical messages, we start from lastMessageId and go backward
-    let offsetId = harvestNewerMessages ? 0 : lastMessageId;
-    let lastProcessedId = lastMessageId;
+    // Convert lastMessageId to number for Telegram API (Telegram uses numeric IDs)
+    const lastMessageIdNum = typeof lastMessageId === 'number' ? lastMessageId : parseInt(String(lastMessageId), 10) || 0;
+    let offsetId = harvestNewerMessages ? 0 : lastMessageIdNum;
+    let lastProcessedId = lastMessageIdNum;
     let batchCount = 0;
     let consecutiveDuplicateBatches = 0;
     const MAX_CONSECUTIVE_DUPLICATE_BATCHES = 3;
@@ -218,7 +225,7 @@ async function harvestTelegramMessages(
           }
 
           // When harvesting newer messages, skip messages we've already processed
-          if (harvestNewerMessages && msgId <= lastMessageId) {
+          if (harvestNewerMessages && msgId <= lastMessageIdNum) {
             batchSkipped++;
             alreadyProcessedCount++;
             logger.debug('Skipping message: already processed (newer messages mode)', {
@@ -288,13 +295,11 @@ async function harvestTelegramMessages(
           }
 
           // Extract reply_to information
-          let replyToMessageId: number | undefined;
+          let replyToMessageId: string | undefined;
           if ('replyTo' in msg && msg.replyTo) {
             const replyTo = msg.replyTo as any;
             if ('replyToMsgId' in replyTo && replyTo.replyToMsgId) {
-              replyToMessageId = Number(replyTo.replyToMsgId);
-            } else if ('replyToMsgId' in replyTo && typeof replyTo.replyToMsgId === 'bigint') {
-              replyToMessageId = Number(replyTo.replyToMsgId);
+              replyToMessageId = String(replyTo.replyToMsgId);
             }
           }
 
@@ -320,19 +325,21 @@ async function harvestTelegramMessages(
           // Insert message into database
           try {
             await db.insertMessage({
-              message_id: msgId,
+              message_id: String(msgId),
               channel: options.channel,
               content: String(msg.message).replace(/\s+/g, ' ').trim(),
               sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
               date: msgDate.toISOString(),
-              reply_to_message_id: replyToMessageId,
+              reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
               image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
             });
             batchNewMessages++;
             result.newMessages++;
             // Update lastProcessedId to track the highest ID we've successfully processed
+            // msgId is a number for Telegram
             lastProcessedId = Math.max(lastProcessedId, msgId);
-            result.lastMessageId = Math.max(result.lastMessageId, msgId);
+            const currentLastId = typeof result.lastMessageId === 'number' ? result.lastMessageId : parseInt(String(result.lastMessageId), 10) || 0;
+            result.lastMessageId = Math.max(currentLastId, msgId);
           } catch (error) {
             if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
               // Duplicate message - we've reached messages we've already processed
@@ -688,13 +695,9 @@ async function harvestDiscordMessages(
           }
 
           // Extract reply_to information
-          let replyToMessageId: number | undefined;
+          let replyToMessageId: string | undefined;
           if (msg.reference && msg.reference.messageId) {
-            const refId = msg.reference.messageId;
-            const parsedRefId = parseInt(refId, 10);
-            if (!isNaN(parsedRefId)) {
-              replyToMessageId = parsedRefId;
-            }
+            replyToMessageId = String(msg.reference.messageId);
           }
 
           // Download images if enabled
@@ -718,20 +721,23 @@ async function harvestDiscordMessages(
 
           // Insert message into database
           try {
-            const messageIdNum = hashDiscordId(msgId);
-            
             await db.insertMessage({
-              message_id: messageIdNum,
+              message_id: String(msgId),
               channel: options.channel,
               content: msg.content.replace(/\s+/g, ' ').trim(),
               sender: msg.author.id,
               date: msgDate.toISOString(),
-              reply_to_message_id: replyToMessageId,
+              reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
               image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
             });
             batchNewMessages++;
             result.newMessages++;
-            result.lastMessageId = Math.max(result.lastMessageId, messageIdNum);
+            // For Discord, convert string ID to number for comparison in result
+            const messageIdNum = parseInt(msgId, 10);
+            if (!isNaN(messageIdNum)) {
+              const currentLastId = typeof result.lastMessageId === 'number' ? result.lastMessageId : parseInt(String(result.lastMessageId), 10) || 0;
+              result.lastMessageId = Math.max(currentLastId, messageIdNum);
+            }
             // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {
@@ -1035,13 +1041,9 @@ async function harvestDiscordSelfBotMessages(
           }
 
           // Extract reply_to information
-          let replyToMessageId: number | undefined;
+          let replyToMessageId: string | undefined;
           if (msg.reference && msg.reference.messageId) {
-            const refId = msg.reference.messageId;
-            const parsedRefId = parseInt(refId, 10);
-            if (!isNaN(parsedRefId)) {
-              replyToMessageId = parsedRefId;
-            }
+            replyToMessageId = String(msg.reference.messageId);
           }
 
           // Download images if enabled
@@ -1081,20 +1083,23 @@ async function harvestDiscordSelfBotMessages(
 
           // Insert message into database
           try {
-            const messageIdNum = hashDiscordId(msgId);
-            
             await db.insertMessage({
-              message_id: messageIdNum,
+              message_id: String(msgId),
               channel: options.channel,
               content: (msg.content || '').replace(/\s+/g, ' ').trim(),
               sender: msg.author?.id || '',
               date: msgDate.toISOString(),
-              reply_to_message_id: replyToMessageId,
+              reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
               image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
             });
             batchNewMessages++;
             result.newMessages++;
-            result.lastMessageId = Math.max(result.lastMessageId, messageIdNum);
+            // For Discord, convert string ID to number for comparison in result
+            const messageIdNum = parseInt(msgId, 10);
+            if (!isNaN(messageIdNum)) {
+              const currentLastId = typeof result.lastMessageId === 'number' ? result.lastMessageId : parseInt(String(result.lastMessageId), 10) || 0;
+              result.lastMessageId = Math.max(currentLastId, messageIdNum);
+            }
             // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {

@@ -99,19 +99,19 @@ describe('Signal Initiator Integration Tests', () => {
     // Add multiple messages with different timestamps
     const message1 = {
       ...mockMessage,
-      message_id: 111,
+      message_id: '111',
       date: '2024-01-15T10:00:00Z',
       content: 'Message 1',
     };
     const message2 = {
       ...mockMessage,
-      message_id: 222,
+      message_id: '222',
       date: '2024-01-15T10:05:00Z',
       content: 'Message 2',
     };
     const message3 = {
       ...mockMessage,
-      message_id: 333,
+      message_id: '333',
       date: '2024-01-15T10:03:00Z',
       content: 'Message 3',
     };

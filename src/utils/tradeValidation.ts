@@ -18,7 +18,7 @@ export const validateTradePrices = (
   entryPrice: number,
   stopLoss: number | undefined,
   takeProfits: number[] | undefined,
-  context?: { channel?: string; symbol?: string; messageId?: number; message?: string }
+  context?: { channel?: string; symbol?: string; messageId?: string; message?: string }
 ): boolean => {
   const errors: string[] = [];
 
@@ -74,7 +74,7 @@ export const validateTradePrices = (
  */
 export const validateParsedOrder = (
   order: ParsedOrder,
-  context?: { channel?: string; messageId?: number; message?: string }
+  context?: { channel?: string; messageId?: string; message?: string }
 ): boolean => {
   // If entry price is not provided, skip validation (will be validated later in initiator)
   if (!order.entryPrice || order.entryPrice <= 0) {

@@ -222,7 +222,7 @@ export async function analyzeChannelMessages(
   db: DatabaseManager,
   channel: string,
   ollamaConfig?: OllamaConfig,
-  messageIds?: number[],
+  messageIds?: string[],
   logInterval: number = 25
 ): Promise<{
   totalMessages: number;

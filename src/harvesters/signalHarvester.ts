@@ -603,13 +603,11 @@ const fetchNewMessages = async (
       // 5. We track newLastMessageId to know the highest ID we've processed in this batch
 
       // Extract reply_to information
-      let replyToMessageId: number | undefined;
+      let replyToMessageId: string | undefined;
       if ('replyTo' in msg && msg.replyTo) {
         const replyTo = msg.replyTo as any;
         if ('replyToMsgId' in replyTo && replyTo.replyToMsgId) {
-          replyToMessageId = Number(replyTo.replyToMsgId);
-        } else if ('replyToMsgId' in replyTo && typeof replyTo.replyToMsgId === 'bigint') {
-          replyToMessageId = Number(replyTo.replyToMsgId);
+          replyToMessageId = String(replyTo.replyToMsgId);
         }
       }
 
@@ -634,12 +632,12 @@ const fetchNewMessages = async (
 
       try {
         await db.insertMessage({
-          message_id: msgId,
+          message_id: String(msgId),
           channel: config.channel,
           content: String(msg.message).replace(/\s+/g, ' ').trim(),
           sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
           date: msgDate.toISOString(),
-          reply_to_message_id: replyToMessageId,
+          reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
           image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined
         });
         newMessagesCount++;
@@ -1013,7 +1011,12 @@ export const startSignalHarvester = async (
   const existingMessages = await db.getMessagesByChannel(config.channel);
   
   if (existingMessages.length > 0) {
-    const maxMessageId = Math.max(...existingMessages.map(m => m.message_id));
+    // Convert message_id strings to numbers for comparison (Telegram uses numeric IDs)
+    const messageIds = existingMessages.map(m => {
+      const numId = typeof m.message_id === 'string' ? parseInt(m.message_id, 10) : m.message_id;
+      return isNaN(numId) ? 0 : numId;
+    });
+    const maxMessageId = Math.max(...messageIds);
     lastMessageId = maxMessageId;
     logger.info('Initialized lastMessageId from database', {
       channel: config.channel,
@@ -1041,22 +1044,23 @@ export const startSignalHarvester = async (
         
         // Handle BigInt message IDs properly
         const messageIdBigInt = typeof message.id === 'bigint' ? message.id : BigInt(message.id);
-        const messageId = Number(messageIdBigInt);
-        if (Number.isNaN(messageId)) return;
+        const messageIdNum = Number(messageIdBigInt);
+        if (Number.isNaN(messageIdNum)) return;
+        const messageIdStr = String(messageIdNum);
 
         // Get the updated message
-        const messages = await client.getMessages(entity!, { ids: [messageId] });
+        const messages = await client.getMessages(entity!, { ids: [messageIdNum] });
         if (!messages || messages.length === 0) return;
 
         const msg = messages[0];
         if (!msg || !('message' in msg) || !msg.message) return;
 
         // Get existing message from database
-        const existingMessage = await db.getMessageByMessageId(messageId, config.channel);
+        const existingMessage = await db.getMessageByMessageId(messageIdStr, config.channel);
         if (!existingMessage) {
           logger.debug('Edited message not found in database', {
             channel: config.channel,
-            messageId
+            messageId: messageIdStr
           });
           return;
         }
@@ -1070,18 +1074,18 @@ export const startSignalHarvester = async (
 
         // Store the previous version in message_versions table
         try {
-          await db.insertMessageVersion(messageId, config.channel, existingMessage.content);
+          await db.insertMessageVersion(messageIdStr, config.channel, existingMessage.content);
         } catch (error) {
           logger.warn('Failed to insert message version, continuing with update', {
             channel: config.channel,
-            messageId,
+            messageId: messageIdStr,
             error: error instanceof Error ? error.message : String(error)
           });
         }
 
         // Update message in database with new content
         // Keep old_content for backward compatibility, but versions table is the source of truth
-        await db.updateMessage(messageId, config.channel, {
+        await db.updateMessage(messageIdStr, config.channel, {
           content: newContent,
           old_content: existingMessage.content, // Keep for backward compatibility
           edited_at: new Date().toISOString(),
@@ -1090,7 +1094,7 @@ export const startSignalHarvester = async (
 
         logger.info('Message edit detected and stored', {
           channel: config.channel,
-          messageId,
+          messageId: messageIdStr,
           oldContentLength: existingMessage.content.length,
           newContentLength: newContent.length
         });

@@ -35,7 +35,7 @@ export async function traceCommandHandler(context: CommandContext): Promise<Comm
     // Use the existing traceMessage function
     // Note: traceMessage manages its own database connection
     const traceResult = await traceMessage(
-      typeof messageId === 'number' ? messageId : parseInt(String(messageId)),
+      String(messageId),
       channel
     );
 
