@@ -3,6 +3,7 @@ import { parse } from 'csv-parse/sync';
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
+import { isDuplicateKeyError, getDuplicateKeyLogger } from '../utils/duplicateKeyLogger.js';
 
 interface CSVMessage {
   id: string;
@@ -66,10 +67,12 @@ export const startCSVHarvester = async (
       });
       insertedCount++;
     } catch (error) {
-      if (error instanceof Error && !error.message.includes('UNIQUE constraint')) {
+      if (isDuplicateKeyError(error)) {
+        getDuplicateKeyLogger().record(channel);
+      } else {
         logger.warn('Failed to insert message from CSV', {
           id: record.id,
-          error: error.message
+          error: error instanceof Error ? error.message : String(error)
         });
       }
     }

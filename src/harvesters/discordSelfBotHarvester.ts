@@ -3,6 +3,7 @@ import { HarvesterConfig } from '../types/config.js';
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { downloadMessageImages } from '../utils/imageDownloader.js';
+import { isDuplicateKeyError, getDuplicateKeyLogger } from '../utils/duplicateKeyLogger.js';
 
 /**
  * Convert Discord snowflake ID (string) to a safe integer for database storage
@@ -280,8 +281,9 @@ const fetchNewMessages = async (
         newMessagesCount++;
         newLastMessageId = msgId;
       } catch (error) {
-        if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+        if (isDuplicateKeyError(error)) {
           skippedCount++;
+          getDuplicateKeyLogger().record(config.channel);
         } else {
           logger.warn('Failed to insert message', {
             channel: config.channel,

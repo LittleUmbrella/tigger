@@ -13,6 +13,7 @@ import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { downloadMessageImages } from '../utils/imageDownloader.js';
 import dayjs from 'dayjs';
+import { isDuplicateKeyError, getDuplicateKeyLogger } from '../utils/duplicateKeyLogger.js';
 
 export interface HarvestOptions {
   channel: string;
@@ -341,7 +342,7 @@ async function harvestTelegramMessages(
             const currentLastId = typeof result.lastMessageId === 'number' ? result.lastMessageId : parseInt(String(result.lastMessageId), 10) || 0;
             result.lastMessageId = Math.max(currentLastId, msgId);
           } catch (error) {
-            if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+            if (isDuplicateKeyError(error)) {
               // Duplicate message - we've reached messages we've already processed
               // In evaluation mode, this means we can stop harvesting (we've caught up)
               logger.info('Reached already-processed messages, stopping harvest', {
@@ -741,10 +742,11 @@ async function harvestDiscordMessages(
             // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {
-            if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+            if (isDuplicateKeyError(error)) {
               // Duplicate message - continue processing, don't stop
               duplicateCount++;
               batchSkipped++;
+              getDuplicateKeyLogger().record(options.channel);
               // Still update lastMessageId to continue pagination
               lastMessageId = msgId;
             } else {
@@ -1103,10 +1105,11 @@ async function harvestDiscordSelfBotMessages(
             // Update lastMessageId to the oldest message we've processed for next pagination
             lastMessageId = msgId;
           } catch (error) {
-            if (error instanceof Error && error.message.includes('UNIQUE constraint')) {
+            if (isDuplicateKeyError(error)) {
               // Duplicate message - continue processing, don't stop
               duplicateCount++;
               batchSkipped++;
+              getDuplicateKeyLogger().record(options.channel);
               // Still update lastMessageId to continue pagination
               lastMessageId = msgId;
             } else {
