@@ -746,7 +746,7 @@ async function harvestDiscordMessages(
               // Duplicate message - continue processing, don't stop
               duplicateCount++;
               batchSkipped++;
-              getDuplicateKeyLogger().record(options.channel);
+              getDuplicateKeyLogger().record(options.channel, String(msgId));
               // Still update lastMessageId to continue pagination
               lastMessageId = msgId;
             } else {
@@ -1109,7 +1109,7 @@ async function harvestDiscordSelfBotMessages(
               // Duplicate message - continue processing, don't stop
               duplicateCount++;
               batchSkipped++;
-              getDuplicateKeyLogger().record(options.channel);
+              getDuplicateKeyLogger().record(options.channel, String(msgId));
               // Still update lastMessageId to continue pagination
               lastMessageId = msgId;
             } else {

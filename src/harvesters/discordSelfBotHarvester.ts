@@ -283,7 +283,7 @@ const fetchNewMessages = async (
       } catch (error) {
         if (isDuplicateKeyError(error)) {
           skippedCount++;
-          getDuplicateKeyLogger().record(config.channel);
+          getDuplicateKeyLogger().record(config.channel, String(msgId));
         } else {
           logger.warn('Failed to insert message', {
             channel: config.channel,

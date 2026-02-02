@@ -18,6 +18,7 @@ export function isDuplicateKeyError(error: unknown): boolean {
 
 interface DuplicateKeyStats {
   count: number;
+  uniqueMessageIds: Set<string>;
   firstSeen: number;
   lastSeen: number;
   channel: string;
@@ -29,7 +30,7 @@ interface DuplicateKeyStats {
  */
 class DuplicateKeyLogger {
   private stats = new Map<string, DuplicateKeyStats>();
-  private readonly LOG_INTERVAL_MS = 60000; // Log every 60 seconds
+  private readonly LOG_INTERVAL_MS = 600000; // Log every 10 minutes
   private readonly MIN_COUNT_THRESHOLD = 100; // Or every 100 duplicates
   private flushInterval: NodeJS.Timeout | null = null;
 
@@ -42,8 +43,10 @@ class DuplicateKeyLogger {
 
   /**
    * Record a duplicate key error and log if threshold is reached.
+   * @param channel - The channel where the duplicate occurred
+   * @param messageId - Optional message ID to track unique duplicates
    */
-  record(channel: string): void {
+  record(channel: string, messageId?: string): void {
     const key = channel;
     const now = Date.now();
     const stats = this.stats.get(key);
@@ -51,9 +54,17 @@ class DuplicateKeyLogger {
     if (stats) {
       stats.count++;
       stats.lastSeen = now;
+      if (messageId) {
+        stats.uniqueMessageIds.add(String(messageId));
+      }
     } else {
+      const uniqueMessageIds = new Set<string>();
+      if (messageId) {
+        uniqueMessageIds.add(String(messageId));
+      }
       this.stats.set(key, {
         count: 1,
+        uniqueMessageIds,
         firstSeen: now,
         lastSeen: now,
         channel
@@ -98,15 +109,18 @@ class DuplicateKeyLogger {
     }
 
     const durationSeconds = Math.round((stats.lastSeen - stats.firstSeen) / 1000);
+    const uniqueCount = stats.uniqueMessageIds.size;
     logger.warn('Duplicate key errors detected (digest)', {
       channel: stats.channel,
-      count: stats.count,
+      totalAttempts: stats.count,
+      uniqueMessages: uniqueCount,
       durationSeconds,
       ratePerSecond: durationSeconds > 0 ? (stats.count / durationSeconds).toFixed(2) : stats.count
     });
 
     // Reset counter but keep the entry (in case more come in before next flush)
     stats.count = 0;
+    stats.uniqueMessageIds.clear();
     stats.firstSeen = Date.now();
   }
 

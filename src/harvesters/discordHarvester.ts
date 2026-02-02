@@ -190,7 +190,7 @@ const fetchNewMessages = async (
         if (isDuplicateKeyError(error)) {
           // Message already exists in database - this is expected for duplicates
           skippedCount++;
-          getDuplicateKeyLogger().record(config.channel);
+          getDuplicateKeyLogger().record(config.channel, String(msgId));
         } else {
           logger.warn('Failed to insert message', {
             channel: config.channel,

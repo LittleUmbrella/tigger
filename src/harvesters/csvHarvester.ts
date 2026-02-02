@@ -68,7 +68,7 @@ export const startCSVHarvester = async (
       insertedCount++;
     } catch (error) {
       if (isDuplicateKeyError(error)) {
-        getDuplicateKeyLogger().record(channel);
+        getDuplicateKeyLogger().record(channel, String(messageId));
       } else {
         logger.warn('Failed to insert message from CSV', {
           id: record.id,
