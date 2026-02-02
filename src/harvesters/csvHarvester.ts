@@ -44,13 +44,13 @@ export const startCSVHarvester = async (
   // Insert all messages into database
   let insertedCount = 0;
   for (const record of records) {
-    try {
-      const messageId = parseInt(record.id, 10);
-      if (Number.isNaN(messageId)) {
-        logger.warn('Invalid message ID in CSV', { id: record.id });
-        continue;
-      }
+    const messageId = parseInt(record.id, 10);
+    if (Number.isNaN(messageId)) {
+      logger.warn('Invalid message ID in CSV', { id: record.id });
+      continue;
+    }
 
+    try {
       // Parse date
       const messageDate = dayjs(record.date).toISOString();
       if (!dayjs(record.date).isValid()) {
