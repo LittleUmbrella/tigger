@@ -59,82 +59,240 @@ async function main() {
   console.log(`  API Endpoint: ${isDemo ? 'DEMO' : 'LIVE'} (${baseUrl})\n`);
 
   try {
-    // Get klines for the symbol around that time (1-minute candles)
-    const endTime = Math.floor(messageTime.getTime() / 1000);
+    // Fetch actual trades for the most accurate price data
+    const messageTimeMs = messageTime.getTime();
+    const endTime = Math.floor(messageTimeMs / 1000);
     const startTime = endTime - 600; // 10 minutes before
     
-    console.log('📊 Fetching 1-minute candle data...\n');
+    console.log('📊 Fetching actual trade data (authenticated API)...\n');
     
-    const klines = await client.getKline({
-      category: 'linear',
-      symbol: symbol,
-      interval: '1', // 1 minute
-      start: startTime * 1000,
-      end: endTime * 1000,
-      limit: 20
-    });
-    
-    // Find the candle that contains the message time (declare outside if block)
-    let messageCandle: any = null;
-    const messageTimeMs = messageTime.getTime();
-    
-    if (klines.retCode === 0 && klines.result && klines.result.list) {
-      console.log(`Found ${klines.result.list.length} candles:\n`);
-      console.log('─'.repeat(100));
+    // Helper function to fetch trades using authenticated API
+    const fetchTrades = async (symbolToFetch: string): Promise<Array<{time: number, price: number, size: number, side: string}>> => {
+      const clientAny = client as any;
+      let tradeResponse: any = null;
+      let methodUsed = '';
       
-      klines.result.list.forEach((kline: any, idx: number) => {
-        const candleTime = parseInt(kline[0]);
-        const open = parseFloat(kline[1]);
-        const high = parseFloat(kline[2]);
-        const low = parseFloat(kline[3]);
-        const close = parseFloat(kline[4]);
-        const volume = parseFloat(kline[5]);
-        const candleTimeDate = new Date(candleTime);
-        
-        // Check if this candle contains the message time (1-minute candle)
-        const candleEndTime = candleTime + 60000; // 1 minute later
-        if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
-          messageCandle = kline;
-          console.log(`⭐ CANDLE CONTAINING MESSAGE TIME:`);
+      // Try different method names for trade endpoints
+      // Note: Public trade endpoints may not require auth, but we're using authenticated client
+      if (typeof clientAny.getPublicTradeHistory === 'function') {
+        methodUsed = 'getPublicTradeHistory';
+        try {
+          tradeResponse = await clientAny.getPublicTradeHistory({
+            category: 'linear',
+            symbol: symbolToFetch,
+            limit: 1000
+          });
+        } catch (error) {
+          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
-        
-        console.log(`${idx + 1}. Time: ${candleTimeDate.toISOString()}`);
-        console.log(`   Open: ${open.toFixed(2)}, High: ${high.toFixed(2)}, Low: ${low.toFixed(2)}, Close: ${close.toFixed(2)}`);
-        console.log(`   Volume: ${volume}`);
-        
-        if (messageCandle === kline) {
-          console.log(`   ⚠️  Message arrived during this candle`);
+      }
+      
+      if (!tradeResponse && typeof clientAny.getMarketTrades === 'function') {
+        methodUsed = 'getMarketTrades';
+        try {
+          tradeResponse = await clientAny.getMarketTrades({
+            category: 'linear',
+            symbol: symbolToFetch,
+            limit: 1000
+          });
+        } catch (error) {
+          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
         }
+      }
+      
+      if (!tradeResponse && typeof clientAny.getRecentTrades === 'function') {
+        methodUsed = 'getRecentTrades';
+        try {
+          tradeResponse = await clientAny.getRecentTrades({
+            category: 'linear',
+            symbol: symbolToFetch,
+            limit: 1000
+          });
+        } catch (error) {
+          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      
+      // If no trade methods available, log available methods for debugging
+      if (!tradeResponse && !methodUsed) {
+        const availableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(clientAny))
+          .filter(name => name.toLowerCase().includes('trade') || name.toLowerCase().includes('market'))
+          .slice(0, 10);
+        console.log(`   ℹ️  Available trade-related methods: ${availableMethods.join(', ') || 'none found'}`);
+      }
+      
+      const trades: Array<{time: number, price: number, size: number, side: string}> = [];
+      
+      if (tradeResponse) {
+        if (tradeResponse.retCode === 0 && tradeResponse.result?.list) {
+          for (const trade of tradeResponse.result.list) {
+            let tradeTime: number;
+            let tradePrice: number;
+            let tradeSize: number = 0;
+            let tradeSide: string = '';
+            
+            if (Array.isArray(trade)) {
+              // Array format: [time, symbol, side, size, price, ...]
+              tradeTime = parseFloat(trade[0] || '0');
+              tradePrice = parseFloat(trade[4] || trade[3] || '0');
+              tradeSize = parseFloat(trade[3] || '0');
+              tradeSide = trade[2] || '';
+            } else {
+              // Object format: {time, price, ...}
+              tradeTime = parseFloat((trade.time || trade.execTime || trade.exec_time || '0') as string);
+              tradePrice = parseFloat((trade.price || trade.execPrice || trade.exec_price || '0') as string);
+              tradeSize = parseFloat((trade.size || trade.qty || trade.quantity || '0') as string);
+              tradeSide = trade.side || '';
+            }
+            
+            // Filter trades within our time window (10 minutes before to 1 minute after)
+            if (tradePrice > 0 && tradeTime >= startTime * 1000 && tradeTime <= messageTimeMs + 60000) {
+              trades.push({ time: tradeTime, price: tradePrice, size: tradeSize, side: tradeSide });
+            }
+          }
+        } else {
+          console.log(`   ⚠️  Trade API returned error: retCode=${tradeResponse.retCode}, retMsg=${tradeResponse.retMsg || 'N/A'}`);
+        }
+      }
+      
+      if (methodUsed && trades.length === 0 && tradeResponse) {
+        console.log(`   ℹ️  Method ${methodUsed} returned ${tradeResponse.result?.list?.length || 0} trades, but none in time window`);
+      }
+      
+      return trades.sort((a, b) => a.time - b.time);
+    };
+    
+    const trades = await fetchTrades(symbol);
+    
+    // Find the trade closest to the message time
+    let closestTrade: {time: number, price: number, size: number, side: string} | null = null;
+    let minTimeDiff = Infinity;
+    
+    for (const trade of trades) {
+      const timeDiff = Math.abs(trade.time - messageTimeMs);
+      if (timeDiff < minTimeDiff) {
+        minTimeDiff = timeDiff;
+        closestTrade = trade;
+      }
+    }
+    
+    // Also get trades before and after for context
+    const tradesBefore = trades.filter(t => t.time <= messageTimeMs).slice(-10);
+    const tradesAfter = trades.filter(t => t.time > messageTimeMs).slice(0, 10);
+    
+    console.log(`Found ${trades.length} trades in time window:\n`);
+    console.log('─'.repeat(100));
+    
+    if (trades.length > 0) {
+      // Show recent trades before message time
+      if (tradesBefore.length > 0) {
+        console.log('📉 Recent trades BEFORE message time:');
+        tradesBefore.slice(-5).forEach((trade, idx) => {
+          const tradeDate = new Date(trade.time);
+          const timeDiff = (messageTimeMs - trade.time) / 1000;
+          console.log(`   ${tradeDate.toISOString()} | Price: $${trade.price.toFixed(2)} | Size: ${trade.size} | Side: ${trade.side} | ${timeDiff.toFixed(1)}s before`);
+        });
         console.log('');
-      });
+      }
+      
+      if (closestTrade) {
+        const closestTradeDate = new Date(closestTrade.time);
+        const timeDiff = (messageTimeMs - closestTrade.time) / 1000;
+        console.log(`⭐ CLOSEST TRADE TO MESSAGE TIME:`);
+        console.log(`   Time: ${closestTradeDate.toISOString()}`);
+        console.log(`   Price: $${closestTrade.price.toFixed(2)}`);
+        console.log(`   Size: ${closestTrade.size}`);
+        console.log(`   Side: ${closestTrade.side}`);
+        console.log(`   Time difference: ${Math.abs(timeDiff).toFixed(1)}s ${timeDiff >= 0 ? 'before' : 'after'} message`);
+        console.log('');
+      }
+      
+      // Show trades after message time
+      if (tradesAfter.length > 0) {
+        console.log('📈 Trades AFTER message time:');
+        tradesAfter.slice(0, 5).forEach((trade, idx) => {
+          const tradeDate = new Date(trade.time);
+          const timeDiff = (trade.time - messageTimeMs) / 1000;
+          console.log(`   ${tradeDate.toISOString()} | Price: $${trade.price.toFixed(2)} | Size: ${trade.size} | Side: ${trade.side} | ${timeDiff.toFixed(1)}s after`);
+        });
+        console.log('');
+      }
       
       console.log('─'.repeat(100));
       
-      if (messageCandle) {
-        const open = parseFloat(messageCandle[1]);
-        const high = parseFloat(messageCandle[2]);
-        const low = parseFloat(messageCandle[3]);
-        const close = parseFloat(messageCandle[4]);
+      if (closestTrade) {
+        // Calculate price statistics from trades around the message time
+        const windowTrades = trades.filter(t => Math.abs(t.time - messageTimeMs) <= 60000); // 1 minute window
+        const prices = windowTrades.map(t => t.price);
+        const minPrice = Math.min(...prices);
+        const maxPrice = Math.max(...prices);
+        const avgPrice = prices.reduce((a, b) => a + b, 0) / prices.length;
         
-        console.log('\n📈 Price at message time (estimated from candle):');
-        console.log(`   Open: ${open.toFixed(2)}`);
-        console.log(`   High: ${high.toFixed(2)}`);
-        console.log(`   Low: ${low.toFixed(2)}`);
-        console.log(`   Close: ${close.toFixed(2)}`);
-        console.log(`   Range: ${low.toFixed(2)} - ${high.toFixed(2)}`);
-        console.log(`   \n   Note: Actual price at exact message time may vary within this range`);
+        console.log('\n📈 Price at message time (from actual trades):');
+        console.log(`   Exact Trade Price: $${closestTrade.price.toFixed(2)}`);
+        if (windowTrades.length > 1) {
+          console.log(`   Price Range (±1min): $${minPrice.toFixed(2)} - $${maxPrice.toFixed(2)}`);
+          console.log(`   Average Price (±1min): $${avgPrice.toFixed(2)}`);
+          console.log(`   Trades in window: ${windowTrades.length}`);
+        }
+        console.log(`   \n   ✅ Using actual executed trade data (most accurate)`);
       } else {
-        console.log('\n⚠️  Could not find exact candle for message time');
-        if (klines.result.list.length > 0) {
-          const lastCandle = klines.result.list[klines.result.list.length - 1];
-          const close = parseFloat(lastCandle[4]);
-          console.log(`   Closest candle close price: ${close.toFixed(2)}`);
+        console.log('\n⚠️  Could not find trades near message time');
+        if (trades.length > 0) {
+          const lastTrade = trades[trades.length - 1];
+          const timeDiff = (messageTimeMs - lastTrade.time) / 1000;
+          console.log(`   Closest trade: $${lastTrade.price.toFixed(2)} at ${new Date(lastTrade.time).toISOString()} (${Math.abs(timeDiff).toFixed(1)}s away)`);
         }
       }
     } else {
-      console.log('❌ Could not get kline data:', klines.retMsg || 'Unknown error');
-      console.log('   Response:', JSON.stringify(klines, null, 2));
+      console.log('⚠️  No trades found in time window, falling back to kline data...\n');
+      // Fallback to klines if no trades available
+      const klines = await client.getKline({
+        category: 'linear',
+        symbol: symbol,
+        interval: '1', // 1 minute
+        start: startTime * 1000,
+        end: endTime * 1000,
+        limit: 20
+      });
+      
+      if (klines.retCode === 0 && klines.result && klines.result.list) {
+        // Find the candle that contains the message time
+        for (const kline of klines.result.list) {
+          const candleTime = parseInt(kline[0]);
+          const candleEndTime = candleTime + 60000; // 1 minute later
+          if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
+            const close = parseFloat(kline[4]);
+            console.log(`   Using kline close price: $${close.toFixed(2)}`);
+            console.log(`   ⚠️  Note: This is candle data, not actual trade execution`);
+            closestTrade = { time: candleTime, price: close, size: 0, side: '' };
+            break;
+          }
+        }
+        
+        // If exact candle not found, use closest one
+        if (!closestTrade && klines.result.list.length > 0) {
+          const lastCandle = klines.result.list[klines.result.list.length - 1];
+          const close = parseFloat(lastCandle[4]);
+          const candleTime = parseInt(lastCandle[0]);
+          console.log(`   Using closest kline close price: $${close.toFixed(2)}`);
+          console.log(`   ⚠️  Note: This is candle data, not actual trade execution`);
+          closestTrade = { time: candleTime, price: close, size: 0, side: '' };
+        }
+      } else {
+        // Final fallback to ticker
+        console.log('⚠️  No kline data available, using current ticker...\n');
+        const ticker = await client.getTickers({ category: 'linear', symbol: symbol });
+        if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0) {
+          const t = ticker.result.list[0];
+          console.log(`   Last Price: $${t.lastPrice}`);
+          console.log(`   ⚠️  Note: This is current price, not historical price at message time`);
+        }
+      }
     }
+    
+    // Store closest trade price for later use
+    const messagePrice = closestTrade ? closestTrade.price : null;
     
     // Also get current ticker for reference
     console.log('\n📊 Current price (for reference):');
@@ -168,49 +326,69 @@ async function main() {
         console.log(`   ⚠️  Error fetching gold price: ${error instanceof Error ? error.message : String(error)}`);
       }
       
-      // Fetch XAUT price at the same time
+      // Fetch XAUT price at the same time using actual trades (with kline fallback)
       try {
-        console.log('\n💎 Fetching XAUT price...');
-        const xautKlines = await client.getKline({
-          category: 'linear',
-          symbol: 'XAUTUSDT',
-          interval: '1', // 1 minute
-          start: startTime * 1000,
-          end: endTime * 1000,
-          limit: 20
-        });
+        console.log('\n💎 Fetching XAUT price from actual trades...');
+        const xautTrades = await fetchTrades('XAUTUSDT');
         
-        if (xautKlines.retCode === 0 && xautKlines.result && xautKlines.result.list) {
-          // Find the candle that contains the message time
-          const messageTimeMs = messageTime.getTime();
-          for (const kline of xautKlines.result.list) {
-            const candleTime = parseInt(kline[0]);
-            const candleEndTime = candleTime + 60000; // 1 minute later
-            if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
-              xautPrice = parseFloat(kline[4]); // Close price
-              break;
+        if (xautTrades.length > 0) {
+          // Find the trade closest to the message time
+          let closestXautTrade: {time: number, price: number} | null = null;
+          let minXautTimeDiff = Infinity;
+          
+          for (const trade of xautTrades) {
+            const timeDiff = Math.abs(trade.time - messageTimeMs);
+            if (timeDiff < minXautTimeDiff) {
+              minXautTimeDiff = timeDiff;
+              closestXautTrade = trade;
             }
           }
           
-          // If exact candle not found, use closest one
-          if (xautPrice === null && xautKlines.result.list.length > 0) {
-            const lastCandle = xautKlines.result.list[xautKlines.result.list.length - 1];
-            xautPrice = parseFloat(lastCandle[4]);
-          }
-          
-          if (xautPrice) {
+          if (closestXautTrade) {
+            xautPrice = closestXautTrade.price;
+            const timeDiff = (messageTimeMs - closestXautTrade.time) / 1000;
             console.log(`   XAUT Price: $${xautPrice.toFixed(2)}`);
-          } else {
-            console.log('   ⚠️  Could not find XAUT price at message time');
+            console.log(`   Trade time: ${new Date(closestXautTrade.time).toISOString()} (${Math.abs(timeDiff).toFixed(1)}s ${timeDiff >= 0 ? 'before' : 'after'} message)`);
+          }
+        }
+        
+        // Fallback to klines if no trades found
+        if (!xautPrice) {
+          console.log('   ⚠️  No XAUT trades found, using kline data...');
+          const xautKlines = await client.getKline({
+            category: 'linear',
+            symbol: 'XAUTUSDT',
+            interval: '1',
+            start: startTime * 1000,
+            end: endTime * 1000,
+            limit: 20
+          });
+          
+          if (xautKlines.retCode === 0 && xautKlines.result && xautKlines.result.list) {
+            for (const kline of xautKlines.result.list) {
+              const candleTime = parseInt(kline[0]);
+              const candleEndTime = candleTime + 60000;
+              if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
+                xautPrice = parseFloat(kline[4]);
+                console.log(`   XAUT Price (from kline): $${xautPrice.toFixed(2)}`);
+                break;
+              }
+            }
+            
+            if (!xautPrice && xautKlines.result.list.length > 0) {
+              const lastCandle = xautKlines.result.list[xautKlines.result.list.length - 1];
+              xautPrice = parseFloat(lastCandle[4]);
+              console.log(`   XAUT Price (closest kline): $${xautPrice.toFixed(2)}`);
+            }
           }
         }
       } catch (error) {
-        console.log(`   ⚠️  Error fetching XAUT price: ${error instanceof Error ? error.message : String(error)}`);
+        console.log(`   ⚠️  Error fetching XAUT data: ${error instanceof Error ? error.message : String(error)}`);
       }
       
       // Compare all three if we have the data
-      if (messageCandle) {
-        const paxgPrice = parseFloat(messageCandle[4]); // Close price
+      if (messagePrice !== null) {
+        const paxgPrice = messagePrice;
         
         console.log(`\n📈 Gold-Backed Token Comparison:`);
         console.log('─'.repeat(80));
@@ -280,4 +458,5 @@ async function main() {
 }
 
 main().catch(console.error);
+
 
