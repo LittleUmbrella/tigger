@@ -66,65 +66,121 @@ async function main() {
     
     console.log('📊 Fetching actual trade data (authenticated API)...\n');
     
-    // Helper function to fetch trades using authenticated API
+    // Helper function to fetch trades using authenticated API (mimicking historicalPriceProvider.ts)
     const fetchTrades = async (symbolToFetch: string): Promise<Array<{time: number, price: number, size: number, side: string}>> => {
+      const trades: Array<{time: number, price: number, size: number, side: string}> = [];
+      
+      // First try authenticated execution history (most accurate, like historicalPriceProvider.ts)
+      try {
+        const windowSize = 24 * 60 * 60 * 1000; // 24 hours
+        let execStart = startTime * 1000;
+        const now = Date.now();
+        const cappedEndTimestamp = Math.min(messageTimeMs + 60000, now);
+        
+        while (execStart < cappedEndTimestamp) {
+          const execEnd = Math.min(execStart + windowSize, cappedEndTimestamp);
+          
+          if (execStart > now || execEnd > now) {
+            execStart = execEnd + 1;
+            continue;
+          }
+          
+          try {
+            const executionResponse = await client.getExecutionList({
+              category: 'linear',
+              symbol: symbolToFetch,
+              startTime: execStart,
+              endTime: execEnd,
+              limit: 1000
+            });
+            
+            if (executionResponse.retCode === 0 && executionResponse.result?.list) {
+              const validTrades = executionResponse.result.list.filter((execution: any) => {
+                const execTime = parseFloat((execution.execTime || '0') as string);
+                const execPrice = parseFloat((execution.execPrice || '0') as string);
+                return execPrice > 0 && execTime >= startTime * 1000 && execTime <= messageTimeMs + 60000;
+              });
+              
+              for (const execution of validTrades) {
+                const execTime = parseFloat((execution.execTime || '0') as string);
+                const execPrice = parseFloat((execution.execPrice || '0') as string);
+                const execSize = parseFloat((execution.execQty || '0') as string);
+                const execSide = execution.side || '';
+                
+                trades.push({ 
+                  time: execTime, 
+                  price: execPrice, 
+                  size: execSize, 
+                  side: execSide 
+                });
+              }
+            }
+          } catch (error) {
+            // Continue to next window or fallback methods
+            console.log(`   ⚠️  Execution history failed for window: ${error instanceof Error ? error.message : String(error)}`);
+          }
+          
+          execStart = execEnd + 1;
+        }
+        
+        if (trades.length > 0) {
+          console.log(`   ✅ Using authenticated execution history (${trades.length} trades)`);
+          return trades.sort((a, b) => a.time - b.time);
+        }
+      } catch (error) {
+        console.log(`   ⚠️  Execution history not available: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      
+      // Fallback to public trade endpoints (like historicalPriceProvider.ts)
       const clientAny = client as any;
       let tradeResponse: any = null;
       let methodUsed = '';
       
-      // Try different method names for trade endpoints
-      // Note: Public trade endpoints may not require auth, but we're using authenticated client
-      if (typeof clientAny.getPublicTradeHistory === 'function') {
-        methodUsed = 'getPublicTradeHistory';
-        try {
-          tradeResponse = await clientAny.getPublicTradeHistory({
-            category: 'linear',
-            symbol: symbolToFetch,
-            limit: 1000
-          });
-        } catch (error) {
-          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
+      // Try public trade endpoints (for recent data only)
+      const oneDayAgo = Date.now() - (24 * 60 * 60 * 1000);
+      const isRecentData = messageTimeMs >= oneDayAgo && messageTimeMs <= Date.now();
+      
+      if (isRecentData) {
+        if (typeof clientAny.getPublicTradeHistory === 'function') {
+          methodUsed = 'getPublicTradeHistory';
+          try {
+            tradeResponse = await clientAny.getPublicTradeHistory({
+              category: 'linear',
+              symbol: symbolToFetch,
+              limit: 1000
+            });
+          } catch (error) {
+            // Try next method
+          }
         }
-      }
-      
-      if (!tradeResponse && typeof clientAny.getMarketTrades === 'function') {
-        methodUsed = 'getMarketTrades';
-        try {
-          tradeResponse = await clientAny.getMarketTrades({
-            category: 'linear',
-            symbol: symbolToFetch,
-            limit: 1000
-          });
-        } catch (error) {
-          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
+        
+        if (!tradeResponse && typeof clientAny.getMarketTrades === 'function') {
+          methodUsed = 'getMarketTrades';
+          try {
+            tradeResponse = await clientAny.getMarketTrades({
+              category: 'linear',
+              symbol: symbolToFetch,
+              limit: 1000
+            });
+          } catch (error) {
+            // Try next method
+          }
         }
-      }
-      
-      if (!tradeResponse && typeof clientAny.getRecentTrades === 'function') {
-        methodUsed = 'getRecentTrades';
-        try {
-          tradeResponse = await clientAny.getRecentTrades({
-            category: 'linear',
-            symbol: symbolToFetch,
-            limit: 1000
-          });
-        } catch (error) {
-          console.log(`   ⚠️  ${methodUsed} failed: ${error instanceof Error ? error.message : String(error)}`);
+        
+        if (!tradeResponse && typeof clientAny.getRecentTrades === 'function') {
+          methodUsed = 'getRecentTrades';
+          try {
+            tradeResponse = await clientAny.getRecentTrades({
+              category: 'linear',
+              symbol: symbolToFetch,
+              limit: 1000
+            });
+          } catch (error) {
+            // No more methods to try
+          }
         }
-      }
-      
-      // If no trade methods available, log available methods for debugging
-      if (!tradeResponse && !methodUsed) {
-        const availableMethods = Object.getOwnPropertyNames(Object.getPrototypeOf(clientAny))
-          .filter(name => name.toLowerCase().includes('trade') || name.toLowerCase().includes('market'))
-          .slice(0, 10);
-        console.log(`   ℹ️  Available trade-related methods: ${availableMethods.join(', ') || 'none found'}`);
-      }
-      
-      const trades: Array<{time: number, price: number, size: number, side: string}> = [];
-      
-      if (tradeResponse) {
-        if (tradeResponse.retCode === 0 && tradeResponse.result?.list) {
+        
+        if (tradeResponse && tradeResponse.retCode === 0 && tradeResponse.result?.list) {
           for (const trade of tradeResponse.result.list) {
             let tradeTime: number;
             let tradePrice: number;
@@ -145,18 +201,17 @@ async function main() {
               tradeSide = trade.side || '';
             }
             
-            // Filter trades within our time window (10 minutes before to 1 minute after)
+            // Filter trades within our time window
             if (tradePrice > 0 && tradeTime >= startTime * 1000 && tradeTime <= messageTimeMs + 60000) {
               trades.push({ time: tradeTime, price: tradePrice, size: tradeSize, side: tradeSide });
             }
           }
-        } else {
-          console.log(`   ⚠️  Trade API returned error: retCode=${tradeResponse.retCode}, retMsg=${tradeResponse.retMsg || 'N/A'}`);
+          
+          if (trades.length > 0) {
+            console.log(`   ✅ Using public trade data via ${methodUsed} (${trades.length} trades)`);
+            return trades.sort((a, b) => a.time - b.time);
+          }
         }
-      }
-      
-      if (methodUsed && trades.length === 0 && tradeResponse) {
-        console.log(`   ℹ️  Method ${methodUsed} returned ${tradeResponse.result?.list?.length || 0} trades, but none in time window`);
       }
       
       return trades.sort((a, b) => a.time - b.time);
