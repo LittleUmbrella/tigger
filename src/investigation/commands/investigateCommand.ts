@@ -15,6 +15,7 @@ import { WorkflowEngine, WorkflowStep, createWorkflowContext } from '../workflow
 import { logger } from '../../utils/logger.js';
 import { traceMessage } from '../../scripts/trace_message.js';
 import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
+import { getGoldPriceComparison } from '../utils/goldPriceCheck.js';
 
 export async function investigateCommandHandler(context: CommandContext): Promise<CommandResult> {
   const messageId = context.args.message;
@@ -29,7 +30,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
   }
 
   const workflowContext = await createWorkflowContext({
-    messageId: typeof messageId === 'number' ? messageId : parseInt(String(messageId)),
+    messageId: String(messageId), // Keep as string for traceMessage compatibility
     channel
   });
 
@@ -41,7 +42,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     name: 'Trace Message Through System',
     required: true,
     execute: async (ctx) => {
-      const msgId = ctx.args.messageId;
+      const msgId = String(ctx.args.messageId);
       const ch = ctx.args.channel;
       
       try {
@@ -226,7 +227,84 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 4: Analyze findings
+  // Step 4: Check gold/XAUT prices for PAXG trades
+  engine.addStep({
+    id: 'goldPriceCheck',
+    name: 'Check Gold/XAUT Prices (PAXG trades only)',
+    required: false,
+    execute: async (ctx) => {
+      const traceResult = ctx.stepResults.get('trace')?.data;
+      
+      if (!traceResult) {
+        return {
+          success: false,
+          message: 'Trace step must complete first'
+        };
+      }
+
+      // Check if this is a PAXG trade
+      const parsingStep = traceResult.steps?.find((s: any) => s.step.includes('Parsing'));
+      const tradingPair = parsingStep?.details?.tradingPair;
+      
+      if (!tradingPair || (!tradingPair.toUpperCase().includes('PAXG') && tradingPair.toUpperCase() !== 'GOLD')) {
+        return {
+          success: true,
+          message: 'Not a PAXG/Gold trade - skipping gold price check',
+          data: { skipped: true }
+        };
+      }
+
+      // Get entry timestamp from trades
+      const trades = traceResult.steps?.find((s: any) => s.step.includes('Trade Creation'))?.details?.trades;
+      if (!trades || trades.length === 0) {
+        return {
+          success: true,
+          message: 'No trades found - skipping gold price check',
+          data: { skipped: true }
+        };
+      }
+
+      // Use the first trade's creation timestamp
+      const firstTrade = trades[0];
+      const entryTimestamp = firstTrade.createdAt || traceResult.steps[0]?.timestamp;
+      
+      if (!entryTimestamp) {
+        return {
+          success: false,
+          message: 'Could not determine entry timestamp'
+        };
+      }
+
+      // Get PAXG entry price from parsing or trade
+      const paxgPrice = parsingStep?.details?.entryPrice || firstTrade.entryPrice;
+
+      try {
+        const bybitClient = await ctx.getBybitClient?.(firstTrade.accountName);
+        const comparison = await getGoldPriceComparison(
+          bybitClient,
+          new Date(entryTimestamp),
+          paxgPrice
+        );
+
+        return {
+          success: true,
+          message: 'Gold/XAUT price comparison completed',
+          data: { comparison }
+        };
+      } catch (error) {
+        logger.error('Error checking gold prices', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return {
+          success: false,
+          message: 'Failed to check gold prices',
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+  });
+
+  // Step 5: Analyze findings
   engine.addStep({
     id: 'analyze',
     name: 'Analyze Findings',
@@ -235,6 +313,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const traceResult = ctx.stepResults.get('trace')?.data;
       const logglyData = ctx.stepResults.get('loggly')?.data;
       const orderData = ctx.stepResults.get('bybitOrders')?.data;
+      const goldPriceData = ctx.stepResults.get('goldPriceCheck')?.data;
 
       if (!traceResult) {
         return {
@@ -265,6 +344,41 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             }
           }
         });
+      }
+
+      // Add gold/XAUT price comparison for PAXG trades
+      if (goldPriceData?.comparison && !goldPriceData.skipped) {
+        const comp = goldPriceData.comparison;
+        findings.push(`\n🥇 Gold Price Comparison at Entry:`);
+        
+        if (comp.paxgPrice) {
+          findings.push(`  PAXG Price: $${comp.paxgPrice.toFixed(2)}`);
+        }
+        if (comp.xautPrice) {
+          findings.push(`  XAUT Price: $${comp.xautPrice.toFixed(2)}`);
+        }
+        if (comp.goldPrice) {
+          findings.push(`  Gold (XAU/USD) Price: $${comp.goldPrice.toFixed(2)} ${comp.goldSource ? `(${comp.goldSource})` : ''}`);
+        }
+
+        if (comp.comparison) {
+          if (comp.comparison.paxgVsGold) {
+            const { difference, percent } = comp.comparison.paxgVsGold;
+            findings.push(`  PAXG vs Gold: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
+          }
+          if (comp.comparison.xautVsGold) {
+            const { difference, percent } = comp.comparison.xautVsGold;
+            findings.push(`  XAUT vs Gold: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
+          }
+          if (comp.comparison.paxgVsXaut) {
+            const { difference, percent } = comp.comparison.paxgVsXaut;
+            findings.push(`  PAXG vs XAUT: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
+          }
+        }
+
+        if (goldPriceData.error) {
+          findings.push(`  ⚠️  ${goldPriceData.error}`);
+        }
       }
 
       if (failurePoint) {
