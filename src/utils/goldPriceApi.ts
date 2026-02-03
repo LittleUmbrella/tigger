@@ -15,6 +15,50 @@ export interface GoldPriceData {
   unit: string; // Usually 'per troy ounce'
 }
 
+// API Response Types
+interface FixerIOResponse {
+  rates?: {
+    XAU?: string | number;
+  };
+}
+
+interface FrankfurterResponse {
+  rates?: {
+    USD?: string | number;
+  };
+  date?: string;
+}
+
+interface GoldAPIResponse {
+  price?: string | number;
+  value?: string | number;
+  rate?: string | number;
+  date?: string;
+  timestamp?: string;
+  data?: {
+    price?: string | number;
+  };
+}
+
+interface GoldAPIIOResponse {
+  price?: string | number;
+  timestamp?: string;
+  currency?: string;
+}
+
+interface AlphaVantageResponse {
+  data?: Array<{
+    date?: string;
+    value?: string | number;
+  }>;
+}
+
+interface ExchangeRateAPIResponse {
+  rates?: {
+    USD?: string | number;
+  };
+}
+
 /**
  * Fetch gold price from Fixer.io (free tier available)
  * Or use a simple public endpoint
@@ -31,10 +75,10 @@ async function fetchFromFixerIO(): Promise<GoldPriceData | null> {
     const response = await fetch(url);
     
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as FixerIOResponse;
       if (data.rates && data.rates.XAU) {
         // XAU rate is typically per gram, convert to per ounce (31.1035 grams per troy ounce)
-        const pricePerGram = parseFloat(data.rates.XAU);
+        const pricePerGram = parseFloat(String(data.rates.XAU));
         const pricePerOunce = pricePerGram * 31.1035;
         
         if (pricePerOunce > 0) {
@@ -68,10 +112,10 @@ async function fetchFromFrankfurter(timestamp: Date): Promise<GoldPriceData | nu
     
     const response = await fetch(url);
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as FrankfurterResponse;
       // Frankfurter returns: { "rates": { "USD": 4710.50 }, "base": "XAU", "date": "2026-02-02" }
       if (data.rates && data.rates.USD) {
-        const price = parseFloat(data.rates.USD);
+        const price = parseFloat(String(data.rates.USD));
         if (price > 0) {
           return {
             price,
@@ -91,9 +135,9 @@ async function fetchFromFrankfurter(timestamp: Date): Promise<GoldPriceData | nu
       
       const prevResponse = await fetch(prevUrl);
       if (prevResponse.ok) {
-        const data = await prevResponse.json();
+        const data = await prevResponse.json() as FrankfurterResponse;
         if (data.rates && data.rates.USD) {
-          const price = parseFloat(data.rates.USD);
+          const price = parseFloat(String(data.rates.USD));
           if (price > 0) {
             logger.warn('Using previous day gold price as exact date not available', {
               requestedDate: dateStr,
@@ -137,18 +181,18 @@ async function fetchFromGoldAPI(timestamp: Date): Promise<GoldPriceData | null> 
     });
 
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as GoldAPIResponse;
       // Check various possible response formats
       let price: number | null = null;
       
       if (data.price) {
-        price = parseFloat(data.price);
+        price = parseFloat(String(data.price));
       } else if (data.value) {
-        price = parseFloat(data.value);
+        price = parseFloat(String(data.value));
       } else if (data.rate) {
-        price = parseFloat(data.rate);
+        price = parseFloat(String(data.rate));
       } else if (data.data && data.data.price) {
-        price = parseFloat(data.data.price);
+        price = parseFloat(String(data.data.price));
       }
       
       if (price && price > 0) {
@@ -192,10 +236,10 @@ async function fetchFromGoldAPIIO(timestamp: Date): Promise<GoldPriceData | null
     });
 
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as GoldAPIIOResponse;
       // GoldAPI.io returns: { "price": 4710.50, "currency": "USD", "unit": "per_ounce", ... }
       if (data.price) {
-        const price = parseFloat(data.price);
+        const price = parseFloat(String(data.price));
         if (price > 0) {
           return {
             price,
@@ -234,14 +278,14 @@ async function fetchFromAlphaVantage(timestamp: Date): Promise<GoldPriceData | n
     
     const response = await fetch(url);
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as AlphaVantageResponse;
       
       // Alpha Vantage returns data in format:
       // { "data": [{"date": "2026-02-02", "value": "4710.50"}, ...] }
       if (data.data && Array.isArray(data.data)) {
         // Find closest date to requested timestamp
         const requestedDate = dateStr;
-        let closestEntry = data.data.find((entry: any) => entry.date === requestedDate);
+        let closestEntry = data.data.find((entry) => entry.date === requestedDate);
         
         // If exact date not found, get most recent
         if (!closestEntry && data.data.length > 0) {
@@ -249,7 +293,7 @@ async function fetchFromAlphaVantage(timestamp: Date): Promise<GoldPriceData | n
         }
         
         if (closestEntry && closestEntry.value) {
-          const price = parseFloat(closestEntry.value);
+          const price = parseFloat(String(closestEntry.value));
           if (price > 0) {
             return {
               price,
@@ -282,11 +326,11 @@ async function fetchFromExchangeRateAPI(): Promise<GoldPriceData | null> {
     
     const response = await fetch(url);
     if (response.ok) {
-      const data = await response.json();
+      const data = await response.json() as ExchangeRateAPIResponse;
       // XAU base means rates are in other currencies
       // For USD: data.rates.USD gives price per ounce
       if (data.rates && data.rates.USD) {
-        const price = parseFloat(data.rates.USD);
+        const price = parseFloat(String(data.rates.USD));
         if (price > 0) {
           return {
             price,
