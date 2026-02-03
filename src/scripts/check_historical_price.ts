@@ -146,40 +146,125 @@ async function main() {
       console.log(`   Index Price: ${t.indexPrice || 'N/A'}`);
     }
     
-    // For PAXG, also fetch actual gold price for comparison
+    // For PAXG, also fetch actual gold price and XAUT for comparison
     if (symbol.toUpperCase() === 'PAXGUSDT' || symbol.toUpperCase().includes('PAXG')) {
-      console.log('\n🥇 Fetching actual gold (XAU/USD) price...');
+      console.log('\n🥇 Fetching actual gold (XAU/USD) price and XAUT comparison...');
+      
+      let goldPrice: any = null;
+      let xautPrice: number | null = null;
+      
+      // Fetch gold price
       try {
-        const goldPrice = await getGoldPriceAtTime(messageTime);
+        goldPrice = await getGoldPriceAtTime(messageTime);
         if (goldPrice) {
           console.log(`\n📊 Gold Price (XAU/USD) at message time:`);
           console.log(`   Price: $${goldPrice.price.toFixed(2)} ${goldPrice.unit}`);
           console.log(`   Source: ${goldPrice.source}`);
           console.log(`   Timestamp: ${goldPrice.timestamp}`);
-          
-          // Compare with PAXG price if we have it
-          if (messageCandle) {
-            const paxgPrice = parseFloat(messageCandle[4]); // Close price
-            const difference = paxgPrice - goldPrice.price;
-            const differencePercent = (difference / goldPrice.price) * 100;
-            console.log(`\n📈 PAXG vs Gold Comparison:`);
-            console.log(`   PAXG Price: $${paxgPrice.toFixed(2)}`);
-            console.log(`   Gold Price: $${goldPrice.price.toFixed(2)}`);
-            console.log(`   Difference: $${difference.toFixed(2)} (${differencePercent > 0 ? '+' : ''}${differencePercent.toFixed(3)}%)`);
-            
-            if (Math.abs(differencePercent) > 1) {
-              console.log(`   ⚠️  Significant difference - PAXG may have premium/discount`);
-            } else {
-              console.log(`   ✅ Prices closely aligned (expected for gold-backed token)`);
-            }
-          }
         } else {
           console.log('   ⚠️  Could not fetch gold price from external APIs');
-          console.log('   (Gold price analysis skipped - no external data source available)');
         }
       } catch (error) {
         console.log(`   ⚠️  Error fetching gold price: ${error instanceof Error ? error.message : String(error)}`);
-        console.log('   (Gold price analysis skipped due to error)');
+      }
+      
+      // Fetch XAUT price at the same time
+      try {
+        console.log('\n💎 Fetching XAUT price...');
+        const xautKlines = await client.getKline({
+          category: 'linear',
+          symbol: 'XAUTUSDT',
+          interval: '1', // 1 minute
+          start: startTime * 1000,
+          end: endTime * 1000,
+          limit: 20
+        });
+        
+        if (xautKlines.retCode === 0 && xautKlines.result && xautKlines.result.list) {
+          // Find the candle that contains the message time
+          const messageTimeMs = messageTime.getTime();
+          for (const kline of xautKlines.result.list) {
+            const candleTime = parseInt(kline[0]);
+            const candleEndTime = candleTime + 60000; // 1 minute later
+            if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
+              xautPrice = parseFloat(kline[4]); // Close price
+              break;
+            }
+          }
+          
+          // If exact candle not found, use closest one
+          if (xautPrice === null && xautKlines.result.list.length > 0) {
+            const lastCandle = xautKlines.result.list[xautKlines.result.list.length - 1];
+            xautPrice = parseFloat(lastCandle[4]);
+          }
+          
+          if (xautPrice) {
+            console.log(`   XAUT Price: $${xautPrice.toFixed(2)}`);
+          } else {
+            console.log('   ⚠️  Could not find XAUT price at message time');
+          }
+        }
+      } catch (error) {
+        console.log(`   ⚠️  Error fetching XAUT price: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      
+      // Compare all three if we have the data
+      if (messageCandle) {
+        const paxgPrice = parseFloat(messageCandle[4]); // Close price
+        
+        console.log(`\n📈 Gold-Backed Token Comparison:`);
+        console.log('─'.repeat(80));
+        
+        const prices: Array<{name: string, price: number}> = [];
+        if (paxgPrice) prices.push({ name: 'PAXG', price: paxgPrice });
+        if (xautPrice) prices.push({ name: 'XAUT', price: xautPrice });
+        if (goldPrice) prices.push({ name: 'Gold (XAU/USD)', price: goldPrice.price });
+        
+        // Display prices
+        prices.forEach(p => {
+          console.log(`   ${p.name.padEnd(20)}: $${p.price.toFixed(2)}`);
+        });
+        
+        console.log('─'.repeat(80));
+        
+        // Calculate differences
+        if (goldPrice && paxgPrice) {
+          const paxgDiff = paxgPrice - goldPrice.price;
+          const paxgDiffPercent = (paxgDiff / goldPrice.price) * 100;
+          console.log(`\n   PAXG vs Gold:`);
+          console.log(`      Difference: $${paxgDiff.toFixed(2)} (${paxgDiffPercent > 0 ? '+' : ''}${paxgDiffPercent.toFixed(3)}%)`);
+          if (Math.abs(paxgDiffPercent) > 1) {
+            console.log(`      ⚠️  Significant difference - PAXG may have premium/discount`);
+          } else {
+            console.log(`      ✅ Prices closely aligned`);
+          }
+        }
+        
+        if (goldPrice && xautPrice) {
+          const xautDiff = xautPrice - goldPrice.price;
+          const xautDiffPercent = (xautDiff / goldPrice.price) * 100;
+          console.log(`\n   XAUT vs Gold:`);
+          console.log(`      Difference: $${xautDiff.toFixed(2)} (${xautDiffPercent > 0 ? '+' : ''}${xautDiffPercent.toFixed(3)}%)`);
+          if (Math.abs(xautDiffPercent) > 1) {
+            console.log(`      ⚠️  Significant difference - XAUT may have premium/discount`);
+          } else {
+            console.log(`      ✅ Prices closely aligned`);
+          }
+        }
+        
+        if (paxgPrice && xautPrice) {
+          const paxgXautDiff = paxgPrice - xautPrice;
+          const paxgXautDiffPercent = (paxgXautDiff / xautPrice) * 100;
+          console.log(`\n   PAXG vs XAUT:`);
+          console.log(`      Difference: $${paxgXautDiff.toFixed(2)} (${paxgXautDiffPercent > 0 ? '+' : ''}${paxgXautDiffPercent.toFixed(3)}%)`);
+          if (Math.abs(paxgXautDiffPercent) > 0.5) {
+            console.log(`      ⚠️  Noticeable difference between gold-backed tokens`);
+          } else {
+            console.log(`      ✅ Prices closely aligned`);
+          }
+        }
+        
+        console.log('');
       }
     }
     
