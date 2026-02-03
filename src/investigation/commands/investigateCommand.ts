@@ -14,6 +14,7 @@ import { CommandContext, CommandResult } from '../commandRegistry.js';
 import { WorkflowEngine, WorkflowStep, createWorkflowContext } from '../workflowEngine.js';
 import { logger } from '../../utils/logger.js';
 import { traceMessage } from '../../scripts/trace_message.js';
+import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
 
 export async function investigateCommandHandler(context: CommandContext): Promise<CommandResult> {
   const messageId = context.args.message;
@@ -143,7 +144,89 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 3: Analyze findings
+  // Step 3: Query Bybit orders
+  engine.addStep({
+    id: 'bybitOrders',
+    name: 'Query Bybit Order Details',
+    required: false,
+    execute: async (ctx) => {
+      if (!ctx.getBybitClient) {
+        return {
+          success: false,
+          message: 'Bybit client helper not available',
+          skipRemaining: false
+        };
+      }
+
+      const traceResult = ctx.stepResults.get('trace')?.data;
+      const messageId = ctx.args.messageId;
+      const channel = ctx.args.channel;
+
+      if (!traceResult) {
+        return {
+          success: false,
+          message: 'Trace step must complete first'
+        };
+      }
+
+      // Get trades from trace result
+      const trades = traceResult.steps?.find((s: any) => s.step.includes('Trade Creation'))?.details?.trades;
+      if (!trades || trades.length === 0) {
+        return {
+          success: true,
+          message: 'No trades found to query orders for',
+          data: { orders: [] }
+        };
+      }
+
+      try {
+        // Get full trade details from database
+        const dbTrades = await ctx.db.getTradesByMessageId(String(messageId), channel || 'unknown');
+        
+        if (dbTrades.length === 0) {
+          return {
+            success: true,
+            message: 'No trades in database to query orders for',
+            data: { orders: [] }
+          };
+        }
+
+        // Query orders for each trade
+        const orderDetails = await queryBybitOrdersForMessage(
+          ctx.getBybitClient,
+          dbTrades.map(t => ({
+            order_id: t.order_id,
+            trading_pair: t.trading_pair,
+            account_name: t.account_name
+          }))
+        );
+
+        const foundOrders = orderDetails.filter(o => o.found);
+        const notFoundOrders = orderDetails.filter(o => !o.found);
+
+        return {
+          success: true,
+          message: `Queried ${orderDetails.length} orders: ${foundOrders.length} found, ${notFoundOrders.length} not found`,
+          data: {
+            orders: orderDetails,
+            foundCount: foundOrders.length,
+            notFoundCount: notFoundOrders.length
+          }
+        };
+      } catch (error) {
+        logger.error('Error querying Bybit orders', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return {
+          success: false,
+          message: 'Failed to query Bybit orders',
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+  });
+
+  // Step 4: Analyze findings
   engine.addStep({
     id: 'analyze',
     name: 'Analyze Findings',
@@ -151,6 +234,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     execute: async (ctx) => {
       const traceResult = ctx.stepResults.get('trace')?.data;
       const logglyData = ctx.stepResults.get('loggly')?.data;
+      const orderData = ctx.stepResults.get('bybitOrders')?.data;
 
       if (!traceResult) {
         return {
@@ -163,6 +247,25 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const failurePoint = traceResult.failurePoint;
       const findings: string[] = [];
       const recommendations: string[] = [];
+
+      // Add order details to findings if available
+      if (orderData?.orders && orderData.orders.length > 0) {
+        findings.push(`Bybit Orders: ${orderData.foundCount} found, ${orderData.notFoundCount} not found`);
+        
+        orderData.orders.forEach((order: any) => {
+          if (order.found) {
+            findings.push(`  ✅ Order ${order.orderId} (${order.accountName}): ${order.orderStatus || 'unknown'} - ${order.foundIn}`);
+            if (order.avgPrice) {
+              findings.push(`     Avg Price: ${order.avgPrice}, Executed Qty: ${order.cumExecQty || '0'}/${order.qty || 'N/A'}`);
+            }
+          } else {
+            findings.push(`  ❌ Order ${order.orderId} (${order.accountName}): Not found on Bybit`);
+            if (order.error) {
+              findings.push(`     Error: ${order.error}`);
+            }
+          }
+        });
+      }
 
       if (failurePoint) {
         findings.push(`Failure detected at: ${failurePoint}`);

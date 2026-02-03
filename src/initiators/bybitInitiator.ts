@@ -862,6 +862,71 @@ const executeTradeForAccount = async (
         });
       }
 
+      // Check if current market price is already past stop loss before placing order
+      // This prevents immediate stop loss triggers that would close the position right after opening
+      if (roundedStopLoss && roundedStopLoss > 0 && !isSimulation && bybitClient) {
+        try {
+          const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
+          if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0) {
+            const currentPrice = parseFloat(ticker.result.list[0].lastPrice || '0');
+            
+            if (currentPrice > 0) {
+              let priceAlreadyPastStopLoss = false;
+              let reason = '';
+              
+              if (order.signalType === 'short') {
+                // For SHORT: stop loss is above entry, so if current price > stop loss, we're already past it
+                if (currentPrice > roundedStopLoss) {
+                  priceAlreadyPastStopLoss = true;
+                  reason = `Current price ${currentPrice} is already above stop loss ${roundedStopLoss} for SHORT position`;
+                }
+              } else if (order.signalType === 'long') {
+                // For LONG: stop loss is below entry, so if current price < stop loss, we're already past it
+                if (currentPrice < roundedStopLoss) {
+                  priceAlreadyPastStopLoss = true;
+                  reason = `Current price ${currentPrice} is already below stop loss ${roundedStopLoss} for LONG position`;
+                }
+              }
+              
+              if (priceAlreadyPastStopLoss) {
+                logger.warn('Rejecting order: current market price is already past stop loss', {
+                  channel,
+                  symbol,
+                  messageId: message.message_id,
+                  signalType: order.signalType,
+                  currentPrice,
+                  stopLoss: roundedStopLoss,
+                  entryPrice: roundedEntryPrice,
+                  reason
+                });
+                
+                throw new Error(`Order rejected: ${reason}. Entry would trigger stop loss immediately.`);
+              }
+              
+              logger.debug('Stop loss validation passed', {
+                channel,
+                symbol,
+                signalType: order.signalType,
+                currentPrice,
+                stopLoss: roundedStopLoss,
+                entryPrice: roundedEntryPrice
+              });
+            }
+          }
+        } catch (error) {
+          // If this is our rejection error, re-throw it
+          if (error instanceof Error && error.message.includes('Order rejected')) {
+            throw error;
+          }
+          // Otherwise, log warning but continue (don't block order placement if price check fails)
+          logger.warn('Failed to check current price against stop loss, proceeding with order placement', {
+            symbol,
+            stopLoss: roundedStopLoss,
+            error: error instanceof Error ? error.message : String(error)
+          });
+        }
+      }
+
       // Place the entry order with stop loss (if supported in initial order)
       // Handle position limit errors by reducing leverage and retrying
       let orderResponse: any;
