@@ -44,7 +44,7 @@ const sleep = (ms: number): Promise<void> => {
 
 /**
  * Normalize trading pair symbol for Bybit API calls
- * Converts "PAXG" or "PAXG/USDT" to "PAXGUSDT"
+ * Converts "XAUT" or "XAUT/USDT" to "XAUTUSDT"
  */
 const normalizeBybitSymbol = (tradingPair: string): string => {
   let normalized = tradingPair.replace('/', '').toUpperCase();

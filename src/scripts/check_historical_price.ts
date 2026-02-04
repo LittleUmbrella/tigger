@@ -34,7 +34,7 @@ async function main() {
   if (args.length < 2) {
     console.log('Usage: tsx src/scripts/check_historical_price.ts <symbol> <timestamp> [accountName]');
     console.log('\nExample:');
-    console.log('  tsx src/scripts/check_historical_price.ts PAXGUSDT "2026-02-02T16:20:23.696Z" demo');
+    console.log('  tsx src/scripts/check_historical_price.ts XAUTUSDT "2026-02-02T16:20:23.696Z" demo');
     process.exit(1);
   }
 
@@ -359,12 +359,13 @@ async function main() {
       console.log(`   Index Price: ${t.indexPrice || 'N/A'}`);
     }
     
-    // For PAXG, also fetch actual gold price and XAUT for comparison
-    if (symbol.toUpperCase() === 'PAXGUSDT' || symbol.toUpperCase().includes('PAXG')) {
+    // For XAUT, also fetch actual gold price for comparison
+    if (symbol.toUpperCase() === 'XAUTUSDT' || symbol.toUpperCase().includes('XAUT')) {
       console.log('\n🥇 Fetching actual gold (XAU/USD) price and XAUT comparison...');
       
       let goldPrice: any = null;
       let xautPrice: number | null = null;
+      let paxgPrice: number | null = null;
       
       // Fetch gold price
       try {
@@ -441,9 +442,69 @@ async function main() {
         console.log(`   ⚠️  Error fetching XAUT data: ${error instanceof Error ? error.message : String(error)}`);
       }
       
+      // Fetch PAXG price at the same time using actual trades (with kline fallback)
+      try {
+        console.log('\n💎 Fetching PAXG price from actual trades...');
+        const paxgTrades = await fetchTrades('PAXGUSDT');
+        
+        if (paxgTrades.length > 0) {
+          // Find the trade closest to the message time
+          let closestPaxgTrade: {time: number, price: number} | null = null;
+          let minPaxgTimeDiff = Infinity;
+          
+          for (const trade of paxgTrades) {
+            const timeDiff = Math.abs(trade.time - messageTimeMs);
+            if (timeDiff < minPaxgTimeDiff) {
+              minPaxgTimeDiff = timeDiff;
+              closestPaxgTrade = trade;
+            }
+          }
+          
+          if (closestPaxgTrade) {
+            paxgPrice = closestPaxgTrade.price;
+            const timeDiff = (messageTimeMs - closestPaxgTrade.time) / 1000;
+            console.log(`   PAXG Price: $${paxgPrice.toFixed(2)}`);
+            console.log(`   Trade time: ${new Date(closestPaxgTrade.time).toISOString()} (${Math.abs(timeDiff).toFixed(1)}s ${timeDiff >= 0 ? 'before' : 'after'} message)`);
+          }
+        }
+        
+        // Fallback to klines if no trades found
+        if (!paxgPrice) {
+          console.log('   ⚠️  No PAXG trades found, using kline data...');
+          const paxgKlines = await client.getKline({
+            category: 'linear',
+            symbol: 'PAXGUSDT',
+            interval: '1',
+            start: startTime * 1000,
+            end: endTime * 1000,
+            limit: 20
+          });
+          
+          if (paxgKlines.retCode === 0 && paxgKlines.result && paxgKlines.result.list) {
+            for (const kline of paxgKlines.result.list) {
+              const candleTime = parseInt(kline[0]);
+              const candleEndTime = candleTime + 60000;
+              if (messageTimeMs >= candleTime && messageTimeMs < candleEndTime) {
+                paxgPrice = parseFloat(kline[4]);
+                console.log(`   PAXG Price (from kline): $${paxgPrice.toFixed(2)}`);
+                break;
+              }
+            }
+            
+            if (!paxgPrice && paxgKlines.result.list.length > 0) {
+              const lastCandle = paxgKlines.result.list[paxgKlines.result.list.length - 1];
+              paxgPrice = parseFloat(lastCandle[4]);
+              console.log(`   PAXG Price (closest kline): $${paxgPrice.toFixed(2)}`);
+            }
+          }
+        }
+      } catch (error) {
+        console.log(`   ⚠️  Error fetching PAXG data: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      
       // Compare all three if we have the data
       if (messagePrice !== null) {
-        const paxgPrice = messagePrice;
+        const xautEntryPrice = messagePrice;
         
         console.log(`\n📈 Gold-Backed Token Comparison:`);
         console.log('─'.repeat(80));

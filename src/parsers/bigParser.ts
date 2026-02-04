@@ -70,13 +70,13 @@ export const bigParser = (content: string, options?: ParserOptions): ParsedOrder
   if (!tradingPair) return null;
 
   // Translate trading pair symbols
-  // Translate "XAU" or "GOLD" (case-insensitive) to "PAXG"
+  // Translate "XAU" or "GOLD" (case-insensitive) to "XAUT"
   // Translate "USD" to "USDT"
   let normalizedPair = tradingPair.toUpperCase();
   
-  // Replace XAU or GOLD with PAXG (case-insensitive, anywhere in the pair)
-  normalizedPair = normalizedPair.replace(/XAU/g, 'PAXG');
-  normalizedPair = normalizedPair.replace(/GOLD/g, 'PAXG');
+  // Replace XAU or GOLD with XAUT (case-insensitive, anywhere in the pair)
+  normalizedPair = normalizedPair.replace(/XAU/g, 'XAUT');
+  normalizedPair = normalizedPair.replace(/GOLD/g, 'XAUT');
   
   // Replace USD with USDT (only if it's not already USDT or USDC)
   normalizedPair = normalizedPair.replace(/USD$/g, 'USDT');

@@ -234,10 +234,10 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 4: Check gold/XAUT prices for PAXG trades
+  // Step 4: Check gold/XAUT prices for XAUT trades
   engine.addStep({
     id: 'goldPriceCheck',
-    name: 'Check Gold/XAUT Prices (PAXG trades only)',
+    name: 'Check Gold/XAUT Prices (XAUT trades only)',
     required: false,
     execute: async (ctx) => {
       const traceResult = ctx.stepResults.get('trace')?.data;
@@ -249,14 +249,14 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Check if this is a PAXG trade
+      // Check if this is a XAUT trade
       const parsingStep = traceResult.steps?.find((s: any) => s.step.includes('Parsing'));
       const tradingPair = parsingStep?.details?.tradingPair;
       
-      if (!tradingPair || (!tradingPair.toUpperCase().includes('PAXG') && tradingPair.toUpperCase() !== 'GOLD')) {
+      if (!tradingPair || (!tradingPair.toUpperCase().includes('XAUT') && tradingPair.toUpperCase() !== 'GOLD')) {
         return {
           success: true,
-          message: 'Not a PAXG/Gold trade - skipping gold price check',
+          message: 'Not a XAUT/Gold trade - skipping gold price check',
           data: { skipped: true }
         };
       }
@@ -302,15 +302,15 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Get PAXG entry price from parsing or trade
-      const paxgPrice = parsingStep?.details?.entryPrice || firstTrade.entryPrice;
+      // Get XAUT entry price from parsing or trade
+      const xautPrice = parsingStep?.details?.entryPrice || firstTrade.entryPrice;
 
       try {
         const bybitClient = await ctx.getBybitClient?.(firstTrade.accountName);
         const comparison = await getGoldPriceComparison(
           bybitClient,
           new Date(entryTimestamp),
-          paxgPrice
+          xautPrice
         );
 
         return {
@@ -373,7 +373,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         });
       }
 
-      // Add gold/XAUT price comparison for PAXG trades
+      // Add gold/PAXG price comparison for XAUT trades
       if (goldPriceData?.comparison && !goldPriceData.skipped) {
         const comp = goldPriceData.comparison;
         findings.push(`\n🥇 Gold Price Comparison at Entry:`);
@@ -396,10 +396,6 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           if (comp.comparison.xautVsGold) {
             const { difference, percent } = comp.comparison.xautVsGold;
             findings.push(`  XAUT vs Gold: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
-          }
-          if (comp.comparison.paxgVsXaut) {
-            const { difference, percent } = comp.comparison.paxgVsXaut;
-            findings.push(`  PAXG vs XAUT: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
           }
         }
 

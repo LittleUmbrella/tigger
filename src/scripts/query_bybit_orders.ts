@@ -41,8 +41,8 @@ async function main() {
     console.log('  Query by order ID: tsx src/scripts/query_bybit_orders.ts <orderId> <symbol> <accountName>');
     console.log('  Search recent orders: tsx src/scripts/query_bybit_orders.ts search <symbol> <accountName> [limit]');
     console.log('\nExamples:');
-    console.log('  tsx src/scripts/query_bybit_orders.ts 27cc3c97 PAXGUSDT demo');
-    console.log('  tsx src/scripts/query_bybit_orders.ts search PAXGUSDT demo 20');
+    console.log('  tsx src/scripts/query_bybit_orders.ts 27cc3c97 XAUTUSDT demo');
+    console.log('  tsx src/scripts/query_bybit_orders.ts search XAUTUSDT demo 20');
     process.exit(1);
   }
 
