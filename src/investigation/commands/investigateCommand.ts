@@ -271,10 +271,27 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Use the message timestamp (when signal was received) rather than trade creation time
-      // This gives the price at the time the entry decision was made
-      const messageStep = traceResult.steps?.find((s: any) => s.step.includes('Message Storage'));
-      const entryTimestamp = messageStep?.details?.date || messageStep?.timestamp || traceResult.steps[0]?.timestamp;
+      // Use the entry order filled_at timestamp (when the order was actually filled)
+      // This gives the price at the time the position was actually opened
+      // Find all entry order steps and use the latest one (in case of multiple trades)
+      const entryOrderSteps = traceResult.steps?.filter((s: any) => 
+        s.step.includes('Entry Order Creation') && s.details?.entryFilledAt
+      ) || [];
+      
+      let entryTimestamp: string | undefined;
+      if (entryOrderSteps.length > 0) {
+        // Sort by entryFilledAt timestamp and use the latest one
+        entryOrderSteps.sort((a: any, b: any) => {
+          const timeA = new Date(a.details.entryFilledAt).getTime();
+          const timeB = new Date(b.details.entryFilledAt).getTime();
+          return timeB - timeA; // Latest first
+        });
+        entryTimestamp = entryOrderSteps[0].details.entryFilledAt;
+      } else {
+        // Fallback to message timestamp if entryFilledAt is not available
+        const messageStep = traceResult.steps?.find((s: any) => s.step.includes('Message Storage'));
+        entryTimestamp = messageStep?.details?.date || messageStep?.timestamp || traceResult.steps[0]?.timestamp;
+      }
       
       const firstTrade = trades[0];
       

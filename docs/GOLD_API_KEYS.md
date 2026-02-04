@@ -119,3 +119,4 @@ curl "https://www.alphavantage.co/query?function=GOLD&interval=daily&apikey=$ALP
 curl "http://data.fixer.io/api/latest?access_key=$FIXER_API_KEY&symbols=XAU"
 ```
 
+
