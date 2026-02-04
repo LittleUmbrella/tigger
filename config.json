@@ -127,17 +127,6 @@
       "baseLeverage": 50
     },
     {
-      "channel": "1441399338805891174",
-      "harvester": "gold_scalps_harvester",
-      "parser": "gold_scalps",
-      "breakevenAfterTPs": 1,
-      "entryTimeoutMinutes": 60,
-      "initiator": "bybit",
-      "monitor": "bybit",
-      "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 20
-    },
-    {
       "channel": "2385521106",
       "harvester": "big_harvester",
       "parser": "big",
