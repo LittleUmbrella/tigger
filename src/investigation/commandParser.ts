@@ -59,9 +59,15 @@ export function parseCommand(input: string): ParsedCommand | null {
     const key = part.substring(0, colonIndex);
     const value = part.substring(colonIndex + 1);
     
-    // Try to parse as number if it's numeric
-    const numValue = Number(value);
-    args[key] = isNaN(numValue) ? value : numValue;
+    // Keep messageId and channel as strings to avoid precision loss with large integers
+    // Other numeric values can be parsed as numbers if needed
+    if (key === 'message' || key === 'messageId' || key === 'channel') {
+      args[key] = value; // Keep as string
+    } else {
+      // Try to parse as number if it's numeric (for smaller values like trade IDs)
+      const numValue = Number(value);
+      args[key] = isNaN(numValue) ? value : numValue;
+    }
   }
 
   return {
@@ -94,11 +100,11 @@ export function parseCommandFlexible(input: string): ParsedCommand | null {
     
     if (messageMatch) {
       const args: Record<string, string | number> = {
-        message: parseInt(messageMatch[1])
+        message: messageMatch[1] // Keep as string to avoid precision loss
       };
       
       if (channelMatch) {
-        args.channel = channelMatch[1];
+        args.channel = channelMatch[1]; // Keep as string
       }
       
       return {
@@ -116,7 +122,7 @@ export function parseCommandFlexible(input: string): ParsedCommand | null {
       return {
         command: 'investigate',
         args: {
-          message: parseInt(messageMatch[1])
+          message: messageMatch[1] // Keep as string to avoid precision loss
         },
         raw: trimmed
       };

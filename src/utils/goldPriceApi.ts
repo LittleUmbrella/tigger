@@ -236,10 +236,16 @@ async function fetchFromGoldAPIIO(timestamp: Date): Promise<GoldPriceData | null
     });
 
     if (response.ok) {
-      const data = await response.json() as GoldAPIIOResponse;
+      const data = await response.json() as GoldAPIIOResponse & { prev_close_price?: number | string };
       // GoldAPI.io returns: { "price": 4710.50, "currency": "USD", "unit": "per_ounce", ... }
-      if (data.price) {
-        const price = parseFloat(String(data.price));
+      // Sometimes price is null but prev_close_price is available
+      let priceValue = data.price;
+      if (!priceValue && data.prev_close_price) {
+        priceValue = data.prev_close_price;
+      }
+      
+      if (priceValue) {
+        const price = parseFloat(String(priceValue));
         if (price > 0) {
           return {
             price,
@@ -374,9 +380,33 @@ export async function getGoldPriceAtTime(timestamp: Date): Promise<GoldPriceData
   }
 
   // Try GoldAPI.io if API key is available (different service)
-  const goldAPIIOResult = await fetchFromGoldAPIIO(timestamp);
+  let goldAPIIOResult = await fetchFromGoldAPIIO(timestamp);
   if (goldAPIIOResult) {
     return goldAPIIOResult;
+  }
+
+  // If no data for requested date, try previous day as fallback (for early morning trades)
+  // This handles cases where the trade happened before market data is available for that day
+  const previousDay = new Date(timestamp);
+  previousDay.setDate(previousDay.getDate() - 1);
+  
+  // Only try previous day if requested date is today or very recent (within 2 days)
+  const daysDiff = Math.floor((Date.now() - timestamp.getTime()) / (1000 * 60 * 60 * 24));
+  if (daysDiff <= 2) {
+    logger.debug('Trying previous day for gold price', {
+      requestedDate: timestamp.toISOString().split('T')[0],
+      previousDate: previousDay.toISOString().split('T')[0]
+    });
+    
+    goldAPIIOResult = await fetchFromGoldAPIIO(previousDay);
+    if (goldAPIIOResult) {
+      logger.info('Using previous day gold price as fallback', {
+        requestedDate: timestamp.toISOString().split('T')[0],
+        previousDate: previousDay.toISOString().split('T')[0],
+        price: goldAPIIOResult.price
+      });
+      return goldAPIIOResult;
+    }
   }
 
   // Try Alpha Vantage if API key is available

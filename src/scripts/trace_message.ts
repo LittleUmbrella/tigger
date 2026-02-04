@@ -153,21 +153,45 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
     });
 
     let message: Message | null = null;
+    
+    logger.debug('traceMessage - querying database', {
+      messageId,
+      channel,
+      messageIdType: typeof messageId,
+      channelType: typeof channel
+    });
+    
     if (channel) {
       message = await db.getMessageByMessageId(messageId, channel);
+      logger.debug('traceMessage - query result', {
+        messageId,
+        channel,
+        found: !!message,
+        messageDbId: message?.id
+      });
     } else {
       // Search all channels
       const channels = ['2394142145', '3241720654', '2427485240']; // Add more as needed
+      logger.debug('traceMessage - searching all channels', {
+        messageId,
+        channelsToSearch: channels
+      });
       for (const ch of channels) {
         message = await db.getMessageByMessageId(messageId, ch);
         if (message) {
           channel = ch;
+          logger.debug('traceMessage - found in channel', { channel: ch });
           break;
         }
       }
     }
 
     if (!message) {
+      logger.warn('traceMessage - message not found', {
+        messageId,
+        channel: channel || 'none',
+        searchedChannels: channel ? [channel] : ['2394142145', '3241720654', '2427485240']
+      });
       steps[0].status = 'failure';
       steps[0].error = 'Message not found in database';
       recommendations.push('Check if message was harvested from Telegram/Discord');

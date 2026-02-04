@@ -45,6 +45,13 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const msgId = String(ctx.args.messageId);
       const ch = ctx.args.channel;
       
+      logger.debug('Trace step - calling traceMessage', {
+        messageId: msgId,
+        channel: ch,
+        messageIdType: typeof msgId,
+        channelType: typeof ch
+      });
+      
       try {
         const traceResult = await traceMessage(msgId, ch);
         
@@ -264,9 +271,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Use the first trade's creation timestamp
+      // Use the message timestamp (when signal was received) rather than trade creation time
+      // This gives the price at the time the entry decision was made
+      const messageStep = traceResult.steps?.find((s: any) => s.step.includes('Message Storage'));
+      const entryTimestamp = messageStep?.details?.date || messageStep?.timestamp || traceResult.steps[0]?.timestamp;
+      
       const firstTrade = trades[0];
-      const entryTimestamp = firstTrade.createdAt || traceResult.steps[0]?.timestamp;
       
       if (!entryTimestamp) {
         return {
