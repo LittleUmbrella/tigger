@@ -77,38 +77,42 @@ export const vipCryptoSignals = (content: string, options?: ParserOptions): Pars
   const takeProfits: number[] = [];
   
   // Try multiple patterns for take profits
-  // Pattern 1: "Targets: 0.3250 - 0.3400 - 0.3600 + 🚀"
-  let takeProfitMatch = content.match(/Targets?:?\s*[:\-]?\s*([\d.\s\-+]+?)(?:\s*\+?\s*🚀|👩‍🚀|$)/i);
+  // Pattern 1: "🧿 Target: 0.005680 - 0.005740..." (emoji prefix format)
+  let takeProfitMatch = content.match(/🧿\s*Target[:\s]+([\d.\s\-]+)/i);
   if (!takeProfitMatch) {
-    // Pattern 2: "TP: 0.3250 - 0.3400" or "Target: 0.3250 - 0.3400" or "TARGET- 2.23-2.30" or "Targets : 0.50-0.55" or "💸TP :- 1.26$ - 1.274$"
+    // Pattern 2: "Targets: 0.3250 - 0.3400 - 0.3600 + 🚀"
+    takeProfitMatch = content.match(/Targets?:?\s*[:\-]?\s*([\d.\s\-+]+?)(?:\s*\+?\s*🚀|👩‍🚀|$)/i);
+  }
+  if (!takeProfitMatch) {
+    // Pattern 3: "TP: 0.3250 - 0.3400" or "Target: 0.3250 - 0.3400" or "TARGET- 2.23-2.30" or "Targets : 0.50-0.55" or "💸TP :- 1.26$ - 1.274$"
     takeProfitMatch = content.match(/(?:TP|Target|TARGET|Targets|💸TP)[:\s=-]+([\d.\s\-+$]+)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 3: "🎯 5.135 2) 🎯 5.25" format
+    // Pattern 4: "🎯 5.135 2) 🎯 5.25" format
     takeProfitMatch = content.match(/Targets?:?\s*([\d.\s\)]+)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 4: "🎯1 Target - 4.470$ 🎯2 Target - 6.560$"
+    // Pattern 5: "🎯1 Target - 4.470$ 🎯2 Target - 6.560$"
     takeProfitMatch = content.match(/Targets?:?\s*([\d.\s\$]+)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 5: "💫Take-Profit 1: 6.47 💫Take-Profit 2: 6.67" (numbered targets with emoji prefix) - capture everything after first 💫Take-Profit
+    // Pattern 6: "💫Take-Profit 1: 6.47 💫Take-Profit 2: 6.67" (numbered targets with emoji prefix) - capture everything after first 💫Take-Profit
     takeProfitMatch = content.match(/💫Take-Profit[\s\d:]+([\d.\s💫]+?)(?:\s*Mid-Term|⛔|🎗|$)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 6: "Take-Profit 1: 6.47 💫Take-Profit 2: 6.67" (numbered targets)
+    // Pattern 7: "Take-Profit 1: 6.47 💫Take-Profit 2: 6.67" (numbered targets)
     takeProfitMatch = content.match(/(?:Take-Profit|Take Profit|TP)[\s\d:]+([\d.\s💫]+?)(?:\s*Mid-Term|⛔|🎗|$)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 7: "📌Take-Profit Targets: 1) 53.50💲 2) 55.50💲" (numbered with emoji)
+    // Pattern 8: "📌Take-Profit Targets: 1) 53.50💲 2) 55.50💲" (numbered with emoji)
     takeProfitMatch = content.match(/Take-Profit Targets?:?\s*([\d.\s\)💲💵]+)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 8: "💫Take-Profit 610 💫Take-Profit 640" (multiple take profits without numbers)
+    // Pattern 9: "💫Take-Profit 610 💫Take-Profit 640" (multiple take profits without numbers)
     takeProfitMatch = content.match(/💫Take-Profit[\s\d:]*([\d.\s💫]+)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 9: "Target: 0.1127 - 0.1138" (simple Target format)
+    // Pattern 10: "Target: 0.1127 - 0.1138" (simple Target format)
     takeProfitMatch = content.match(/Target[:\s]+([\d.\s\-]+)/i);
   }
   
@@ -136,7 +140,7 @@ export const vipCryptoSignals = (content: string, options?: ParserOptions): Pars
   
   if (takeProfits.length === 0) return null;
 
-  // Leverage - extract number and use lowest value if range
+  // Leverage - extract number and use lowest value if range, or use default if not found
   // Handle formats: "20X To 10X", "20x to 10x", "20X 10X", "20.0X To 10.0X", "20X - 10X", "10X To 20X Only", "2-3X", "20X(", "Leverage [20x Cross)", "10X - 20X"
   let leverageMatch = content.match(/Leverage[:\s\[]*(\d+(?:\.\d+)?)\s*[Xx](?:\s*(?:To|to|-)\s*(\d+(?:\.\d+)?)\s*[Xx](?:\s+Only)?)?/i);
   // Handle "10X To 20X Only" format specifically
@@ -159,13 +163,15 @@ export const vipCryptoSignals = (content: string, options?: ParserOptions): Pars
     leverageMatch = content.match(/(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[Xx]\s*leverage/i);
   }
   
-  if (!leverageMatch) return null;
-  
-  const leverage1 = parseFloat(leverageMatch[1]);
-  const leverage2 = leverageMatch[2] ? parseFloat(leverageMatch[2]) : null;
-  // Use lowest value if range provided, otherwise use single value
-  const leverage = leverage2 !== null ? Math.min(leverage1, leverage2) : leverage1;
-  if (leverage < 1) return null;
+  // Use default leverage of 20x if not found (consistent with other parsers)
+  let leverage = 20; // Default leverage
+  if (leverageMatch) {
+    const leverage1 = parseFloat(leverageMatch[1]);
+    const leverage2 = leverageMatch[2] ? parseFloat(leverageMatch[2]) : null;
+    // Use lowest value if range provided, otherwise use single value
+    leverage = leverage2 !== null ? Math.min(leverage1, leverage2) : leverage1;
+    if (leverage < 1) return null;
+  }
 
   const parsedOrder: ParsedOrder = {
     tradingPair,
