@@ -2207,16 +2207,32 @@ export class DatabaseManager {
 
   constructor(config?: { type?: DatabaseType; path?: string; url?: string }) {
     // Determine database type from config or environment
-    const dbType = config?.type || 
-                   (process.env.DATABASE_TYPE as DatabaseType) || 
-                   (process.env.DATABASE_URL ? 'postgresql' : 'sqlite');
+    // Default to PostgreSQL for cloud/production environments
+    // Only use SQLite if explicitly requested via DATABASE_PATH or config.path
+    const explicitType = config?.type || (process.env.DATABASE_TYPE as DatabaseType);
+    const hasDatabaseUrl = !!process.env.DATABASE_URL;
+    const hasDatabasePath = !!(config?.path || process.env.DATABASE_PATH);
+    const hasConfigUrl = !!config?.url;
+    
+    // Priority: explicit type > DATABASE_URL/config.url > DATABASE_PATH/config.path > default PostgreSQL
+    let dbType: DatabaseType;
+    if (explicitType) {
+      dbType = explicitType;
+    } else if (hasDatabaseUrl || hasConfigUrl) {
+      dbType = 'postgresql';
+    } else if (hasDatabasePath) {
+      dbType = 'sqlite';
+    } else {
+      // Default to PostgreSQL (assumes cloud/production environment)
+      dbType = 'postgresql';
+    }
     
     this.dbType = dbType;
 
     if (dbType === 'postgresql') {
       const connectionString = process.env.DATABASE_URL || config?.url;
       if (!connectionString) {
-        throw new Error('PostgreSQL requires DATABASE_URL environment variable or database.url in config');
+        throw new Error('PostgreSQL requires DATABASE_URL environment variable or database.url in config. If you want to use SQLite, set DATABASE_PATH or database.path in config.');
       }
       this.adapter = new PostgreSQLAdapter(connectionString);
       logger.info('Database initialized', { type: 'postgresql' });
