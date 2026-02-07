@@ -44,6 +44,18 @@
       "envVarNames": {
         "userToken": "DISCORD_USER_TOKEN"
       }      
+    },
+    {
+      "name": "star_format_harvester",
+      "channel": "1634731277",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
     }
   ],
   "parsers": [
@@ -62,6 +74,10 @@
     {
       "name": "big",
       "channel": "2385521106"
+    },
+    {
+      "name": "star_format",
+      "channel": "1634731277"
     }
   ],
   "accounts": [
@@ -136,6 +152,17 @@
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
       "baseLeverage": 20
+    },
+    {
+      "channel": "1634731277",
+      "harvester": "star_format_harvester",
+      "parser": "star_format",
+      "breakevenAfterTPs": 2,
+      "entryTimeoutMinutes": 90,
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 8
     }
   ],
   "database": {

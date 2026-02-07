@@ -12,6 +12,7 @@ import { connect } from './channels/2394142145/connect.js';
 import { schoolParser } from './schoolParser.js';
 import { bigParser } from './bigParser.js';
 import { goldScalpsParser } from './goldScalpsParser.js';
+import { starFormatParser } from './starFormatParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -23,6 +24,7 @@ registerParser('connect', connect);
 registerParser('school', schoolParser);
 registerParser('big', bigParser);
 registerParser('gold_scalps', goldScalpsParser);
+registerParser('star_format', starFormatParser);
 
 /**
  * Parse a message using the specified parser name
