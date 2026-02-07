@@ -21,6 +21,7 @@
     "trace-message": "tsx src/scripts/trace_message.ts",
     "investigate": "tsx src/investigation/cli.ts",
     "query-loggly": "tsx src/scripts/query_loggly.ts",
+    "search-private-chats": "tsx src/scripts/search_private_chats.ts",
     "mcp:loggly": "tsx src/mcp/logglyServer.ts",
     "mcp:investigation": "tsx src/mcp/investigationServer.ts",
     "fix-trade-tps": "tsx src/scripts/fix_trade_tps.ts",
