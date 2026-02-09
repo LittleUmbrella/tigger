@@ -8,6 +8,7 @@ import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuant
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
+import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import dayjs from 'dayjs';
 
 /**
@@ -29,6 +30,151 @@ const serializeError = (error: unknown): { error: string; stack?: string } => {
   } else {
     return { error: String(error) };
   }
+};
+
+// Cache start-of-day balance per account (UTC day) to avoid repeated API calls
+const dayStartBalanceCache = new Map<string, { utcDate: string; balance: number }>();
+
+type BybitTransactionLogParams = {
+  accountType: 'UNIFIED';
+  coin: 'USDT';
+  startTime: string;
+  endTime: string;
+  limit: number;
+};
+
+type BybitClientWithTransactionLog = RestClientV5 & {
+  // Some versions of `bybit-api` expose this at runtime but don't include it in the TS typings.
+  getTransactionLog: (params: BybitTransactionLogParams) => Promise<any>;
+};
+
+const getUtcDayStartBalance = async (
+  bybitClient: RestClientV5,
+  accountName: string,
+  currentWalletBalance: number
+): Promise<number> => {
+  const now = new Date();
+  const dayStartMs = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0);
+  const utcDate = new Date(dayStartMs).toISOString().slice(0, 10);
+  const cached = dayStartBalanceCache.get(accountName);
+  if (cached && cached.utcDate === utcDate && isFinite(cached.balance) && cached.balance > 0) {
+    return cached.balance;
+  }
+
+  const txClient = bybitClient as BybitClientWithTransactionLog;
+  if (typeof txClient.getTransactionLog !== 'function') {
+    throw new Error('Cannot enforce swing daily drawdown: Bybit client missing getTransactionLog()');
+  }
+
+  // We already have the current USDT wallet balance. We only need the transaction log to determine whether
+  // anything has changed since UTC midnight. If nothing changed, then currentWalletBalance === dayStartBalance.
+  const sinceMidnight = await txClient.getTransactionLog({
+    accountType: 'UNIFIED',
+    coin: 'USDT',
+    startTime: dayStartMs.toString(),
+    endTime: Date.now().toString(),
+    limit: 1000 // Fetch enough to find the earliest transaction
+  });
+
+  if (sinceMidnight?.retCode !== 0) {
+    throw new Error(`Failed to fetch transaction log for UTC-day activity check (retCode=${sinceMidnight?.retCode})`);
+  }
+
+  const txList = sinceMidnight?.result?.list || [];
+  if (txList.length === 0) {
+    // No transactions since UTC midnight, so current balance == day-start balance
+    if (!isFinite(currentWalletBalance) || currentWalletBalance <= 0) {
+      throw new Error(`Cannot infer UTC day-start balance: invalid current wallet balance ${currentWalletBalance}`);
+    }
+    dayStartBalanceCache.set(accountName, { utcDate, balance: currentWalletBalance });
+    return currentWalletBalance;
+  }
+
+  // There WERE transactions since UTC midnight. The earliest transaction's cashBalance should represent
+  // the balance before that transaction, which is effectively the day-start balance.
+  // Transaction logs are typically sorted newest-first, so we need to find the oldest one.
+  const earliestTx = txList.reduce((oldest: any, tx: any) => {
+    const txTime = parseFloat(getBybitField<string>(tx, 'execTime', 'exec_time') || '0');
+    const oldestTime = parseFloat(getBybitField<string>(oldest, 'execTime', 'exec_time') || '0');
+    return txTime < oldestTime ? tx : oldest;
+  });
+
+  const cashBalanceStr = getBybitField<string>(earliestTx, 'cashBalance', 'cash_balance');
+  const cashBalance = parseFloat(cashBalanceStr || '0');
+  if (isFinite(cashBalance) && cashBalance > 0) {
+    dayStartBalanceCache.set(accountName, { utcDate, balance: cashBalance });
+    return cashBalance;
+  }
+
+  // Fallback: try a small pre-midnight window (60 seconds) to find the last pre-midnight cashBalance
+  const preMidnightWindowMs = 60_000;
+  const preMidnight = await txClient.getTransactionLog({
+    accountType: 'UNIFIED',
+    coin: 'USDT',
+    startTime: (dayStartMs - preMidnightWindowMs).toString(),
+    endTime: dayStartMs.toString(),
+    limit: 1
+  });
+
+  if (preMidnight?.retCode === 0 && preMidnight?.result?.list && preMidnight.result.list.length > 0) {
+    const record = preMidnight.result.list[0];
+    const preCashBalanceStr = getBybitField<string>(record, 'cashBalance', 'cash_balance');
+    const preCashBalance = parseFloat(preCashBalanceStr || '0');
+    if (isFinite(preCashBalance) && preCashBalance > 0) {
+      dayStartBalanceCache.set(accountName, { utcDate, balance: preCashBalance });
+      return preCashBalance;
+    }
+  }
+
+  // Fail closed: can't infer day-start baseline accurately.
+  throw new Error('Cannot infer UTC day-start balance: transactions exist since UTC midnight, but no valid cashBalance found in earliest transaction or pre-midnight window');
+};
+
+/**
+ * Compute worst-case loss (in USDT) for currently open positions, assuming each hits its stop-loss.
+ * If stop-loss is missing for any open position, returns Infinity.
+ */
+const calculateWorstCaseLossForOpenPositions = (positions: any[]): {
+  worstCaseLoss: number;
+  missingStopLossSymbols: string[];
+} => {
+  let worstCaseLoss = 0;
+  const missingStopLossSymbols: string[] = [];
+
+  for (const position of positions) {
+    const size = parseFloat(getBybitField<string>(position, 'size') || '0');
+    if (!isFinite(size) || size <= 0) continue;
+
+    const symbol = getBybitField<string>(position, 'symbol') || 'UNKNOWN';
+    const side = (getBybitField<string>(position, 'side') || '').toLowerCase(); // 'buy' | 'sell'
+
+    const avgPrice = parseFloat(getBybitField<string>(position, 'avgPrice') || getBybitField<string>(position, 'avgEntryPrice') || '0');
+    const stopLoss = parseFloat(getBybitField<string>(position, 'stopLoss') || '0');
+
+    if (!isFinite(avgPrice) || avgPrice <= 0) {
+      // If we can't determine entry/avg price, fail closed
+      return { worstCaseLoss: Infinity, missingStopLossSymbols: [symbol] };
+    }
+
+    if (!isFinite(stopLoss) || stopLoss <= 0) {
+      missingStopLossSymbols.push(symbol);
+      continue;
+    }
+
+    // Only count downside (if SL is beyond entry in profit direction, treat loss as 0)
+    const perUnitLoss =
+      side === 'buy'
+        ? Math.max(0, avgPrice - stopLoss)
+        : Math.max(0, stopLoss - avgPrice);
+
+    worstCaseLoss += perUnitLoss * size;
+  }
+
+  if (missingStopLossSymbols.length > 0) {
+    return { worstCaseLoss: Infinity, missingStopLossSymbols };
+  }
+
+  return { worstCaseLoss, missingStopLossSymbols };
 };
 
 /**
@@ -652,6 +798,85 @@ const executeTradeForAccount = async (
     // Final validation before creating order params: ensure price is valid
     if (!roundedEntryPrice || roundedEntryPrice <= 0 || !isFinite(roundedEntryPrice)) {
       throw new Error(`Cannot create order: invalid price ${roundedEntryPrice} for symbol ${symbol}`);
+    }
+    
+    // Prop firm pre-trade validation: check if total loss would violate rules
+    if (context.propFirms && context.propFirms.length > 0 && !isSimulation) {
+      if (!bybitClient) {
+        throw new Error('Prop firm validation requires a Bybit client to fetch open positions');
+      }
+      const requiredBybitClient = bybitClient;
+
+      // Use current balance from exchange as initial balance for prop firm validation
+      // This treats the current account balance as the baseline for rule checking
+      const initialBalance = balance;
+      const dayStartBalance = await getUtcDayStartBalance(requiredBybitClient, accountName || 'default', balance);
+
+      // Include worst-case loss for ALL currently open exchange positions (per-account),
+      // so we don't open a new trade that would cause a violation if everything hit SL.
+      const positionsResponse = await requiredBybitClient.getPositionInfo({ category: 'linear' });
+      if (positionsResponse.retCode !== 0) {
+        throw new Error(`Failed to fetch open positions for prop firm validation (retCode=${positionsResponse.retCode})`);
+      }
+
+      const openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
+        const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+        return isFinite(size) && size > 0;
+      });
+
+      const { worstCaseLoss: openWorstCaseLoss, missingStopLossSymbols } =
+        calculateWorstCaseLossForOpenPositions(openPositions);
+
+      if (!isFinite(openWorstCaseLoss)) {
+        logger.warn('Prop firm validation: could not compute worst-case open-position risk (missing stop-loss)', {
+          channel,
+          messageId: message.message_id,
+          accountName: accountName || 'default',
+          missingStopLossSymbols,
+        });
+      }
+
+      const validationResults = await validateTradeAgainstPropFirms(
+        db,
+        channel,
+        context.propFirms,
+        initialBalance,
+        roundedEntryPrice,
+        roundedStopLoss || 0,
+        qty,
+        effectiveLeverage,
+        openWorstCaseLoss,
+        dayStartBalance
+      );
+      
+      // Check if any prop firm would be violated
+      const blockedResults = validationResults.filter(r => !r.allowed);
+      if (blockedResults.length > 0) {
+        const violationMessages = blockedResults.map(r => 
+          `${r.propFirmName}: ${r.violations.join('; ')}`
+        ).join(' | ');
+        
+        logger.warn('Trade blocked by prop firm validation', {
+          channel,
+          messageId: message.message_id,
+          tradingPair: order.tradingPair,
+          entryPrice: roundedEntryPrice,
+          stopLoss: roundedStopLoss,
+          quantity: qty,
+          violations: violationMessages,
+          blockedBy: blockedResults.map(r => r.propFirmName)
+        });
+        
+        throw new Error(`Trade would violate prop firm rules: ${violationMessages}`);
+      }
+      
+      // Log successful validation
+      logger.debug('Prop firm validation passed', {
+        channel,
+        messageId: message.message_id,
+        tradingPair: order.tradingPair,
+        propFirms: validationResults.map(r => r.propFirmName)
+      });
     }
     
     // Using Bybit Futures API (linear perpetuals)

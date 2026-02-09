@@ -129,7 +129,9 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 20
+      "baseLeverage": 20,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"]
     },
     {
       "channel": "3272135406",

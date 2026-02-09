@@ -69,7 +69,7 @@ export interface TradeWithMessage extends Trade {
 export interface Order {
   id: number;
   trade_id: number; // Foreign key to trades.id
-  order_type: 'entry' | 'stop_loss' | 'take_profit';
+  order_type: 'entry' | 'stop_loss' | 'take_profit' | 'breakeven_limit';
   order_id?: string; // Exchange order ID
   price: number; // Order price (entry price, SL price, or TP price)
   tp_index?: number; // Index in take_profits array (0-based, only for TP orders)

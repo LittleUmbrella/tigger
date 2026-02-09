@@ -218,11 +218,12 @@ export const startTradeOrchestrator = async (
       }
       state.stopHarvesters.push(stopHarvester);
 
-      // Merge channel-specific breakevenAfterTPs and entryTimeoutMinutes overrides with monitor config
+      // Merge channel-specific breakevenAfterTPs, entryTimeoutMinutes, and useLimitOrderForBreakeven overrides with monitor config
       const monitorConfigWithOverride: MonitorConfig = {
         ...monitor,
         breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs,
-        entryTimeoutMinutes: channelConfig.entryTimeoutMinutes ?? monitor.entryTimeoutMinutes
+        entryTimeoutMinutes: channelConfig.entryTimeoutMinutes ?? monitor.entryTimeoutMinutes,
+        useLimitOrderForBreakeven: channelConfig.useLimitOrderForBreakeven ?? monitor.useLimitOrderForBreakeven ?? true
       };
 
       // Start monitor for this channel
@@ -844,7 +845,8 @@ export const startTradeOrchestrator = async (
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
-          channelConfig.accountFilters // Pass channel-level account filtering rules
+          channelConfig.accountFilters, // Pass channel-level account filtering rules
+          channelConfig.propFirms // Pass prop firm configurations
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

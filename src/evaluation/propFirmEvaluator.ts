@@ -3,6 +3,10 @@ import { Trade, Order, DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 
+const toUtcDateString = (iso: string): string => {
+  return new Date(iso).toISOString().slice(0, 10);
+};
+
 /**
  * Account state for prop firm evaluation
  */
@@ -142,7 +146,8 @@ function evaluateDailyDrawdown(rule: PropFirmRule, accountState: AccountState): 
   if (rule.dailyDrawdown === undefined) return;
 
   // Calculate balance at the start of each day to properly calculate daily drawdown limits
-  // Daily drawdown should be relative to the balance at the START of the day, not initial balance
+  // For HyroTrader Swing daily drawdown, the baseline is the day's starting equity.
+  // We approximate using balance-at-start-of-day derived from realized PnL history.
   const sortedTrades = [...accountState.trades].sort((a, b) => {
     const timeA = a.exit_filled_at ? dayjs(a.exit_filled_at).valueOf() : 0;
     const timeB = b.exit_filled_at ? dayjs(b.exit_filled_at).valueOf() : 0;
@@ -156,7 +161,7 @@ function evaluateDailyDrawdown(rule: PropFirmRule, accountState: AccountState): 
   // First pass: calculate balance at start of each trading day
   for (const trade of sortedTrades) {
     if (trade.exit_filled_at && trade.pnl !== undefined) {
-      const tradeDate = dayjs(trade.exit_filled_at).format('YYYY-MM-DD');
+      const tradeDate = toUtcDateString(trade.exit_filled_at);
       // Store balance at start of day (before this trade's P&L is applied)
       if (!balanceByDate.has(tradeDate)) {
         balanceByDate.set(tradeDate, runningBalance);
@@ -182,6 +187,7 @@ function evaluateDailyDrawdown(rule: PropFirmRule, accountState: AccountState): 
           dailyPnL,
           dayStartBalance,
           limit: -dailyDrawdownLimit,
+          mode: rule.dailyDrawdownMode || 'dayStartPercent',
         },
       });
     }
@@ -618,7 +624,7 @@ export function createPropFirmEvaluator(rule: PropFirmRule, db: DatabaseManager)
 
         // Track daily P&L
         if (trade.exit_filled_at) {
-          const tradeDate = dayjs(trade.exit_filled_at).format('YYYY-MM-DD');
+          const tradeDate = toUtcDateString(trade.exit_filled_at);
           const currentDailyPnL = accountState.dailyPnL.get(tradeDate) || 0;
           accountState.dailyPnL.set(tradeDate, currentDailyPnL + trade.pnl);
 

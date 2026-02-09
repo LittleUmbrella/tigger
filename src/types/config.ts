@@ -102,6 +102,7 @@ export interface MonitorConfig {
   pollInterval?: number; // milliseconds
   entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
+  useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
 }
 
 export interface AccountFilterRule {
@@ -127,6 +128,8 @@ export interface ChannelSetConfig {
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
+  useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
+  propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
 }
 
 export interface SimulationConfig {

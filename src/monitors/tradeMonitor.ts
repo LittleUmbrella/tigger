@@ -1196,6 +1196,169 @@ const placeTakeProfitOrders = async (
   }
 };
 
+/**
+ * Place a limit order at entry price to close the trade at breakeven
+ * This is used instead of moving the stop loss when useLimitOrderForBreakeven is enabled
+ */
+const placeBreakevenLimitOrder = async (
+  trade: Trade,
+  bybitClient: RestClientV5,
+  db: DatabaseManager,
+  isLong: boolean
+): Promise<void> => {
+  try {
+    const symbol = normalizeBybitSymbol(trade.trading_pair);
+    
+    // Get position info to determine quantity and positionIdx
+    const positionResponse = await bybitClient.getPositionInfo({
+      category: 'linear',
+      symbol: symbol
+    });
+
+    if (positionResponse.retCode !== 0 || !positionResponse.result?.list) {
+      logger.warn('Could not get position info for breakeven limit order', {
+        tradeId: trade.id,
+        symbol,
+        retCode: positionResponse.retCode
+      });
+      return;
+    }
+
+    // Find the position
+    let position: any = null;
+    if (trade.position_id) {
+      position = positionResponse.result.list.find((p: any) => {
+        const positionIdx = getBybitField<string | number>(p, 'positionIdx', 'position_idx');
+        return p.symbol === symbol && positionIdx?.toString() === trade.position_id;
+      });
+    }
+    
+    if (!position) {
+      const positions = positionResponse.result.list.filter((p: any) => {
+        const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+        return size !== 0 && p.symbol === symbol;
+      });
+      if (positions.length > 0) {
+        position = positions[0];
+      }
+    }
+
+    if (!position) {
+      logger.warn('No position found for breakeven limit order', {
+        tradeId: trade.id,
+        symbol,
+        positionId: trade.position_id
+      });
+      return;
+    }
+
+    const positionSize = Math.abs(parseFloat(getBybitField<string>(position, 'size') || '0'));
+    if (positionSize === 0) {
+      logger.warn('Position size is zero, cannot place breakeven limit order', {
+        tradeId: trade.id,
+        symbol
+      });
+      return;
+    }
+
+    // Get positionIdx
+    const positionIdxFromPosition = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+    let positionIdx: 0 | 1 | 2 = 0;
+    if (trade.position_id) {
+      const storedIdx = parseInt(trade.position_id, 10);
+      if (!isNaN(storedIdx) && (storedIdx === 0 || storedIdx === 1 || storedIdx === 2)) {
+        positionIdx = storedIdx as 0 | 1 | 2;
+      }
+    } else if (positionIdxFromPosition !== undefined) {
+      const idx = typeof positionIdxFromPosition === 'string' 
+        ? parseInt(positionIdxFromPosition, 10) 
+        : positionIdxFromPosition;
+      if (!isNaN(idx) && (idx === 0 || idx === 1 || idx === 2)) {
+        positionIdx = idx as 0 | 1 | 2;
+      }
+    }
+
+    // Get symbol info for precision
+    const symbolInfo = await getSymbolInfo(bybitClient, symbol);
+    let decimalPrecision = 2;
+    let pricePrecision: number | undefined = undefined;
+
+    if (symbolInfo) {
+      decimalPrecision = symbolInfo.qtyPrecision ?? 2;
+      pricePrecision = symbolInfo.pricePrecision;
+    }
+
+    // Round entry price
+    const entryPrice = roundPrice(trade.entry_price, pricePrecision, undefined);
+    
+    // Breakeven order side is opposite of position side (to close the position)
+    // For Long (Buy) position, breakeven order is Sell
+    // For Short (Sell) position, breakeven order is Buy
+    const breakevenSide = isLong ? 'Sell' : 'Buy';
+
+    // Format quantity
+    const quantityStr = formatQuantity(positionSize, decimalPrecision);
+
+    const breakevenOrderParams = {
+      category: 'linear' as const,
+      symbol: symbol,
+      side: breakevenSide as 'Buy' | 'Sell',
+      orderType: 'Limit' as const,
+      qty: quantityStr,
+      price: entryPrice.toString(),
+      timeInForce: 'GTC' as const,
+      reduceOnly: true,
+      closeOnTrigger: false,
+      positionIdx: positionIdx,
+    };
+
+    logger.info('Placing breakeven limit order', {
+      tradeId: trade.id,
+      symbol,
+      entryPrice,
+      quantity: quantityStr,
+      side: breakevenSide,
+      positionIdx,
+      positionSize
+    });
+
+    const orderResponse = await bybitClient.submitOrder(breakevenOrderParams);
+    const orderId = getBybitField<string>(orderResponse.result, 'orderId', 'order_id');
+
+    if (orderResponse.retCode === 0 && orderResponse.result && orderId) {
+      // Store breakeven limit order in database
+      await db.insertOrder({
+        trade_id: trade.id,
+        order_type: 'breakeven_limit',
+        order_id: orderId,
+        price: entryPrice,
+        quantity: positionSize,
+        status: 'pending'
+      });
+
+      logger.info('Breakeven limit order placed successfully', {
+        tradeId: trade.id,
+        symbol,
+        orderId,
+        entryPrice,
+        quantity: quantityStr
+      });
+    } else {
+      logger.error('Failed to place breakeven limit order', {
+        tradeId: trade.id,
+        symbol,
+        parameters: breakevenOrderParams,
+        error: JSON.stringify(orderResponse)
+      });
+    }
+  } catch (error) {
+    logger.error('Error placing breakeven limit order', {
+      tradeId: trade.id,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+};
+
 const checkOrderFilled = async (
   order: Order,
   trade: Trade,
@@ -1218,7 +1381,8 @@ const checkOrderFilled = async (
         filled = isLong
           ? currentPrice <= order.price
           : currentPrice >= order.price;
-      } else if (order.order_type === 'take_profit') {
+      } else if (order.order_type === 'take_profit' || order.order_type === 'breakeven_limit') {
+        // Breakeven limit orders work like take profit orders (limit orders to close position)
         filled = isLong
           ? currentPrice >= order.price
           : currentPrice <= order.price;
@@ -1278,7 +1442,8 @@ const monitorTrade = async (
   bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
-  breakevenAfterTPs: number
+  breakevenAfterTPs: number,
+  useLimitOrderForBreakeven: boolean = true
 ): Promise<void> => {
   try {
     // Log trade status at start for debugging
@@ -1621,6 +1786,15 @@ const monitorTrade = async (
               exit_filled_at: dayjs().toISOString()
             });
           }
+          
+          // If breakeven limit order was filled, mark trade as completed (closed at breakeven)
+          if (order.order_type === 'breakeven_limit') {
+            await db.updateTrade(trade.id, {
+              status: 'completed',
+              exit_price: orderResult.filledPrice,
+              exit_filled_at: dayjs().toISOString()
+            });
+          }
         }
       }
       // First, check if position is closed
@@ -1668,18 +1842,51 @@ const monitorTrade = async (
 
       // Check if we've hit the required number of TPs to move to breakeven
       if (filledTPCount >= breakevenAfterTPs && !trade.stop_loss_breakeven) {
-        logger.info('Required take profits hit - moving stop loss to breakeven', {
-          tradeId: trade.id,
-          filledTPCount,
-          breakevenAfterTPs,
-          entryPrice: trade.entry_price
-        });
-        
-        await updateStopLoss(trade, trade.entry_price, bybitClient, db);
-        await db.updateTrade(trade.id, {
-          stop_loss: trade.entry_price,
-          stop_loss_breakeven: true
-        });
+        // Check if breakeven limit order already exists
+        const existingOrders = await db.getOrdersByTradeId(trade.id);
+        const existingBreakevenOrder = existingOrders.find(
+          o => o.order_type === 'breakeven_limit'
+        );
+
+        if (useLimitOrderForBreakeven) {
+          // Create limit order at entry price instead of moving stop loss
+          if (!existingBreakevenOrder && bybitClient && trade.exchange === 'bybit') {
+            logger.info('Required take profits hit - creating breakeven limit order at entry price', {
+              tradeId: trade.id,
+              filledTPCount,
+              breakevenAfterTPs,
+              entryPrice: trade.entry_price
+            });
+            
+            await placeBreakevenLimitOrder(trade, bybitClient, db, isLong);
+            await db.updateTrade(trade.id, {
+              stop_loss_breakeven: true
+            });
+          } else if (existingBreakevenOrder) {
+            // Breakeven order already exists, just mark trade as breakeven
+            logger.debug('Breakeven limit order already exists', {
+              tradeId: trade.id,
+              orderId: existingBreakevenOrder.order_id
+            });
+            await db.updateTrade(trade.id, {
+              stop_loss_breakeven: true
+            });
+          }
+        } else {
+          // Old behavior: move stop loss to entry price
+          logger.info('Required take profits hit - moving stop loss to breakeven', {
+            tradeId: trade.id,
+            filledTPCount,
+            breakevenAfterTPs,
+            entryPrice: trade.entry_price
+          });
+          
+          await updateStopLoss(trade, trade.entry_price, bybitClient, db);
+          await db.updateTrade(trade.id, {
+            stop_loss: trade.entry_price,
+            stop_loss_breakeven: true
+          });
+        }
       }
 
       // Check if stop loss is hit
@@ -1764,6 +1971,7 @@ export const startTradeMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
+  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? true; // Default to true (new behavior)
 
   const monitorLoop = async (): Promise<void> => {
     // Check if we're in maximum speed mode (no delays)
@@ -1778,7 +1986,7 @@ export const startTradeMonitor = async (
           const accountClient = getBybitClient 
             ? getBybitClient(trade.account_name)
             : bybitClient; // Fallback to legacy client
-          await monitorTrade(channel, monitorConfig.type, entryTimeoutMinutes, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs);
+          await monitorTrade(channel, monitorConfig.type, entryTimeoutMinutes, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven);
         }
 
         // Skip sleep in maximum speed mode

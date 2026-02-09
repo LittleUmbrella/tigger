@@ -4,6 +4,8 @@ import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 
+import { CustomPropFirmConfig } from '../types/config.js';
+
 /**
  * Context passed to initiator functions
  */
@@ -20,6 +22,7 @@ export interface InitiatorContext {
   accounts?: AccountConfig[]; // Available accounts configuration
   accountFilters?: AccountFilter[]; // Channel-level account filtering rules
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
+  propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
 }
 
 /**
