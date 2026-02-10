@@ -7,6 +7,7 @@ import { startCSVHarvester } from '../harvesters/csvHarvester.js';
 import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
+import { startCTraderMonitor } from '../monitors/ctraderMonitor.js';
 import { logger } from '../utils/logger.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { registerParser } from '../parsers/parserRegistry.js';
@@ -17,6 +18,7 @@ import { parseManagementCommand, getManager, ManagerContext } from '../managers/
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
+import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from '../parsers/channels/3241720654/ronnie-crypto-signals.js';
 import { connect } from '../parsers/channels/2394142145/connect.js';
@@ -72,6 +74,9 @@ export const startTradeOrchestrator = async (
 
   // Create Bybit client map for managers (keyed by account name)
   const bybitClientMap = new Map<string, RestClientV5>();
+  // Create cTrader client map (keyed by account name)
+  const ctraderClientMap = new Map<string, CTraderClient>();
+  
   const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RestClientV5 | undefined => {
     const key = accountName || 'default';
     
@@ -126,6 +131,81 @@ export const startTradeOrchestrator = async (
 
     bybitClientMap.set(key, client);
     return client;
+  };
+
+  const createCTraderClient = async (accountName: string | undefined): Promise<CTraderClient | undefined> => {
+    const key = accountName || 'default';
+    
+    if (ctraderClientMap.has(key)) {
+      return ctraderClientMap.get(key);
+    }
+
+    if (isSimulation) {
+      return undefined; // No real client needed in simulation
+    }
+
+    // Get account config if account name is provided
+    let clientId: string | undefined;
+    let clientSecret: string | undefined;
+    let accessToken: string | undefined;
+    let refreshToken: string | undefined;
+    let accountId: string | undefined;
+    let environment: 'demo' | 'live' = 'demo';
+
+    if (accountName && accountMap.has(accountName)) {
+      const account = accountMap.get(accountName)!;
+      if (account.exchange !== 'ctrader') {
+        return undefined;
+      }
+      
+      const envVarNameForClientId = account.envVarNames?.apiKey; // Reuse apiKey field for clientId
+      const envVarNameForSecret = account.envVarNames?.apiSecret;
+      const envVarNameForAccessToken = (account as any).envVarNames?.accessToken;
+      const envVarNameForRefreshToken = (account as any).envVarNames?.refreshToken;
+      const envVarNameForAccountId = (account as any).envVarNames?.accountId;
+      
+      clientId = envVarNameForClientId ? process.env[envVarNameForClientId] : process.env.CTRADER_CLIENT_ID;
+      clientSecret = envVarNameForSecret ? process.env[envVarNameForSecret] : process.env.CTRADER_CLIENT_SECRET;
+      accessToken = envVarNameForAccessToken ? process.env[envVarNameForAccessToken] : process.env.CTRADER_ACCESS_TOKEN;
+      refreshToken = envVarNameForRefreshToken ? process.env[envVarNameForRefreshToken] : process.env.CTRADER_REFRESH_TOKEN;
+      accountId = envVarNameForAccountId ? process.env[envVarNameForAccountId] : process.env.CTRADER_ACCOUNT_ID;
+      environment = account.demo ? 'demo' : 'live';
+    } else {
+      // Fallback to environment variables
+      clientId = process.env.CTRADER_CLIENT_ID;
+      clientSecret = process.env.CTRADER_CLIENT_SECRET;
+      accessToken = process.env.CTRADER_ACCESS_TOKEN;
+      refreshToken = process.env.CTRADER_REFRESH_TOKEN;
+      accountId = process.env.CTRADER_ACCOUNT_ID;
+    }
+
+    if (!accessToken || !accountId) {
+      return undefined;
+    }
+
+    const clientConfig: CTraderClientConfig = {
+      clientId: clientId || '',
+      clientSecret: clientSecret || '',
+      accessToken,
+      refreshToken,
+      accountId,
+      environment
+    };
+
+    const client = new CTraderClient(clientConfig);
+    
+    try {
+      await client.connect();
+      await client.authenticate();
+      ctraderClientMap.set(key, client);
+      return client;
+    } catch (error) {
+      logger.error('Failed to create cTrader client', {
+        accountName,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return undefined;
+    }
   };
 
   // Check if we're in maximum speed mode (no delays) - calculate early for use in monitor
@@ -226,16 +306,30 @@ export const startTradeOrchestrator = async (
         useLimitOrderForBreakeven: channelConfig.useLimitOrderForBreakeven ?? monitor.useLimitOrderForBreakeven ?? true
       };
 
-      // Start monitor for this channel
-      const stopMonitor = await startTradeMonitor(
-        monitorConfigWithOverride, 
-        channelConfig.channel, 
-        db, 
-        isSimulation, 
-        priceProvider, 
-        speedMultiplier,
-        (accountName?: string) => createBybitClient(accountName)
-      );
+      // Start monitor for this channel based on monitor type
+      let stopMonitor: () => Promise<void>;
+      if (monitor.type === 'ctrader') {
+        stopMonitor = await startCTraderMonitor(
+          monitorConfigWithOverride,
+          channelConfig.channel,
+          db,
+          isSimulation,
+          priceProvider,
+          speedMultiplier,
+          async (accountName?: string) => await createCTraderClient(accountName)
+        );
+      } else {
+        // Default to Bybit monitor for 'bybit' and 'dex' types
+        stopMonitor = await startTradeMonitor(
+          monitorConfigWithOverride,
+          channelConfig.channel,
+          db,
+          isSimulation,
+          priceProvider,
+          speedMultiplier,
+          (accountName?: string) => createBybitClient(accountName)
+        );
+      }
       state.stopMonitors.push(stopMonitor);
 
       logger.info('Started channel set', {

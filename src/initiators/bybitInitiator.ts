@@ -814,18 +814,80 @@ const executeTradeForAccount = async (
 
       // Include worst-case loss for ALL currently open exchange positions (per-account),
       // so we don't open a new trade that would cause a violation if everything hit SL.
-      const positionsResponse = await requiredBybitClient.getPositionInfo({ category: 'linear' });
-      if (positionsResponse.retCode !== 0) {
-        throw new Error(`Failed to fetch open positions for prop firm validation (retCode=${positionsResponse.retCode})`);
+      // Try fetching positions - some accounts (unified/demo) may require additional parameters
+      let positionsResponse: any;
+      let openPositions: any[] = [];
+      let openWorstCaseLoss = 0;
+      let missingStopLossSymbols: string[] = [];
+      
+      try {
+        // First try without additional parameters (works for most accounts)
+        positionsResponse = await requiredBybitClient.getPositionInfo({ category: 'linear' });
+        
+        if (positionsResponse.retCode === 0) {
+          openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
+            const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+            return isFinite(size) && size > 0;
+          });
+          
+          const worstCaseResult = calculateWorstCaseLossForOpenPositions(openPositions);
+          openWorstCaseLoss = worstCaseResult.worstCaseLoss;
+          missingStopLossSymbols = worstCaseResult.missingStopLossSymbols;
+        } else if (positionsResponse.retCode === 10001) {
+          // retCode 10001 = invalid parameters - try with settleCoin for unified accounts
+          logger.debug('Initial position fetch failed with retCode 10001, retrying with settleCoin', {
+            channel,
+            accountName: accountName || 'default',
+            retCode: positionsResponse.retCode,
+            retMsg: positionsResponse.retMsg
+          });
+          
+          positionsResponse = await requiredBybitClient.getPositionInfo({ 
+            category: 'linear',
+            settleCoin: 'USDT'
+          });
+          
+          if (positionsResponse.retCode === 0) {
+            openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
+              const size = parseFloat(getBybitField<string>(p, 'size') || '0');
+              return isFinite(size) && size > 0;
+            });
+            
+            const worstCaseResult = calculateWorstCaseLossForOpenPositions(openPositions);
+            openWorstCaseLoss = worstCaseResult.worstCaseLoss;
+            missingStopLossSymbols = worstCaseResult.missingStopLossSymbols;
+          } else {
+            // Both attempts failed - log warning and continue without open positions
+            logger.warn('Failed to fetch open positions for prop firm validation after retry', {
+              channel,
+              accountName: accountName || 'default',
+              retCode: positionsResponse.retCode,
+              retMsg: positionsResponse.retMsg,
+              note: 'Prop firm validation will proceed without including existing open positions'
+            });
+            openWorstCaseLoss = 0;
+          }
+        } else {
+          // Other error codes - log and continue without open positions
+          logger.warn('Failed to fetch open positions for prop firm validation', {
+            channel,
+            accountName: accountName || 'default',
+            retCode: positionsResponse.retCode,
+            retMsg: positionsResponse.retMsg,
+            note: 'Prop firm validation will proceed without including existing open positions'
+          });
+          openWorstCaseLoss = 0;
+        }
+      } catch (error) {
+        // Catch any exceptions during position fetching
+        logger.warn('Exception while fetching open positions for prop firm validation', {
+          channel,
+          accountName: accountName || 'default',
+          error: error instanceof Error ? error.message : String(error),
+          note: 'Prop firm validation will proceed without including existing open positions'
+        });
+        openWorstCaseLoss = 0;
       }
-
-      const openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
-        const size = parseFloat(getBybitField<string>(p, 'size') || '0');
-        return isFinite(size) && size > 0;
-      });
-
-      const { worstCaseLoss: openWorstCaseLoss, missingStopLossSymbols } =
-        calculateWorstCaseLossForOpenPositions(openPositions);
 
       if (!isFinite(openWorstCaseLoss)) {
         logger.warn('Prop firm validation: could not compute worst-case open-position risk (missing stop-loss)', {

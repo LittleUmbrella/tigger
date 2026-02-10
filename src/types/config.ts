@@ -64,7 +64,7 @@ export interface ParserConfig {
  */
 export interface AccountConfig {
   name: string; // Unique name for this account (e.g., 'main', 'account1', 'testnet')
-  exchange: 'bybit' | string; // Exchange type
+  exchange: 'bybit' | 'ctrader' | string; // Exchange type
   testnet?: boolean; // Whether to use testnet (deprecated: use demo for demo trading)
   demo?: boolean; // Whether to use demo trading (uses api-demo.bybit.com endpoint)
   // Environment variable names that contain the API credentials
@@ -97,7 +97,7 @@ export interface InitiatorConfig {
 }
 
 export interface MonitorConfig {
-  type: 'bybit' | 'dex';
+  type: 'bybit' | 'dex' | 'ctrader';
   testnet?: boolean;
   pollInterval?: number; // milliseconds
   entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
@@ -122,7 +122,7 @@ export interface ChannelSetConfig {
   harvester: string; // Reference to harvester name
   parser: string; // Reference to parser name
   initiator: string; // Reference to initiator name
-  monitor: 'bybit' | 'dex'; // Reference to monitor type
+  monitor: 'bybit' | 'dex' | 'ctrader'; // Reference to monitor type
   breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
   entryTimeoutMinutes?: number; // Per-channel override for minutes to wait for entry before cancelling (overrides monitor config)
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)

@@ -7,40 +7,25 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getSymbolInfo } from '../initiators/symbolValidator.js';
 import { roundPrice, getDecimalPrecision, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import {
+  getIsLong,
+  checkTradeExpired,
+  updateEntryOrderToFilled,
+  checkStopLossHit,
+  checkTPHitBeforeEntry,
+  checkSLHitBeforeEntry,
+  calculatePNLPercentage,
+  countFilledTakeProfits,
+  getBreakevenLimitOrder,
+  updateOrderToFilled,
+  updateTradeOnPositionClosed,
+  updateTradeOnStopLossHit,
+  updateTradeOnBreakevenFilled,
+  cancelTrade,
+  sleep
+} from './shared.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
-
-/**
- * Get signal type (long/short) from trade's direction field
- * Falls back to inferring from price relationships if direction is not set (for backward compatibility)
- */
-const getIsLong = (trade: Trade): boolean => {
-  if (trade.direction) {
-    return trade.direction === 'long';
-  }
-  
-  // Fallback: infer from price relationships for old trades without direction
-  // For long: TP > entry > SL, for short: SL > entry > TP
-  const takeProfits = JSON.parse(trade.take_profits) as number[];
-  const firstTP = takeProfits[0];
-  const tpHigherThanEntry = firstTP > trade.entry_price;
-  const slLowerThanEntry = trade.stop_loss < trade.entry_price;
-  return tpHigherThanEntry && slLowerThanEntry;
-};
-
-const sleep = (ms: number): Promise<void> => {
-  return new Promise(resolve => {
-    if (typeof setTimeout !== 'undefined') {
-      setTimeout(resolve, ms);
-    } else {
-      const start = Date.now();
-      while (Date.now() - start < ms) {
-        // Busy wait fallback
-      }
-      resolve();
-    }
-  });
-};
 
 /**
  * Normalize trading pair symbol for Bybit API calls
@@ -59,7 +44,6 @@ const normalizeBybitSymbol = (tradingPair: string): string => {
 
 const getCurrentPrice = async (
   tradingPair: string,
-  exchange: string,
   bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
@@ -72,7 +56,7 @@ const getCurrentPrice = async (
         logger.warn('No historical price data available', { tradingPair });
       }
       return price;
-    } else if (exchange === 'bybit' && bybitClient) {
+    } else if (bybitClient) {
       // Normalize symbol similar to validateBybitSymbol
       let normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
       
@@ -155,9 +139,9 @@ const getCurrentPrice = async (
     }
     return null;
   } catch (error) {
-    logger.error('Error getting current price', {
+    logger.error('Error getting current price from Bybit', {
       tradingPair,
-      exchange,
+      exchange: 'bybit',
       error: error instanceof Error ? error.message : String(error)
     });
     return null;
@@ -663,7 +647,11 @@ const cancelOrder = async (
         orderId: trade.order_id
       };
       await bybitClient.cancelOrder(cancelOrderParams);
-      logger.info('Order cancelled', { tradeId: trade.id, orderId: trade.order_id });
+      logger.info('Bybit order cancelled', {
+        tradeId: trade.id,
+        orderId: trade.order_id,
+        exchange: 'bybit'
+      });
     }
   } catch (error) {
     const symbol = trade.exchange === 'bybit' ? normalizeBybitSymbol(trade.trading_pair) : undefined;
@@ -672,7 +660,7 @@ const cancelOrder = async (
       symbol: symbol!,
       orderId: trade.order_id
     } : undefined;
-    logger.error('Error cancelling order', {
+    logger.error('Error cancelling Bybit order', {
       tradeId: trade.id,
       parameters: cancelOrderParams,
       error: error instanceof Error ? error.message : String(error)
@@ -1424,9 +1412,16 @@ const checkOrderFilled = async (
     }
     return { filled: false };
   } catch (error) {
+    const symbol = trade.exchange === 'bybit' ? normalizeBybitSymbol(trade.trading_pair) : undefined;
+    const cancelOrderParams = trade.exchange === 'bybit' && trade.order_id ? {
+      category: 'linear' as const,
+      symbol: symbol!,
+      orderId: trade.order_id
+    } : undefined;
     logger.error('Error checking order filled', {
       orderId: order.id,
       tradeId: trade.id,
+      parameters: cancelOrderParams,
       error: error instanceof Error ? error.message : String(error)
     });
     return { filled: false };
@@ -1435,7 +1430,6 @@ const checkOrderFilled = async (
 
 const monitorTrade = async (
   channel: string,
-  monitorType: 'bybit' | 'dex',
   entryTimeoutMinutes: number,
   trade: Trade,
   db: DatabaseManager,
@@ -1447,35 +1441,31 @@ const monitorTrade = async (
 ): Promise<void> => {
   try {
     // Log trade status at start for debugging
-    logger.debug('Monitoring trade', {
+    logger.debug('Monitoring Bybit trade', {
       tradeId: trade.id,
       status: trade.status,
       symbol: trade.trading_pair,
       orderId: trade.order_id,
       positionId: trade.position_id,
-      entryFilledAt: trade.entry_filled_at
+      entryFilledAt: trade.entry_filled_at,
+      exchange: 'bybit'
     });
 
-    // In simulation mode, use price provider's current time; otherwise use real time
-    const currentSimTime = isSimulation && priceProvider 
-      ? await priceProvider.getCurrentTime() 
-      : dayjs();
-    
-    // Check if trade has expired (entry not filled in time)
-    const expiresAt = dayjs(trade.expires_at);
-    if (currentSimTime.isAfter(expiresAt) && trade.status === 'pending') {
-      logger.info('Trade expired - cancelling order', {
+    // Check if trade has expired
+    if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
+      logger.info('Bybit trade expired - cancelling order', {
         tradeId: trade.id,
         channel: trade.channel,
-        expiresAt: trade.expires_at
+        expiresAt: trade.expires_at,
+        exchange: 'bybit'
       });
       await cancelOrder(trade, bybitClient);
-      await db.updateTrade(trade.id, { status: 'cancelled' });
+      await cancelTrade(trade, db);
       return;
     }
 
     // For pending trades, check if position already exists (entry might have been filled but status not updated)
-    if (trade.status === 'pending' && !isSimulation && trade.exchange === 'bybit' && bybitClient) {
+    if (trade.status === 'pending' && !isSimulation && bybitClient) {
       const symbol = normalizeBybitSymbol(trade.trading_pair);
       try {
         const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
@@ -1489,12 +1479,13 @@ const monitorTrade = async (
             const fillTime = trade.entry_filled_at || dayjs().toISOString();
             
             // Log the entry fill (same message as the normal flow for consistency)
-            logger.info('Entry order filled', { 
+            logger.info('Bybit entry order filled', {
               tradeId: trade.id,
               tradingPair: trade.trading_pair,
               entryPrice: trade.entry_price,
               positionId: positionIdx?.toString(),
               channel: trade.channel,
+              exchange: 'bybit',
               note: 'Detected via position check - entry was filled but status not updated'
             });
             
@@ -1507,21 +1498,7 @@ const monitorTrade = async (
             trade.entry_filled_at = fillTime;
             trade.position_id = positionIdx?.toString();
 
-            // Update entry order to filled status if it exists
-            const orders = await db.getOrdersByTradeId(trade.id);
-            const entryOrder = orders.find(o => o.order_type === 'entry');
-            if (entryOrder && entryOrder.status !== 'filled') {
-              await db.updateOrder(entryOrder.id, {
-                status: 'filled',
-                filled_at: fillTime,
-                filled_price: trade.entry_price
-              });
-              logger.debug('Entry order updated to filled', {
-                tradeId: trade.id,
-                orderId: entryOrder.id,
-                fillPrice: trade.entry_price
-              });
-            }
+            await updateEntryOrderToFilled(trade, db, fillTime);
 
             // Place take profit orders now that entry has filled
             await placeTakeProfitOrders(trade, bybitClient, db);
@@ -1562,11 +1539,12 @@ const monitorTrade = async (
                 if (historicalOrder) {
                   const orderStatus = getBybitField<string>(historicalOrder, 'orderStatus', 'order_status');
                   if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
-                    logger.info('Entry order filled (found in order history but no position)', {
+                    logger.info('Bybit entry order filled (found in order history but no position)', {
                       tradeId: trade.id,
                       symbol,
                       orderId: trade.order_id,
                       orderStatus,
+                      exchange: 'bybit',
                       note: 'Position may have been closed already'
                     });
                     
@@ -1579,16 +1557,7 @@ const monitorTrade = async (
                     trade.status = 'active';
                     trade.entry_filled_at = fillTime;
 
-                    // Update entry order status
-                    const orders = await db.getOrdersByTradeId(trade.id);
-                    const entryOrder = orders.find(o => o.order_type === 'entry');
-                    if (entryOrder && entryOrder.status !== 'filled') {
-                      await db.updateOrder(entryOrder.id, {
-                        status: 'filled',
-                        filled_at: fillTime,
-                        filled_price: trade.entry_price
-                      });
-                    }
+                    await updateEntryOrderToFilled(trade, db, fillTime);
                     
                     logger.warn('Entry was filled but position is closed - TP orders cannot be placed', {
                       tradeId: trade.id,
@@ -1598,25 +1567,27 @@ const monitorTrade = async (
                 }
               }
             } catch (historyError) {
-              logger.debug('Error checking order history in early position check', {
+              logger.debug('Error checking Bybit order history in early position check', {
                 tradeId: trade.id,
                 symbol,
+                exchange: 'bybit',
                 error: historyError instanceof Error ? historyError.message : String(historyError)
               });
             }
           }
         }
       } catch (error) {
-        logger.debug('Error checking positions for pending trade', {
+        logger.debug('Error checking Bybit positions for pending trade', {
           tradeId: trade.id,
           symbol,
+          exchange: 'bybit',
           error: error instanceof Error ? error.message : String(error)
         });
       }
     }
 
     // Get current price from exchange or historical data
-    const currentPrice = await getCurrentPrice(trade.trading_pair, trade.exchange, bybitClient, isSimulation, priceProvider);
+    const currentPrice = await getCurrentPrice(trade.trading_pair, bybitClient, isSimulation, priceProvider);
     if (!currentPrice) {
       logger.warn('Could not get current price', {
         tradeId: trade.id,
@@ -1630,75 +1601,71 @@ const monitorTrade = async (
       const takeProfits = JSON.parse(trade.take_profits) as number[];
       const firstTP = takeProfits[0];
       
-      // Get signal type from trade's direction field
-      // The buggy logic `currentPrice > trade.entry_price` incorrectly assumes
-      // that if price is below entry, it's a short trade, which is wrong.
       const isLong = getIsLong(trade);
       
       if (!trade.direction) {
-        logger.debug('Trade direction not set, inferred from price relationships', {
+        logger.debug('Bybit trade direction not set, inferred from price relationships', {
           tradeId: trade.id,
           inferredIsLong: isLong,
           entryPrice: trade.entry_price,
           stopLoss: trade.stop_loss,
-          firstTP
+          firstTP,
+          exchange: 'bybit'
         });
       }
       
-      const hitSLBeforeEntry = isLong 
-        ? currentPrice <= trade.stop_loss
-        : currentPrice >= trade.stop_loss;
-      const hitTPBeforeEntry = isLong
-        ? currentPrice >= firstTP
-        : currentPrice <= firstTP;
-
       // Only cancel if stop loss is hit before entry
       // If TP is hit before entry, that's fine - we'll book the profit when entry fills
-      if (hitSLBeforeEntry) {
-        logger.info('Price hit SL before entry - cancelling order', {
+      if (checkSLHitBeforeEntry(trade, currentPrice)) {
+        logger.info('Price hit SL before entry - cancelling Bybit order', {
           tradeId: trade.id,
           currentPrice,
           stopLoss: trade.stop_loss,
-          entryPrice: trade.entry_price
+          entryPrice: trade.entry_price,
+          exchange: 'bybit'
         });
         await cancelOrder(trade, bybitClient);
-        await db.updateTrade(trade.id, { status: 'cancelled' });
+        await cancelTrade(trade, db);
         return;
       }
 
       // Log if TP is hit before entry, but don't cancel - let it fill and book profit
-      if (hitTPBeforeEntry) {
+      if (checkTPHitBeforeEntry(trade, currentPrice)) {
         logger.info('Price hit TP before entry - TP orders will fill and book profit', {
           tradeId: trade.id,
           currentPrice,
           entryPrice: trade.entry_price,
           firstTP,
+          exchange: 'bybit',
           note: 'Relevant TP Orders will fill at current price and profit will be booked immediately'
         });
       }
 
       // Check if entry is filled
-      logger.debug('Checking if entry order is filled', {
+      logger.debug('Checking if Bybit entry order is filled', {
         tradeId: trade.id,
         symbol: trade.trading_pair,
         orderId: trade.order_id,
         status: trade.status,
         entryPrice: trade.entry_price,
-        currentPrice
+        currentPrice,
+        exchange: 'bybit'
       });
       const entryResult = await checkEntryFilled(trade, bybitClient, isSimulation, priceProvider);
-      logger.debug('Entry fill check result', {
+      logger.debug('Bybit entry fill check result', {
         tradeId: trade.id,
         filled: entryResult.filled,
-        positionId: entryResult.positionId
+        positionId: entryResult.positionId,
+        exchange: 'bybit'
       });
       if (entryResult.filled) {
-        logger.info('Entry order filled', { 
+        logger.info('Bybit entry order filled', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
           entryPrice: trade.entry_price,
           positionId: entryResult.positionId,
-          channel: trade.channel
+          channel: trade.channel,
+          exchange: 'bybit'
         });
         const fillTime = dayjs().toISOString();
         await db.updateTrade(trade.id, {
@@ -1710,25 +1677,7 @@ const monitorTrade = async (
         trade.entry_filled_at = fillTime;
         trade.position_id = entryResult.positionId;
 
-        // Update entry order to filled status
-        const orders = await db.getOrdersByTradeId(trade.id);
-        const entryOrder = orders.find(o => o.order_type === 'entry');
-        if (entryOrder) {
-          await db.updateOrder(entryOrder.id, {
-            status: 'filled',
-            filled_at: fillTime,
-            filled_price: trade.entry_price
-          });
-          logger.debug('Entry order updated to filled', {
-            tradeId: trade.id,
-            orderId: entryOrder.id,
-            fillPrice: trade.entry_price
-          });
-        } else {
-          logger.warn('Entry order not found when filling entry', {
-            tradeId: trade.id
-          });
-        }
+        await updateEntryOrderToFilled(trade, db, fillTime);
 
         // Place take profit orders now that entry has filled
         await placeTakeProfitOrders(trade, bybitClient, db);
@@ -1745,117 +1694,76 @@ const monitorTrade = async (
         const orderResult = await checkOrderFilled(order, trade, bybitClient, isSimulation, priceProvider);
         if (orderResult.filled) {
           if (order.order_type === 'take_profit') {
-            logger.info('Take profit order filled', {
+            logger.info('Bybit take profit order filled', {
               tradeId: trade.id,
               tradingPair: trade.trading_pair,
               orderId: order.id,
               tpIndex: order.tp_index,
               tpPrice: order.price,
               filledPrice: orderResult.filledPrice,
-              channel: trade.channel
+              channel: trade.channel,
+              exchange: 'bybit'
             });
           } else if (order.order_type === 'stop_loss') {
-            logger.info('Stop loss order filled', {
+            logger.info('Bybit stop loss order filled', {
               tradeId: trade.id,
               tradingPair: trade.trading_pair,
               orderId: order.id,
               slPrice: order.price,
               filledPrice: orderResult.filledPrice,
-              channel: trade.channel
+              channel: trade.channel,
+              exchange: 'bybit'
             });
           } else {
-            logger.info('Order filled', {
+            logger.info('Bybit order filled', {
               tradeId: trade.id,
               orderId: order.id,
               orderType: order.order_type,
-              filledPrice: orderResult.filledPrice
+              filledPrice: orderResult.filledPrice,
+              exchange: 'bybit'
             });
           }
 
-          await db.updateOrder(order.id, {
-            status: 'filled',
-            filled_at: dayjs().toISOString(),
-            filled_price: orderResult.filledPrice
-          });
+          await updateOrderToFilled(order, db, orderResult.filledPrice);
 
-          // If stop loss was filled, mark trade as stopped
           if (order.order_type === 'stop_loss') {
-            await db.updateTrade(trade.id, {
-              status: 'stopped',
-              exit_price: orderResult.filledPrice,
-              exit_filled_at: dayjs().toISOString()
-            });
+            await updateTradeOnStopLossHit(trade, db, orderResult.filledPrice);
           }
           
-          // If breakeven limit order was filled, mark trade as completed (closed at breakeven)
           if (order.order_type === 'breakeven_limit') {
-            await db.updateTrade(trade.id, {
-              status: 'completed',
-              exit_price: orderResult.filledPrice,
-              exit_filled_at: dayjs().toISOString()
-            });
+            await updateTradeOnBreakevenFilled(trade, db, orderResult.filledPrice || trade.entry_price);
           }
         }
       }
       // First, check if position is closed
       const positionResult = await checkPositionClosed(trade, bybitClient, isSimulation, priceProvider);
       if (positionResult.closed) {
-        logger.info('Position closed', {
+        logger.info('Bybit position closed', {
           tradeId: trade.id,
           exitPrice: positionResult.exitPrice,
-          pnl: positionResult.pnl
-        });
-        
-          // Calculate PNL percentage if we have PNL
-        let pnlPercentage: number | undefined;
-        if (positionResult.pnl !== undefined && positionResult.exitPrice && trade.entry_price) {
-          // PNL percentage based on entry price movement
-          const priceDiff = positionResult.exitPrice - trade.entry_price;
-          const priceChangePercent = (priceDiff / trade.entry_price) * 100;
-          // For futures, PNL percentage is price change * leverage
-          // Adjust for long/short direction - get from trade's direction field
-          const isLong = getIsLong(trade);
-          pnlPercentage = isLong 
-            ? priceChangePercent * trade.leverage
-            : -priceChangePercent * trade.leverage;
-        }
-        
-        await db.updateTrade(trade.id, {
-          status: 'closed',
-          exit_price: positionResult.exitPrice,
-          exit_filled_at: dayjs().toISOString(),
           pnl: positionResult.pnl,
-          pnl_percentage: pnlPercentage
+          exchange: 'bybit'
         });
-        return; // Position is closed, no need to check other conditions
+        
+        await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
+        return;
       }
       
-      const takeProfits = JSON.parse(trade.take_profits) as number[];
-      // Get signal type from trade's direction field
       const isLong = getIsLong(trade);
-
-      // Count how many take profits have been filled
-      const tradeOrders = await db.getOrdersByTradeId(trade.id);
-      const filledTPCount = tradeOrders.filter(
-        o => o.order_type === 'take_profit' && o.status === 'filled'
-      ).length;
+      const filledTPCount = await countFilledTakeProfits(trade, db);
 
       // Check if we've hit the required number of TPs to move to breakeven
       if (filledTPCount >= breakevenAfterTPs && !trade.stop_loss_breakeven) {
-        // Check if breakeven limit order already exists
-        const existingOrders = await db.getOrdersByTradeId(trade.id);
-        const existingBreakevenOrder = existingOrders.find(
-          o => o.order_type === 'breakeven_limit'
-        );
+        const existingBreakevenOrder = await getBreakevenLimitOrder(trade, db);
 
         if (useLimitOrderForBreakeven) {
-          // Create limit order at entry price instead of moving stop loss
-          if (!existingBreakevenOrder && bybitClient && trade.exchange === 'bybit') {
-            logger.info('Required take profits hit - creating breakeven limit order at entry price', {
+          if (!existingBreakevenOrder && bybitClient) {
+            logger.info('Required take profits hit - creating Bybit breakeven limit order at entry price', {
               tradeId: trade.id,
               filledTPCount,
               breakevenAfterTPs,
-              entryPrice: trade.entry_price
+              entryPrice: trade.entry_price,
+              exchange: 'bybit'
             });
             
             await placeBreakevenLimitOrder(trade, bybitClient, db, isLong);
@@ -1863,22 +1771,22 @@ const monitorTrade = async (
               stop_loss_breakeven: true
             });
           } else if (existingBreakevenOrder) {
-            // Breakeven order already exists, just mark trade as breakeven
-            logger.debug('Breakeven limit order already exists', {
+            logger.debug('Bybit breakeven limit order already exists', {
               tradeId: trade.id,
-              orderId: existingBreakevenOrder.order_id
+              orderId: existingBreakevenOrder.order_id,
+              exchange: 'bybit'
             });
             await db.updateTrade(trade.id, {
               stop_loss_breakeven: true
             });
           }
         } else {
-          // Old behavior: move stop loss to entry price
-          logger.info('Required take profits hit - moving stop loss to breakeven', {
+          logger.info('Required take profits hit - moving Bybit stop loss to breakeven', {
             tradeId: trade.id,
             filledTPCount,
             breakevenAfterTPs,
-            entryPrice: trade.entry_price
+            entryPrice: trade.entry_price,
+            exchange: 'bybit'
           });
           
           await updateStopLoss(trade, trade.entry_price, bybitClient, db);
@@ -1890,44 +1798,26 @@ const monitorTrade = async (
       }
 
       // Check if stop loss is hit
-      const stopLossHit = isLong
-        ? currentPrice <= trade.stop_loss
-        : currentPrice >= trade.stop_loss;
-
-      if (stopLossHit) {
-        logger.info('Stop loss hit', {
+      if (checkStopLossHit(trade, currentPrice)) {
+        logger.info('Bybit stop loss hit', {
           tradeId: trade.id,
           currentPrice,
-          stopLoss: trade.stop_loss
+          stopLoss: trade.stop_loss,
+          exchange: 'bybit'
         });
-        // When stop loss is hit, position should be closed - check for actual closure
+        
         const stopLossResult = await checkPositionClosed(trade, bybitClient, isSimulation, priceProvider);
         if (stopLossResult.closed) {
-          let pnlPercentage: number | undefined;
-          if (stopLossResult.pnl !== undefined && stopLossResult.exitPrice && trade.entry_price) {
-            const priceDiff = stopLossResult.exitPrice - trade.entry_price;
-            const priceChangePercent = (priceDiff / trade.entry_price) * 100;
-            // Get signal type from trade's direction field to correctly calculate PNL
-            const isLong = getIsLong(trade);
-            pnlPercentage = isLong 
-              ? priceChangePercent * trade.leverage
-              : -priceChangePercent * trade.leverage;
-          }
-          await db.updateTrade(trade.id, {
-            status: 'stopped',
-            exit_price: stopLossResult.exitPrice,
-            exit_filled_at: dayjs().toISOString(),
-            pnl: stopLossResult.pnl,
-            pnl_percentage: pnlPercentage
-          });
+          await updateTradeOnStopLossHit(trade, db, stopLossResult.exitPrice, stopLossResult.pnl);
         } else {
           await db.updateTrade(trade.id, { status: 'stopped' });
         }
       }
     }
   } catch (error) {
-    logger.error('Error monitoring trade', {
+    logger.error('Error monitoring Bybit trade', {
       tradeId: trade.id,
+      exchange: 'bybit',
       error: error instanceof Error ? error.message : String(error)
     });
   }
@@ -1942,7 +1832,7 @@ export const startTradeMonitor = async (
   speedMultiplier?: number,
   getBybitClient?: (accountName?: string) => RestClientV5 | undefined
 ): Promise<() => Promise<void>> => {
-  logger.info('Starting trade monitor', { type: monitorConfig.type, channel });
+  logger.info('Starting Bybit trade monitor', { type: monitorConfig.type, channel, exchange: 'bybit' });
 
   // Legacy support: create a single client if getBybitClient not provided
   let bybitClient: RestClientV5 | undefined;
@@ -1967,6 +1857,7 @@ export const startTradeMonitor = async (
     });
   }
 
+
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
@@ -1982,11 +1873,15 @@ export const startTradeMonitor = async (
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel);
         
         for (const trade of trades) {
-          // Get account-specific client for this trade
-          const accountClient = getBybitClient 
+          // Only monitor Bybit trades
+          if (trade.exchange !== 'bybit') {
+            continue;
+          }
+          
+          const accountBybitClient = getBybitClient 
             ? getBybitClient(trade.account_name)
-            : bybitClient; // Fallback to legacy client
-          await monitorTrade(channel, monitorConfig.type, entryTimeoutMinutes, trade, db, accountClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven);
+            : bybitClient;
+          await monitorTrade(channel, entryTimeoutMinutes, trade, db, accountBybitClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven);
         }
 
         // Skip sleep in maximum speed mode
@@ -1997,8 +1892,9 @@ export const startTradeMonitor = async (
           await new Promise(resolve => setImmediate(resolve));
         }
       } catch (error) {
-        logger.error('Error in monitor loop', {
+        logger.error('Error in Bybit monitor loop', {
           channel,
+          exchange: 'bybit',
           error: error instanceof Error ? error.message : String(error)
         });
         if (!isMaxSpeed) {
@@ -2010,15 +1906,16 @@ export const startTradeMonitor = async (
 
   // Start the monitor loop in the background
   monitorLoop().catch(error => {
-    logger.error('Fatal error in monitor loop', {
+    logger.error('Fatal error in Bybit monitor loop', {
       channel,
+      exchange: 'bybit',
       error: error instanceof Error ? error.message : String(error)
     });
   });
 
   // Return stop function
   return async (): Promise<void> => {
-    logger.info('Stopping trade monitor', { type: monitorConfig.type, channel });
+    logger.info('Stopping Bybit trade monitor', { type: monitorConfig.type, channel, exchange: 'bybit' });
     running = false;
   };
 };
