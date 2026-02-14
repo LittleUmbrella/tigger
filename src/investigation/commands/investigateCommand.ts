@@ -16,6 +16,7 @@ import { logger } from '../../utils/logger.js';
 import { traceMessage } from '../../scripts/trace_message.js';
 import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
 import { getGoldPriceComparison } from '../utils/goldPriceCheck.js';
+import { validateBybitSymbol } from '../../initiators/symbolValidator.js';
 
 export async function investigateCommandHandler(context: CommandContext): Promise<CommandResult> {
   const messageId = context.args.message;
@@ -106,35 +107,41 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       // Get timestamp from trace
       const timestamp = traceResult.steps[0]?.timestamp || new Date().toISOString();
       const windowMinutes = 10;
+      const timeRange = {
+        from: new Date(new Date(timestamp).getTime() - windowMinutes * 60 * 1000).toISOString(),
+        until: new Date(new Date(timestamp).getTime() + windowMinutes * 60 * 1000).toISOString()
+      };
 
       try {
-        // Query for message-specific logs
+        // Query for message-specific logs (confirms flow: parsed, initiated, etc.)
         const messageLogs = await ctx.logglyClient!.searchByMessageId(
           messageId,
           channel || '',
-          {
-            from: new Date(new Date(timestamp).getTime() - windowMinutes * 60 * 1000).toISOString(),
-            until: new Date(new Date(timestamp).getTime() + windowMinutes * 60 * 1000).toISOString()
-          }
+          timeRange
         );
 
-        // Query for errors around that time
+        // Query for errors scoped to this message (confirms root cause)
+        const messageScopedErrors = await ctx.logglyClient!.searchErrorsAroundTime(
+          timestamp,
+          windowMinutes,
+          `messageId:${messageId} AND channel:${channel || ''}`
+        );
+
+        // Query for general errors around that time (fallback if scoped returns nothing)
         const errorLogs = await ctx.logglyClient!.searchErrorsAroundTime(
           timestamp,
           windowMinutes
         );
 
-        // Query for Bybit errors
-        const bybitErrors = await ctx.logglyClient!.searchBybitErrors({
-          from: new Date(new Date(timestamp).getTime() - windowMinutes * 60 * 1000).toISOString(),
-          until: new Date(new Date(timestamp).getTime() + windowMinutes * 60 * 1000).toISOString()
-        });
+        // Query for Bybit API errors in the time window
+        const bybitErrors = await ctx.logglyClient!.searchBybitErrors(timeRange);
 
         return {
           success: true,
-          message: `Found ${messageLogs.total_events} message logs, ${errorLogs.total_events} errors, ${bybitErrors.total_events} Bybit errors`,
+          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors`,
           data: {
             messageLogs,
+            messageScopedErrors,
             errorLogs,
             bybitErrors
           }
@@ -234,7 +241,85 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 4: Check gold/XAUT prices for XAUT trades
+  // Step 4: Symbol validation (when Trade Creation failed - rule out invalid symbol)
+  engine.addStep({
+    id: 'symbolValidation',
+    name: 'Validate Symbol on Bybit',
+    required: false,
+    execute: async (ctx) => {
+      const traceResult = ctx.stepResults.get('trace')?.data;
+
+      if (!traceResult) {
+        return {
+          success: false,
+          message: 'Trace step must complete first'
+        };
+      }
+
+      const failurePoint = traceResult.failurePoint;
+      const tradeCreationStep = traceResult.steps?.find((s: any) => s.step?.includes('Trade Creation'));
+      const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Parsing'));
+
+      if (failurePoint !== 'Trade Creation' || !parsingStep?.details?.tradingPair) {
+        return {
+          success: true,
+          message: 'Not applicable - Trade Creation did not fail or no parsed trading pair',
+          data: { skipped: true }
+        };
+      }
+
+      const tradingPair = parsingStep.details.tradingPair;
+      const symbolToValidate = tradingPair.replace('/', '').toUpperCase();
+      const symbol = symbolToValidate.endsWith('USDT') || symbolToValidate.endsWith('USDC')
+        ? symbolToValidate
+        : `${symbolToValidate}USDT`;
+
+      if (!ctx.getBybitClient) {
+        return {
+          success: false,
+          message: 'Bybit client not available for symbol validation'
+        };
+      }
+
+      try {
+        const bybitClient = await ctx.getBybitClient();
+        if (!bybitClient) {
+          return {
+            success: false,
+            message: 'Could not create Bybit client for symbol validation'
+          };
+        }
+
+        const validation = await validateBybitSymbol(bybitClient, symbol);
+
+        return {
+          success: true,
+          message: validation.valid
+            ? `Symbol ${symbol} is valid and trading on Bybit`
+            : `Symbol validation failed: ${validation.error}`,
+          data: {
+            symbol,
+            valid: validation.valid,
+            actualSymbol: validation.actualSymbol,
+            error: validation.error
+          }
+        };
+      } catch (error) {
+        logger.error('Symbol validation error', {
+          symbol,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return {
+          success: false,
+          message: 'Symbol validation failed',
+          error: error instanceof Error ? error.message : String(error),
+          data: { symbol }
+        };
+      }
+    }
+  });
+
+  // Step 5: Check gold/XAUT prices for XAUT trades
   engine.addStep({
     id: 'goldPriceCheck',
     name: 'Check Gold/XAUT Prices (XAUT trades only)',
@@ -331,7 +416,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 5: Analyze findings
+  // Step 6: Analyze findings
   engine.addStep({
     id: 'analyze',
     name: 'Analyze Findings',
@@ -340,6 +425,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const traceResult = ctx.stepResults.get('trace')?.data;
       const logglyData = ctx.stepResults.get('loggly')?.data;
       const orderData = ctx.stepResults.get('bybitOrders')?.data;
+      const symbolValidationData = ctx.stepResults.get('symbolValidation')?.data;
       const goldPriceData = ctx.stepResults.get('goldPriceCheck')?.data;
 
       if (!traceResult) {
@@ -353,6 +439,71 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const failurePoint = traceResult.failurePoint;
       const findings: string[] = [];
       const recommendations: string[] = [];
+
+      // Log confirmation - use logs to confirm root cause when available
+      if (logglyData) {
+        // Prefer message-scoped errors; fall back to general errors (some logs e.g. "Failed to execute trade" may not include messageId)
+        const msgScoped = logglyData.messageScopedErrors?.events || [];
+        const allErrors = logglyData.errorLogs?.events || [];
+        const channel = ctx.args.channel;
+        const msgErrors = msgScoped.length > 0
+          ? msgScoped
+          : channel ? allErrors.filter((e: any) => {
+              const ch = e.event?.channel ?? e.event?.json?.channel;
+              return ch === channel || ch === String(channel);
+            }) : allErrors;
+        const msgLogs = logglyData.messageLogs?.events || [];
+
+        if (msgLogs.length > 0 || msgErrors.length > 0) {
+          findings.push('\n📋 Log confirmation:');
+
+          // Trade Creation failure: surface "Failed to execute trade" and "Trade initiation completed"
+          if (failurePoint?.includes('Trade Creation')) {
+            const failedExecuteLogs = msgErrors.filter((e: any) =>
+              e.event?.message?.includes('Failed to execute trade for account') ||
+              e.logmsg?.includes('Failed to execute trade')
+            );
+            const completionLogs = msgLogs.filter((m: any) =>
+              m.event?.message?.includes('Trade initiation completed for all accounts') ||
+              m.logmsg?.includes('Trade initiation completed')
+            );
+
+            if (failedExecuteLogs.length > 0) {
+              findings.push(`  Found ${failedExecuteLogs.length} "Failed to execute trade" log(s):`);
+              failedExecuteLogs.slice(0, 3).forEach((log: any, i: number) => {
+                const err = log.event?.error || log.event?.json?.error || log.logmsg || '';
+                const accountName = log.event?.accountName || log.event?.json?.accountName || '';
+                const excerpt = err.length > 200 ? err.substring(0, 200) + '...' : err;
+                findings.push(`    ${i + 1}. ${accountName}: ${excerpt}`);
+              });
+            }
+            if (completionLogs.length > 0) {
+              completionLogs.forEach((log: any) => {
+                const json = log.event?.json || log.event || {};
+                const success = json.successful ?? json.successfulCount;
+                const failed = json.failed ?? json.failedCount;
+                if (success === 0 && failed > 0) {
+                  findings.push(`  Trade initiation: successful=${success}, failed=${failed} (all accounts failed)`);
+                }
+              });
+            }
+          }
+
+          // Entry Order failure: surface Bybit API errors
+          if (failurePoint?.includes('Entry Order') && logglyData.bybitErrors?.events?.length > 0) {
+            findings.push(`  Found ${logglyData.bybitErrors.events.length} Bybit API error log(s)`);
+          }
+
+          if (msgErrors.length > 0 && !failurePoint?.includes('Trade Creation')) {
+            findings.push(`  Found ${msgErrors.length} error log(s) for this message`);
+          }
+        } else {
+          findings.push('\n📋 Log confirmation: No logs found for this message (check Loggly config or time range)');
+        }
+      } else {
+        findings.push('\n📋 Log confirmation: Logs not queried (Loggly client unavailable - set LOGGLY_API_TOKEN)');
+        recommendations.push('Configure LOGGLY_API_TOKEN and LOGGLY_SUBDOMAIN for log confirmation in investigations');
+      }
 
       // Add order details to findings if available
       if (orderData?.orders && orderData.orders.length > 0) {
@@ -404,6 +555,17 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         }
       }
 
+      // Add symbol validation findings (when Trade Creation failed)
+      if (symbolValidationData && !symbolValidationData.skipped) {
+        if (symbolValidationData.valid) {
+          findings.push(`\n📊 Symbol Validation: ✅ ${symbolValidationData.symbol} exists on Bybit - invalid symbol ruled out`);
+          findings.push('   Root cause is likely: prop firm rules, initiator error, or other validation failure');
+        } else {
+          findings.push(`\n📊 Symbol Validation: ❌ ${symbolValidationData.symbol} - ${symbolValidationData.error || 'not found on Bybit'}`);
+          findings.push('   Invalid symbol may explain Trade Creation failure');
+        }
+      }
+
       if (failurePoint) {
         findings.push(`Failure detected at: ${failurePoint}`);
 
@@ -449,6 +611,11 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           findings.push('Trade was not created in database');
           recommendations.push('Check initiator logs for errors');
           recommendations.push('Verify initiator configuration');
+          if (symbolValidationData?.valid) {
+            recommendations.push('Symbol validated - investigate prop firm rules, balance, or initiator-specific validation');
+          } else if (symbolValidationData && !symbolValidationData.skipped && !symbolValidationData.valid) {
+            recommendations.push('Run: npm run validate-symbol <SYMBOL> to confirm symbol status');
+          }
         }
       } else {
         findings.push('All steps completed successfully');

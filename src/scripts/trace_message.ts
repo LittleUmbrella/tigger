@@ -22,6 +22,7 @@ import { BotConfig, AccountConfig } from '../types/config.js';
 import fs from 'fs-extra';
 import dotenv from 'dotenv';
 import { parseMessage } from '../parsers/signalParser.js';
+import { validateBybitSymbol } from '../initiators/symbolValidator.js';
 import dayjs from 'dayjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -271,6 +272,61 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       recommendations.push('Check initiator logs for errors');
       recommendations.push('Check if message was marked as parsed before trade creation');
       recommendations.push('Verify initiator configuration is correct');
+
+      // Run symbol validation to rule out "invalid symbol" as root cause
+      const symbolToValidate = normalizeBybitSymbol(parsedOrder.tradingPair);
+      try {
+        const configPath = process.env.CONFIG_PATH || 'config.json';
+        let config: BotConfig | null = null;
+        if (fs.existsSync(configPath)) {
+          const configContent = await fs.readFile(configPath, 'utf-8');
+          config = JSON.parse(configContent);
+        }
+        const accountName = config?.accounts?.[0]?.name;
+        const credentials = await getAccountCredentials(accountName, config);
+        if (credentials.apiKey && credentials.apiSecret) {
+          const bybitClient = new RestClientV5({
+            key: credentials.apiKey,
+            secret: credentials.apiSecret,
+            testnet: credentials.testnet,
+            ...(credentials.baseUrl && { baseUrl: credentials.baseUrl })
+          });
+          const validation = await validateBybitSymbol(bybitClient, symbolToValidate);
+          steps[2].details = {
+            symbolValidation: {
+              symbol: symbolToValidate,
+              valid: validation.valid,
+              actualSymbol: validation.actualSymbol,
+              error: validation.error
+            }
+          };
+          if (validation.valid) {
+            recommendations.push(
+              `Symbol ${symbolToValidate} exists on Bybit - rule out invalid symbol; run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+            );
+            recommendations.push('Investigate: prop firm rules, initiator error, or other validation failure');
+          } else {
+            recommendations.push(
+              `Symbol validation failed: ${validation.error} - run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+            );
+          }
+        } else {
+          recommendations.push(
+            `Run symbol validation manually: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+          );
+        }
+      } catch (validationError) {
+        steps[2].details = {
+          symbolValidation: {
+            symbol: symbolToValidate,
+            error: validationError instanceof Error ? validationError.message : String(validationError)
+          }
+        };
+        recommendations.push(
+          `Run symbol validation manually: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+        );
+      }
+
       return {
         messageId,
         channel: channel || 'unknown',

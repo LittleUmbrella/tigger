@@ -62,6 +62,10 @@ export async function traceCommandHandler(context: CommandContext): Promise<Comm
         nextSteps.push('/verify-parser message:' + messageId);
       } else if (traceResult.failurePoint.includes('Trade Creation')) {
         nextSteps.push('/check-logs message:' + messageId + ' timeframe:10');
+        const symbol = traceResult.steps?.find((s: any) => s.step?.includes('Parsing'))?.details?.tradingPair?.replace('/', '');
+        if (symbol) {
+          nextSteps.push('npm run validate-symbol ' + symbol);
+        }
       }
     }
 

@@ -9,6 +9,7 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 import { getDecimalPrecision } from '../utils/positionSizing.js';
 import { getAssetVariant } from '../utils/assetNormalizer.js';
+import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { getCachedResponse, setCachedResponse } from '../utils/bybitCache.js';
 
 export interface SymbolInfo {
@@ -115,54 +116,43 @@ export async function getSymbolInfo(
             continue;
           }
           
-          // Try both snake_case (API format) and camelCase (possible SDK transformation)
-          const lotSizeFilter = (instrument as any).lot_size_filter || (instrument as any).lotSizeFilter;
-          const priceFilter = (instrument as any).price_filter || (instrument as any).priceFilter;
+          const lotSizeFilter = getBybitField<any>(instrument, 'lotSizeFilter', 'lot_size_filter');
+          const priceFilter = getBybitField<any>(instrument, 'priceFilter', 'price_filter');
           
-          // Log the actual structure for debugging
           logger.debug('Inspecting instrument structure', {
             symbol,
             category,
-            instrumentKeys: Object.keys(instrument as any).slice(0, 20),
-            hasLotSizeFilterSnake: !!(instrument as any).lot_size_filter,
-            hasLotSizeFilterCamel: !!(instrument as any).lotSizeFilter,
-            hasPriceFilterSnake: !!(instrument as any).price_filter,
-            hasPriceFilterCamel: !!(instrument as any).priceFilter,
+            hasLotSizeFilter: !!lotSizeFilter,
+            hasPriceFilter: !!priceFilter,
             lotSizeFilterKeys: lotSizeFilter ? Object.keys(lotSizeFilter) : [],
             priceFilterKeys: priceFilter ? Object.keys(priceFilter) : []
           });
           
           const symbolInfo: SymbolInfo = {};
           
-          // Extract qty_precision (might be a string or number, try both formats)
-          const qtyPrecision = lotSizeFilter?.qty_precision ?? lotSizeFilter?.qtyPrecision;
+          const qtyPrecision = getBybitField<string | number>(lotSizeFilter, 'qtyPrecision', 'qty_precision');
           if (qtyPrecision !== undefined && qtyPrecision !== null) {
             symbolInfo.qtyPrecision = parseInt(String(qtyPrecision));
           }
-          
-          // Extract price precision from tick_size (try both formats)
-          const tickSize = priceFilter?.tick_size ?? priceFilter?.tickSize;
+
+          const tickSize = getBybitField<string | number>(priceFilter, 'tickSize', 'tick_size');
           if (tickSize !== undefined && tickSize !== null) {
             const parsedTickSize = parseFloat(String(tickSize));
             symbolInfo.tickSize = parsedTickSize;
             symbolInfo.pricePrecision = getDecimalPrecision(parsedTickSize);
           }
-          
-          // Extract min order quantity (try both formats)
-          const minQty = lotSizeFilter?.min_qty ?? lotSizeFilter?.minQty;
+
+          const minQty = getBybitField<string | number>(lotSizeFilter, 'minOrderQty', 'min_order_qty');
           if (minQty !== undefined && minQty !== null) {
             symbolInfo.minOrderQty = parseFloat(String(minQty));
           }
-          
-          // Extract max order quantity (try both formats)
-          const maxQty = lotSizeFilter?.max_qty ?? lotSizeFilter?.maxQty;
+
+          const maxQty = getBybitField<string | number>(lotSizeFilter, 'maxOrderQty', 'max_order_qty');
           if (maxQty !== undefined && maxQty !== null) {
             symbolInfo.maxOrderQty = parseFloat(String(maxQty));
           }
-          
-          // Extract qty_step (CRITICAL - this determines if quantities must be whole numbers)
-          // Try both snake_case and camelCase formats
-          const qtyStep = lotSizeFilter?.qty_step ?? lotSizeFilter?.qtyStep;
+
+          const qtyStep = getBybitField<string | number>(lotSizeFilter, 'qtyStep', 'qty_step');
           if (qtyStep !== undefined && qtyStep !== null) {
             symbolInfo.qtyStep = parseFloat(String(qtyStep));
           }

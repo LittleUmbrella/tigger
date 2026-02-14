@@ -2378,12 +2378,22 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
       }
     });
 
+    const successfulCount = results.filter(r => r.status === 'fulfilled').length;
+    const failedCount = results.filter(r => r.status === 'rejected').length;
+
     logger.info('Trade initiation completed for all accounts', {
       channel,
       totalAccounts: accountsToUse.length,
-      successful: results.filter(r => r.status === 'fulfilled').length,
-      failed: results.filter(r => r.status === 'rejected').length
+      successful: successfulCount,
+      failed: failedCount
     });
+
+    // If ALL accounts failed, throw so signalInitiator does not mark message as parsed
+    // This allows retry and prevents incorrect "Trade initiated successfully" logging
+    if (successfulCount === 0 && failedCount > 0) {
+      const firstError = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+      throw firstError.reason;
+    }
   } catch (error) {
     logger.error('Error in bybitInitiator', {
       channel,

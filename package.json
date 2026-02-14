@@ -26,6 +26,7 @@
     "mcp:investigation": "tsx src/mcp/investigationServer.ts",
     "fix-trade-tps": "tsx src/scripts/fix_trade_tps.ts",
     "verify-parser": "tsx src/scripts/verify_parser.ts",
+    "validate-symbol": "tsx src/scripts/validate_symbol.ts --",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",

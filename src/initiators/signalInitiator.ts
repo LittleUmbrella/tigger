@@ -50,7 +50,9 @@ const isRetryableError = (error: unknown): boolean => {
   }
 
   // Retryable error patterns (temporary failures)
+  // "exceeds maximum limit" = order qty > maxOrderQty - retryable after quantity cap fix
   const retryablePatterns = [
+    'exceeds maximum limit',
     'network',
     'timeout',
     'rate limit',
