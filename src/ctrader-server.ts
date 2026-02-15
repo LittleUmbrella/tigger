@@ -1,5 +1,8 @@
 import http from 'http';
 import url from 'url';
+import dotenv from 'dotenv';
+
+dotenv.config();
 
 const PORT = 8090;  // Change if you registered a different port
 const PATH = '/callback';  // Must match the path in your redirect URI
