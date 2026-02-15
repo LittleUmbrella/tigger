@@ -121,19 +121,6 @@
   ],
   "channels": [
     {
-      "channel": "2427485240",
-      "harvester": "main_harvester",
-      "parser": "vip_crypto_signals",
-      "breakevenAfterTPs": 2,
-      "entryTimeoutMinutes": 1440,
-      "initiator": "bybit",
-      "monitor": "bybit",
-      "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 20,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"]
-    },
-    {
       "channel": "3272135406",
       "harvester": "ronnie_harvester",
       "parser": "ronnie_crypto_signals",
@@ -142,7 +129,9 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 50
+      "baseLeverage": 50,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"]
     },
     {
       "channel": "2385521106",
@@ -153,7 +142,9 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 20
+      "baseLeverage": 20,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"]
     },
     {
       "channel": "1634731277",
@@ -164,7 +155,9 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 8
+      "baseLeverage": 8,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"]
     }
   ],
   "database": {
