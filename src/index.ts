@@ -89,6 +89,18 @@ process.on('uncaughtException', (error) => {
   // Don't exit immediately - let the health check server continue
 });
 
+// Optional startup delay: gives previous deployment time to fully shut down before we connect to Telegram.
+// Prevents AUTH_KEY_DUPLICATED during deployments when old and new instances briefly overlap.
+const startupDelayMs = parseInt(process.env.TG_STARTUP_DELAY_MS || '0', 10);
+if (startupDelayMs > 0) {
+  logger.info('Waiting before starting orchestrator (lets previous deployment disconnect)', {
+    delayMs: startupDelayMs,
+    delaySeconds: Math.round(startupDelayMs / 1000),
+    hint: 'Set TG_STARTUP_DELAY_MS=0 to disable'
+  });
+  await new Promise(resolve => setTimeout(resolve, startupDelayMs));
+}
+
 // Start orchestrator (errors are handled within, so it won't crash the app)
 let stopOrchestrator: (() => Promise<void>) | null = null;
 try {

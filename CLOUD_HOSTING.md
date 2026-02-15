@@ -406,6 +406,10 @@ TG_API_ID=your_telegram_api_id
 TG_API_HASH=your_telegram_api_hash
 TG_SESSION=your_telegram_session_string
 
+# Optional: wait before connecting to Telegram (ms). Prevents AUTH_KEY_DUPLICATED during deployments.
+# Set to 60000–90000 to give previous deployment time to shut down. Omit or 0 for no delay.
+# TG_STARTUP_DELAY_MS=60000
+
 **⚠️ Important: Telegram Session Limitation**
 - Each instance (local, cloud, etc.) needs its own unique `TG_SESSION`
 - Telegram does not allow the same auth key to be used concurrently from multiple instances
@@ -697,23 +701,29 @@ DigitalOcean App Platform automatically sets up health checks. To customize:
 
 #### Issue: Telegram AUTH_KEY_DUPLICATED Error
 
-**Symptoms**: Logs show `406: AUTH_KEY_DUPLICATED` when connecting to Telegram
+**Symptoms**: Logs show `406: AUTH_KEY_DUPLICATED` (often "caused by messages.GetHistory") when connecting or polling Telegram
 
-**Cause**: The same `TG_SESSION` is being used by multiple instances simultaneously (e.g., local and cloud)
+**Cause**: The same `TG_SESSION` is being used by multiple instances simultaneously (e.g., local and cloud). During deployments, the old and new instances can overlap briefly—both try to connect with the same session before the old one has fully disconnected.
 
 **Solutions**:
-1. **Create separate sessions for each instance:**
+1. **Add startup delay (recommended for deployments):**
+   - Set `TG_STARTUP_DELAY_MS=60000` (or `90000`) in your environment variables
+   - The new instance waits 60–90 seconds before connecting to Telegram
+   - This gives the previous deployment time to receive SIGTERM and complete graceful shutdown
+   - The health check server starts immediately, so the platform won't kill the app during the delay
+
+2. **Create separate sessions for each instance:**
    - Each instance (local, cloud, etc.) needs its own unique `TG_SESSION`
    - Run `npm run list-channels` locally to create a new session
    - Authenticate with your phone number when prompted
    - Copy the generated `TG_SESSION` value (saved to `.env` and displayed)
    - Use different session strings for each instance
 
-2. **Stop conflicting instances:**
+3. **Stop conflicting instances:**
    - If running locally and in cloud, ensure only one is using a given session at a time
    - Or create separate sessions for each instance (recommended)
 
-3. **Verify session uniqueness:**
+4. **Verify session uniqueness:**
    - Check that your local `.env` has a different `TG_SESSION` than your cloud environment variables
    - Each session string should be unique and not shared between instances
 
