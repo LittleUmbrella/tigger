@@ -80,7 +80,7 @@ program
           logger.info('Created new message for processing', {
             messageId,
             channel,
-            contentPreview: options.content.substring(0, 100)
+            contentPreview: options.content.substring(0, 200)
           });
         } catch (error) {
           console.error(`❌ Failed to create message:`, error instanceof Error ? error.message : String(error));

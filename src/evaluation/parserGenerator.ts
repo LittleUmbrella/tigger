@@ -216,7 +216,7 @@ ${formats.slice(0, 3).map((f, i) => `    // ${i + 1}. ${f.format_pattern.substri
     const signalType: 'long' | 'short' = isShort ? 'short' : 'long';
     
     if (takeProfits.length === 0) {
-      logger.warn('No take profits found', { content: content.substring(0, 100) });
+      logger.warn('No take profits found', { content: content.substring(0, 200) });
       return null;
     }
     
@@ -231,7 +231,7 @@ ${formats.slice(0, 3).map((f, i) => `    // ${i + 1}. ${f.format_pattern.substri
   } catch (error) {
     logger.error('Error parsing message', {
       error: error instanceof Error ? error.message : String(error),
-      content: content.substring(0, 100)
+      content: content.substring(0, 200)
     });
     return null;
   }

@@ -172,7 +172,7 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       });
     } else {
       // Search all channels
-      const channels = ['2394142145', '3241720654', '2427485240']; // Add more as needed
+      const channels = ['2394142145', '3241720654', '2427485240', '3272135406', '2385521106', '1634731277']; // All config channels
       logger.debug('traceMessage - searching all channels', {
         messageId,
         channelsToSearch: channels
@@ -209,7 +209,8 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
     steps[0].timestamp = message.created_at;
     steps[0].details = {
       ...steps[0].details,
-      content: message.content.substring(0, 100) + '...',
+      content: message.content.substring(0, 200) + (message.content.length > 200 ? '...' : ''),
+      contentLength: message.content.length,
       sender: message.sender,
       date: message.date,
       parsed: message.parsed,
@@ -247,8 +248,14 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
     } else {
       steps[1].status = 'failure';
       steps[1].error = 'Message could not be parsed into a trade signal';
+      steps[1].details = {
+        fullContent: message.content,
+        parserName: parserName || '(none)',
+        note: 'Verify parser against full content above - truncated display can lead to incorrect conclusions.'
+      };
       recommendations.push('Check parser configuration for this channel');
       recommendations.push('Message may not be a trade signal (could be management command or unrelated message)');
+      recommendations.push('Full message content is in trace details - verify the parser against it (e.g. npx tsx src/scripts/query_message.ts <id> <channel>)');
       return {
         messageId,
         channel: channel || 'unknown',

@@ -26,6 +26,7 @@ import { schoolParser } from '../parsers/schoolParser.js';
 import { bigParser } from '../parsers/bigParser.js';
 import { goldScalpsParser } from '../parsers/goldScalpsParser.js';
 import { starFormatParser } from '../parsers/starFormatParser.js';
+import { ctraderGoldParser } from '../parsers/ctraderGoldParser.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -36,6 +37,7 @@ registerParser('school', schoolParser);
 registerParser('big', bigParser);
 registerParser('gold_scalps', goldScalpsParser);
 registerParser('star_format', starFormatParser);
+registerParser('ctrader_gold', ctraderGoldParser);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];
@@ -395,8 +397,8 @@ export const startTradeOrchestrator = async (
               channel,
               commandType: command.type,
               messageId: message.message_id,
-              oldContent: message.old_content?.substring(0, 50),
-              newContent: message.content.substring(0, 50)
+              oldContent: message.old_content?.substring(0, 200),
+              newContent: message.content.substring(0, 200)
             });
             continue; // Skip trade signal processing
           } else {

@@ -74,7 +74,7 @@ program
               formatHash: format.format_hash,
               classification: format.classification,
               exampleCount: format.example_count,
-              contentPreview: format.format_pattern.substring(0, 100)
+              contentPreview: format.format_pattern.substring(0, 200)
             });
           } else {
             // Validate ParsedOrder structure

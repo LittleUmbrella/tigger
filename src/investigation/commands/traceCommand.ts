@@ -59,7 +59,8 @@ export async function traceCommandHandler(context: CommandContext): Promise<Comm
         nextSteps.push('/check-logs message:' + messageId + ' timeframe:5');
         nextSteps.push('/analyze trade:' + traceResult.steps.find(s => s.step.includes('Trade'))?.details?.trades?.[0]?.id);
       } else if (traceResult.failurePoint.includes('Parsing')) {
-        nextSteps.push('/verify-parser message:' + messageId);
+        const ch = traceResult.channel || channel;
+        nextSteps.push('npx tsx src/scripts/query_message.ts ' + messageId + ' ' + (ch || '<channel>'));
       } else if (traceResult.failurePoint.includes('Trade Creation')) {
         nextSteps.push('/check-logs message:' + messageId + ' timeframe:10');
         const symbol = traceResult.steps?.find((s: any) => s.step?.includes('Parsing'))?.details?.tradingPair?.replace('/', '');

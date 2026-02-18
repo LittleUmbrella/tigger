@@ -125,7 +125,7 @@ The JSON must be valid and complete. Do not include any other text before or aft
     if (!classification) {
       logger.warn('Failed to extract or parse JSON from LLM response', { 
         response: response.substring(0, 200),
-        message: message.content.substring(0, 100)
+        message: message.content.substring(0, 200)
       });
       return { type: 'other', confidence: 0 };
     }
@@ -134,7 +134,7 @@ The JSON must be valid and complete. Do not include any other text before or aft
     if (!['signal', 'management', 'trade_progress_update', 'other'].includes(classification.type)) {
       logger.warn('Invalid classification type', { 
         classification,
-        message: message.content.substring(0, 100)
+        message: message.content.substring(0, 200)
       });
       return { type: 'other', confidence: 0 };
     }
@@ -145,7 +145,7 @@ The JSON must be valid and complete. Do not include any other text before or aft
         classification.confidence > 1) {
       logger.warn('Invalid confidence value', { 
         confidence: classification.confidence,
-        message: message.content.substring(0, 100)
+        message: message.content.substring(0, 200)
       });
       classification.confidence = 0.5; // Default to medium confidence
     }
@@ -154,7 +154,7 @@ The JSON must be valid and complete. Do not include any other text before or aft
   } catch (error) {
     logger.error('Failed to classify message', {
       error: error instanceof Error ? error.message : String(error),
-      message: message.content.substring(0, 100)
+      message: message.content.substring(0, 200)
     });
     return { type: 'other', confidence: 0 };
   }
@@ -415,7 +415,7 @@ export async function analyzeChannelMessages(
           logger.debug('Message classification', {
             channel,
             messageId: message.message_id,
-            content: message.content.substring(0, 100),
+            content: message.content.substring(0, 200),
             classification: classification.type,
             confidence: classification.confidence,
             reasoning: classification.reasoning

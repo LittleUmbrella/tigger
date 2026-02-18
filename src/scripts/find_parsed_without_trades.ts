@@ -60,7 +60,7 @@ async function main() {
               messageId: message.message_id,
               channel,
               date: message.date,
-              content: message.content.substring(0, 100) + '...',
+              content: message.content.substring(0, 200) + '...',
               tradingPair
             });
           }

@@ -3,9 +3,10 @@
  * 
  * Full guided investigation workflow:
  * 1. Gather all data (database, Loggly, Bybit)
- * 2. Analyze findings
- * 3. Identify root cause
- * 4. Provide recommendations
+ * 2. Cross-check Loggly for order placement (catches trace-vs-logs mismatch)
+ * 3. Analyze findings
+ * 4. Identify root cause
+ * 5. Provide recommendations
  * 
  * Usage: /investigate message:<id> [channel:<channel>]
  */
@@ -153,6 +154,103 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         return {
           success: false,
           message: 'Failed to query Loggly',
+          error: error instanceof Error ? error.message : String(error)
+        };
+      }
+    }
+  });
+
+  // Step 2b: Cross-check Loggly for order placement (catches trace-vs-logs mismatch)
+  engine.addStep({
+    id: 'logglyOrderPlacementCheck',
+    name: 'Cross-check: Bybit Order Placement & Errors',
+    required: false,
+    execute: async (ctx) => {
+      if (!ctx.logglyClient) {
+        return {
+          success: true,
+          message: 'Loggly client not available - skipping order placement cross-check',
+          data: { skipped: true }
+        };
+      }
+
+      const traceResult = ctx.stepResults.get('trace')?.data;
+      const logglyData = ctx.stepResults.get('loggly')?.data;
+      const messageId = ctx.args.messageId;
+      const channel = ctx.args.channel;
+
+      if (!traceResult) {
+        return { success: false, message: 'Trace step must complete first' };
+      }
+
+      const timestamp = traceResult.steps[0]?.timestamp || traceResult.steps[0]?.details?.date || new Date().toISOString();
+      const windowMinutes = 15;
+      const timeRange = {
+        from: new Date(new Date(timestamp).getTime() - windowMinutes * 60 * 1000).toISOString(),
+        until: new Date(new Date(timestamp).getTime() + windowMinutes * 60 * 1000).toISOString()
+      };
+
+      try {
+        // Query for message + order/trade activity (order placement evidence)
+        const orderPlacementQuery = channel
+          ? `messageId:${messageId} AND channel:${channel} AND (order OR bybit OR trade)`
+          : `messageId:${messageId} AND (order OR bybit OR trade)`;
+
+        const orderPlacementLogs = await ctx.logglyClient!.search({
+          query: orderPlacementQuery,
+          from: timeRange.from,
+          until: timeRange.until,
+          size: 100
+        });
+
+        // Query for Bybit API errors in window
+        const bybitErrors = await ctx.logglyClient!.searchBybitErrors(timeRange);
+
+        // Query for order creation failures in window
+        const orderFailures = await ctx.logglyClient!.searchOrderFailures(timeRange, undefined);
+
+        const events = orderPlacementLogs.events || [];
+        const successIndicators = [
+          'Order placed successfully',
+          'Trade initiated successfully',
+          'Trade stored in database',
+          'Limit order placed',
+          'Trade initiation completed for all accounts'
+        ];
+
+        const foundSuccessLogs = events.filter((e: any) => {
+          const msg = e.event?.message || e.event?.json?.message || e.logmsg || '';
+          return successIndicators.some((ind) => msg.includes(ind));
+        });
+
+        const failurePoint = traceResult.failurePoint;
+        const contradictionWithTrace =
+          !!failurePoint &&
+          foundSuccessLogs.length > 0 &&
+          (failurePoint.includes('Parsing') || failurePoint.includes('Trade Creation'));
+
+        return {
+          success: true,
+          message: foundSuccessLogs.length > 0
+            ? `Found ${foundSuccessLogs.length} order placement log(s)${contradictionWithTrace ? ' - CONTRADICTS trace' : ''}`
+            : `No order placement evidence in logs (${events.length} order-related logs)`,
+          data: {
+            orderPlacementLogCount: foundSuccessLogs.length,
+            bybitErrorCount: bybitErrors.events?.length || 0,
+            orderFailureCount: orderFailures.events?.length || 0,
+            contradictionWithTrace,
+            sampleSuccessLogs: foundSuccessLogs.slice(0, 3).map((e: any) => ({
+              message: e.event?.message || e.event?.json?.message || e.logmsg || ''
+            }))
+          }
+        };
+      } catch (error) {
+        logger.error('Error in order placement cross-check', {
+          error: error instanceof Error ? error.message : String(error)
+        });
+        return {
+          success: false,
+          message: 'Failed to cross-check order placement',
           error: error instanceof Error ? error.message : String(error)
         };
       }
@@ -424,6 +522,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     execute: async (ctx) => {
       const traceResult = ctx.stepResults.get('trace')?.data;
       const logglyData = ctx.stepResults.get('loggly')?.data;
+      const orderPlacementData = ctx.stepResults.get('logglyOrderPlacementCheck')?.data;
       const orderData = ctx.stepResults.get('bybitOrders')?.data;
       const symbolValidationData = ctx.stepResults.get('symbolValidation')?.data;
       const goldPriceData = ctx.stepResults.get('goldPriceCheck')?.data;
@@ -439,6 +538,27 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       const failurePoint = traceResult.failurePoint;
       const findings: string[] = [];
       const recommendations: string[] = [];
+
+      // Cross-check: Logs contradict trace? (e.g. trace says Parsing failed but logs show orders placed)
+      if (orderPlacementData && !orderPlacementData.skipped) {
+        if (orderPlacementData.contradictionWithTrace) {
+          findings.push('\n⚠️ **Logs contradict trace**: Loggly shows orders were placed successfully');
+          findings.push('   The trace may use a different database (e.g. local vs production) or have a bug.');
+          findings.push('   Treat logs as source of truth.');
+          if (orderPlacementData.sampleSuccessLogs?.length > 0) {
+            orderPlacementData.sampleSuccessLogs.forEach((log: any, i: number) => {
+              const msg = (log.message || '').substring(0, 200);
+              if (msg) findings.push(`   ${i + 1}. ${msg}...`);
+            });
+          }
+        }
+        if ((orderPlacementData.bybitErrorCount || 0) > 0) {
+          findings.push(`\n📋 Bybit API errors in window: ${orderPlacementData.bybitErrorCount}`);
+        }
+        if ((orderPlacementData.orderFailureCount || 0) > 0) {
+          findings.push(`Order creation failures in window: ${orderPlacementData.orderFailureCount}`);
+        }
+      }
 
       // Log confirmation - use logs to confirm root cause when available
       if (logglyData) {
@@ -605,8 +725,19 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           recommendations.push('Verify API credentials have order creation permissions');
         } else if (failurePoint.includes('Parsing')) {
           findings.push('Message could not be parsed into a trade signal');
-          recommendations.push('Check parser configuration for this channel');
-          recommendations.push('Message may not be a trade signal');
+          // Include full message content so investigators can verify - truncated display leads to incorrect conclusions
+          const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Parsing'));
+          const fullContent = parsingStep?.details?.fullContent;
+          if (fullContent) {
+            findings.push(`\nFull message content (verify parser against this):\n\`\`\`\n${fullContent}\n\`\`\``);
+          }
+          if (orderPlacementData?.contradictionWithTrace) {
+            recommendations.push('Logs show orders were placed - trace may use different DB. Verify DATABASE_URL.');
+          } else {
+            recommendations.push('Check parser configuration for this channel');
+            recommendations.push('Message may not be a trade signal');
+            recommendations.push('Verify: npx tsx src/scripts/query_message.ts <messageId> <channel> then test parser on full content');
+          }
         } else if (failurePoint.includes('Trade Creation')) {
           findings.push('Trade was not created in database');
           recommendations.push('Check initiator logs for errors');
@@ -663,6 +794,9 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     if (failurePoint.includes('Entry Order')) {
       nextSteps.push('/check-balance');
       nextSteps.push('/query-loggly "Bybit API error" timeframe:10');
+    } else if (failurePoint.includes('Parsing')) {
+      const ch = traceResult?.data?.channel || context.args.channel;
+      nextSteps.push(`npx tsx src/scripts/query_message.ts ${context.args.messageId} ${ch || '<channel>'}`);
     }
   }
 

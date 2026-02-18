@@ -949,9 +949,8 @@ const executeTradeForAccount = async (
       side: side,
       orderType: orderType,
       qty: qtyString,
-      // Use IOC for immediate execution (fills immediately if price is at or better, otherwise cancels)
-      // This provides predictable cost while still executing quickly
-      timeInForce: isMarketOrder ? 'IOC' : 'GTC',
+      // Use GTC for all limit orders - lets the order stay active until filled or explicitly cancelled
+      timeInForce: 'GTC',
       reduceOnly: false,
       closeOnTrigger: false,
       positionIdx: 0,
@@ -1577,11 +1576,11 @@ const executeTradeForAccount = async (
       // Place take profit orders using batch placement if available
       // NOTE: For limit orders that may take hours/days to fill, TP orders are placed by the trade monitor
       // after the entry order fills. This prevents TP orders from being placed before a position exists.
-      // Only place TP orders immediately if this was originally a market order (now limit with IOC, fills immediately)
+      // Only place TP orders immediately if this was originally a market order (limit at current price with GTC)
       // (isMarketOrder already declared above)
       
       if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder) {
-        // For limit orders with IOC timeInForce (originally market orders), check if we have a position immediately and get position details
+        // For market orders (limit at current price), check if we have a position immediately and get position details
         let positionSide: 'Buy' | 'Sell' | null = null;
         let actualEntryPrice: number | undefined;
         let actualPositionQty: number | undefined;
@@ -2152,7 +2151,7 @@ const executeTradeForAccount = async (
             }
           } // End of if (shouldPlaceTPOrders) block
         } else {
-          logger.info('Limit order (IOC) placed but no position detected yet, TP orders will be placed by monitor', {
+          logger.info('Limit order placed but no position detected yet, TP orders will be placed by monitor', {
             channel,
             symbol,
             orderId
@@ -2181,7 +2180,7 @@ const executeTradeForAccount = async (
     });
 
     // Update trade record if it was already inserted earlier, otherwise insert it now
-    // (For limit orders with IOC timeInForce, trade was inserted earlier to allow closing position if needed)
+    // (For market orders, trade was inserted earlier to allow closing position if needed)
     if (!tradeId) {
       const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
       tradeId = await db.insertTrade({

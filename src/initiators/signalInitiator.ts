@@ -231,7 +231,7 @@ export const processMessages = async (
         channel,
         messageId: message.message_id,
         messageDate: message.date,
-        contentPreview: message.content.substring(0, 150),
+        contentPreview: message.content.substring(0, 200),
         parserName: parserName || 'default',
         initiatorName
       });
@@ -352,7 +352,7 @@ export const processMessages = async (
         logger.warn('Message parsing failed, marking as parsed to avoid reprocessing', {
           channel,
           messageId: message.message_id,
-          contentPreview: message.content.substring(0, 150),
+          contentPreview: message.content.substring(0, 200),
           parserName: parserName || 'default',
           reason: 'Parse returned null - message format not recognized'
         });
