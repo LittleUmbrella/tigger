@@ -1,5 +1,5 @@
 import { logger } from '../utils/logger.js';
-import { CTraderConnection } from '@reiryoku/ctrader-layer';
+import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
 
 /**
  * cTrader OpenAPI client configuration
@@ -16,9 +16,9 @@ export interface CTraderClientConfig {
 }
 
 /**
- * cTrader OpenAPI client using @reiryoku/ctrader-layer
+ * cTrader OpenAPI client using local implementation
  * 
- * This uses the community-maintained cTrader Layer package which handles
+ * Uses our local CTraderConnection implementation which handles
  * the low-level protocol communication (Protobuf over TCP/WebSocket).
  */
 export class CTraderClient {
@@ -85,39 +85,88 @@ export class CTraderClient {
 
       // Then authenticate the trading account if access token and account ID are provided
       if (this.config.accessToken && this.config.accountId) {
-        await this.connection.sendCommand('ProtoOAAccountAuthReq', {
+        const accountIdNum = parseInt(this.config.accountId, 10);
+        if (isNaN(accountIdNum)) {
+          throw new Error(`Invalid account ID: ${this.config.accountId}`);
+        }
+
+        logger.info('Authenticating trading account', {
+          accountId: this.config.accountId,
+          accountIdNum
+        });
+
+        const authResponse = await this.connection.sendCommand('ProtoOAAccountAuthReq', {
           accessToken: this.config.accessToken,
-          accountId: parseInt(this.config.accountId, 10)
+          ctidTraderAccountId: accountIdNum
         });
 
         this.authenticated = true;
         logger.info('Trading account authenticated', {
-          accountId: this.config.accountId
+          accountId: this.config.accountId,
+          response: authResponse
         });
       }
     } catch (error) {
       logger.error('Failed to authenticate with cTrader OpenAPI', {
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        errorString: String(error),
+        errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined,
+        stack: error instanceof Error ? error.stack : undefined
       });
       throw error;
     }
   }
 
   /**
-   * Get account information
+   * Get account list (may require account authentication)
+   * Note: This might not work with just application authentication.
+   * Consider using CTraderConnection.getAccessTokenAccounts(accessToken) instead
+   * if you have an access token.
+   */
+  async getAccountList(): Promise<any> {
+    if (!this.connected || !this.connection) {
+      throw new Error('Not connected to cTrader OpenAPI');
+    }
+
+    try {
+      // ProtoOAGetAccountListReq might require account authentication
+      // If this fails, use CTraderConnection.getAccessTokenAccounts() static method instead
+      const response = await this.connection.sendCommand('ProtoOAGetAccountListReq', {});
+      // The response should contain account list
+      return response;
+    } catch (error) {
+      logger.error('Failed to get account list', {
+        error: error instanceof Error ? error.message : String(error),
+        note: 'This might require account authentication. Try using CTraderConnection.getAccessTokenAccounts() if you have an access token.'
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get account information (requires account authentication)
+   * Uses ProtoOATraderReq to get trader account details including balance
    */
   async getAccountInfo(): Promise<any> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
 
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get account info');
+    }
+
     try {
-      const response = await this.connection.sendCommand('ProtoOAGetAccountListReq', {});
-      // The response should contain account information
+      const response = await this.connection.sendCommand('ProtoOATraderReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId, 10)
+      });
+      // The response should contain trader account information including balance
       return response;
     } catch (error) {
       logger.error('Failed to get account info', {
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        errorString: String(error),
+        errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined
       });
       throw error;
     }
@@ -131,10 +180,19 @@ export class CTraderClient {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
 
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get symbol info');
+    }
+
     try {
       // First get the symbol ID from symbol name
+      const accountIdNum = parseInt(this.config.accountId, 10);
+      if (isNaN(accountIdNum)) {
+        throw new Error(`Invalid account ID: ${this.config.accountId}`);
+      }
+
       const symbolListResponse = await this.connection.sendCommand('ProtoOASymbolsListReq', {
-        accountId: parseInt(this.config.accountId!, 10)
+        ctidTraderAccountId: accountIdNum
       });
 
       // Find the symbol in the list
@@ -171,7 +229,7 @@ export class CTraderClient {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
       
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
-        accountId: parseInt(this.config.accountId!, 10),
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         symbolId: symbolInfo.symbolId,
         orderType: 'MARKET',
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
@@ -217,7 +275,7 @@ export class CTraderClient {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
       
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
-        accountId: parseInt(this.config.accountId!, 10),
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         symbolId: symbolInfo.symbolId,
         orderType: 'LIMIT',
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
@@ -258,7 +316,7 @@ export class CTraderClient {
 
     try {
       const response = await this.connection.sendCommand('ProtoOAGetPositionsReq', {
-        accountId: parseInt(this.config.accountId!, 10)
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
       });
 
       return response?.position || [];
@@ -280,7 +338,7 @@ export class CTraderClient {
 
     try {
       const response = await this.connection.sendCommand('ProtoOAGetOrdersReq', {
-        accountId: parseInt(this.config.accountId!, 10)
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
       });
 
       return response?.order || [];
@@ -302,7 +360,7 @@ export class CTraderClient {
 
     try {
       await this.connection.sendCommand('ProtoOACancelOrderReq', {
-        accountId: parseInt(this.config.accountId!, 10),
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         orderId: parseInt(orderId, 10)
       });
 
@@ -330,7 +388,7 @@ export class CTraderClient {
 
     try {
       await this.connection.sendCommand('ProtoOAUpdateStopLossTakeProfitReq', {
-        accountId: parseInt(this.config.accountId!, 10),
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         positionId: parseInt(params.positionId, 10),
         ...(params.stopLoss !== undefined && { stopLoss: params.stopLoss }),
         ...(params.takeProfit !== undefined && { takeProfit: params.takeProfit })
@@ -356,7 +414,7 @@ export class CTraderClient {
 
     try {
       await this.connection.sendCommand('ProtoOAClosePositionReq', {
-        accountId: parseInt(this.config.accountId!, 10),
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         positionId: parseInt(positionId, 10)
       });
 
@@ -372,43 +430,105 @@ export class CTraderClient {
 
   /**
    * Get current price for a symbol
+   * Subscribes to spot events and waits for the first spot event which contains current prices
    */
   async getCurrentPrice(symbol: string): Promise<number | null> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
 
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get current price');
+    }
+
     try {
       const symbolInfo = await this.getSymbolInfo(symbol);
-      
-      // Request tick data for the symbol
-      const response = await this.connection.sendCommand('ProtoOASymbolsForConversionReq', {
-        accountId: parseInt(this.config.accountId!, 10),
-        firstSymbolId: symbolInfo.symbolId,
-        secondSymbolId: symbolInfo.symbolId
-      });
+      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId.low !== undefined
+        ? symbolInfo.symbolId.low
+        : symbolInfo.symbolId;
 
-      // Try to get price from symbol tick data
-      // The actual response structure depends on cTrader API
-      const tickData = await this.connection.sendCommand('ProtoOASubscribeSpotsReq', {
-        accountId: parseInt(this.config.accountId!, 10),
-        symbolId: [symbolInfo.symbolId]
-      });
-
-      // Extract bid/ask prices from tick data
-      // This is a simplified version - actual implementation may vary
-      const bid = tickData?.bid || symbolInfo?.bid || null;
-      const ask = tickData?.ask || symbolInfo?.ask || null;
-      
-      if (bid && ask) {
-        return (bid + ask) / 2; // Return mid price
-      } else if (bid) {
-        return bid;
-      } else if (ask) {
-        return ask;
+      // Set up listener BEFORE subscribing (spot events can arrive immediately after subscription)
+      const connection = this.connection;
+      if (!connection) {
+        return null;
       }
 
-      return null;
+      const accountId = this.config.accountId;
+      if (!accountId) {
+        return null;
+      }
+
+      return new Promise<number | null>((resolve) => {
+        let listenerId: string | undefined;
+        let resolved = false;
+        const timeout = setTimeout(() => {
+          if (!resolved && listenerId) {
+            connection.removeEventListener(listenerId);
+          }
+          if (!resolved) {
+            resolved = true;
+            resolve(null);
+          }
+        }, 5000); // 5 second timeout
+
+        // Listen for spot events using the connection's on method
+        // Pass the payload name, not the type number
+        // The event is wrapped in a CTraderEvent with descriptor containing the actual data
+        const idResult = connection.on('ProtoOASpotEvent', (ctraderEvent: any) => {
+          if (resolved) return;
+          
+          // Extract the actual event data from the descriptor
+          const event = ctraderEvent.descriptor || ctraderEvent;
+          const eventSymbolId = typeof event.symbolId === 'object' && event.symbolId.low !== undefined
+            ? event.symbolId.low
+            : event.symbolId;
+          
+          if (eventSymbolId === symbolId) {
+            resolved = true;
+            clearTimeout(timeout);
+            
+            // Remove the listener
+            if (typeof id === 'string') {
+              connection.removeEventListener(id);
+            }
+            
+            // Prices are in 1/100_000 of unit (e.g., 1.23 -> 123000)
+            const bid = event.bid ? event.bid / 100000 : null;
+            const ask = event.ask ? event.ask / 100000 : null;
+            
+            if (bid && ask) {
+              resolve((bid + ask) / 2); // Return mid price
+            } else if (bid) {
+              resolve(bid);
+            } else if (ask) {
+              resolve(ask);
+            } else {
+              resolve(null);
+            }
+          }
+        });
+
+        // Store listenerId for cleanup on timeout
+        const id = idResult;
+        if (typeof id === 'string') {
+          listenerId = id;
+        }
+
+        // Now subscribe to spot events (listener is already set up)
+        connection.sendCommand('ProtoOASubscribeSpotsReq', {
+          ctidTraderAccountId: parseInt(accountId, 10),
+          symbolId: [symbolId]
+        }).catch((error) => {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timeout);
+            if (listenerId) {
+              connection.removeEventListener(listenerId);
+            }
+            resolve(null);
+          }
+        });
+      });
     } catch (error) {
       logger.debug('Failed to get current price', {
         symbol,

@@ -74,6 +74,10 @@ export interface AccountConfig {
   envVarNames?: {
     apiKey: string; // Name of environment variable containing the API key
     apiSecret: string; // Name of environment variable containing the API secret
+    // cTrader-specific fields (optional)
+    accessToken?: string; // Name of environment variable containing the OAuth access token
+    refreshToken?: string; // Name of environment variable containing the OAuth refresh token
+    accountId?: string; // Name of environment variable containing the cTrader account ID
   };
   // Deprecated: Direct API credentials (for backward compatibility only)
   // Use envVarNames instead for security

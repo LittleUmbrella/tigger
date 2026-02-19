@@ -50,7 +50,19 @@
       "channel": "1634731277",
       "envVarNames": {
         "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH"
+        "accessHash": "TG_ACCESS_HASH_STAR_FORMAT"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
+    },
+    {
+      "name": "ctrader_gold_harvester",
+      "channel": "3077664317",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD"
       },
       "pollInterval": 3000,
       "downloadImages": false,
@@ -78,6 +90,10 @@
     {
       "name": "star_format",
       "channel": "1634731277"
+    },
+    {
+      "name": "ctrader_gold",
+      "channel": "3077664317"
     }
   ],
   "accounts": [
@@ -100,6 +116,18 @@
         "apiKey": "BYBIT_DEMO_API_KEY_HYROTRADER_CHALLENGE1",
         "apiSecret": "BYBIT_DEMO_API_SECRET_HYROTRADER_CHALLENGE1"
       }
+    },
+    {
+      "name": "ctrader_demo",
+      "exchange": "ctrader",
+      "demo": false,
+      "_comment": "cTrader demo account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials.",
+      "envVarNames": {
+        "apiKey": "CTRADER_CLIENT_ID",
+        "apiSecret": "CTRADER_CLIENT_SECRET",
+        "accessToken": "CTRADER_ACCESS_TOKEN",
+        "accountId": "CTRADER_ACCOUNT_ID"
+      }
     }
   ],
   "initiators": [
@@ -109,6 +137,12 @@
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "riskPercentage": 1,
       "accounts": ["demo", "hyrotrader_challenge1"]
+    },
+    {
+      "name": "ctrader",
+      "riskPercentage": 1,
+      "baseLeverage": 20,
+      "accounts": ["ctrader_demo"]
     }
   ],
   "monitors": [
@@ -116,6 +150,10 @@
       "type": "bybit",
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
+      "pollInterval": 3000
+    },
+    {
+      "type": "ctrader",
       "pollInterval": 3000
     }
   ],
@@ -158,6 +196,17 @@
       "baseLeverage": 3,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": ["hyrotrader"]
+    },
+    {
+      "channel": "3077664317",
+      "harvester": "ctrader_gold_harvester",
+      "parser": "ctrader_gold",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "breakevenAfterTPs": 1,
+      "entryTimeoutMinutes": 90,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5
     }
   ],
   "database": {
