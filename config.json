@@ -242,22 +242,6 @@
       }
     },
     {
-      "channel": "3469900302",
-      "harvester": "ctrader_gold_harvester",
-      "parser": "ctrader_gold",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "breakevenAfterTPs": 1,
-      "entryTimeoutMinutes": 90,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"],
-      "tradeObfuscation": {
-        "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
-    },
-    {
       "channel": "2385521106",
       "harvester": "big_harvester",
       "parser": "big",
