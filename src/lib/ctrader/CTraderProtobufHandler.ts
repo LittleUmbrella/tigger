@@ -218,7 +218,7 @@ export class CTraderProtobufHandler {
       hasPayloadBuffer: !!payloadBuffer,
       payloadBufferLength: payloadBuffer?.length,
       clientMsgId,
-      payloadType: typeof payload,
+      payloadTypeOf: typeof payload,
       payloadConstructor: payload?.constructor?.name
     });
     
@@ -244,8 +244,8 @@ export class CTraderProtobufHandler {
         wrapperType: typeof wrapper,
         directPayloadType: (wrapper as any).payloadType,
         directPayload: (wrapper as any).payload ? 'exists' : 'missing',
-        wrapperObjPayloadType: wrapperObj?.payloadType,
-        wrapperObjKeys: wrapperObj ? Object.keys(wrapperObj).slice(0, 10) : []
+        wrapperPayloadType: wrapper?.payloadType,
+        wrapperKeys: wrapper ? Object.keys(wrapper).slice(0, 10) : []
       };
       console.error('ERROR: Failed to extract payloadType:', JSON.stringify(errorInfo, null, 2));
       logger.error('Failed to extract payloadType from ProtoMessage wrapper', errorInfo);

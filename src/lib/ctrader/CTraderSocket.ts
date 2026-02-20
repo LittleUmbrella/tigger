@@ -29,6 +29,15 @@ export class CTraderSocket extends EventEmitter {
     return emitFn.call(this, event, ...args);
   }
 
+  /**
+   * Explicitly declare on to satisfy TypeScript
+   * Delegates to parent EventEmitter implementation via prototype
+   */
+  public on(eventName: string | symbol, listener: (...args: any[]) => void): this {
+    const onFn = (EventEmitter.prototype as unknown as { on: (eventName: string | symbol, listener: (...args: any[]) => void) => EventEmitter }).on;
+    return onFn.call(this, eventName, listener) as this;
+  }
+
   connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       // Use explicit port/host signature to avoid TypeScript overload confusion
