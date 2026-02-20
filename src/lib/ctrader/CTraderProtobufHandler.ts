@@ -2,7 +2,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { fileURLToPath } from 'url';
 import { logger } from '../../utils/logger.js';
-const protobuf = require('protobufjs');
+// @ts-ignore - protobufjs doesn't have proper ES module types, but it works with static import
+import protobuf from 'protobufjs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
