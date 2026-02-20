@@ -92,7 +92,12 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "breakevenAfterTPs": 1,
-      "baseLeverage": 20
+      "baseLeverage": 20,
+      "tradeObfuscation": {
+        "sl": { "minPercent": -0.5, "maxPercent": 0.5 },
+        "entry": { "minPercent": -0.3, "maxPercent": 0.3 },
+        "tp": { "minPercent": -0.2, "maxPercent": 0.2 }
+      }
     },
     {
       "channel": "1234567890123456789",

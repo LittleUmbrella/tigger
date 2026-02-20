@@ -15,6 +15,7 @@ import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
 import '../initiators/index.js'; // Register built-in initiators
 import '../managers/index.js'; // Register built-in managers
 import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
+import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
@@ -415,7 +416,10 @@ export const startTradeOrchestrator = async (
         // Not a management command, check if it's a trade signal
         const parserConfig = parserMap.get(parserName);
         const parserOptions = parserConfig?.entryPriceStrategy ? { entryPriceStrategy: parserConfig.entryPriceStrategy } : undefined;
-        const newParsed = parseMessage(message.content, parserName, parserOptions);
+        let newParsed = parseMessage(message.content, parserName, parserOptions);
+        if (newParsed && channelConfig?.tradeObfuscation) {
+          newParsed = applyTradeObfuscation(newParsed, channelConfig.tradeObfuscation);
+        }
         if (!newParsed) {
           // Not a trade signal either, mark as parsed and skip
           await db.markMessageParsed(message.id);
@@ -638,7 +642,10 @@ export const startTradeOrchestrator = async (
                   continue;
                 }
                 const parserOptions = parser.entryPriceStrategy ? { entryPriceStrategy: parser.entryPriceStrategy } : undefined;
-                const newParsed = parseMessage(message.content, parser.name, parserOptions);
+                let newParsed = parseMessage(message.content, parser.name, parserOptions);
+                if (newParsed && channelConfig.tradeObfuscation) {
+                  newParsed = applyTradeObfuscation(newParsed, channelConfig.tradeObfuscation);
+                }
                 if (newParsed) {
                   const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
                   if (existingTrades.length > 0) {
@@ -889,7 +896,9 @@ export const startTradeOrchestrator = async (
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
-          channelConfig.accountFilters // Pass channel-level account filtering rules
+          channelConfig.accountFilters, // Pass channel-level account filtering rules
+          channelConfig.propFirms, // Pass prop firm configurations
+          channelConfig.tradeObfuscation // Pass trade obfuscation for sl/entry/tp
         );
       }
     };
@@ -942,7 +951,8 @@ export const startTradeOrchestrator = async (
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
-          channelConfig.propFirms // Pass prop firm configurations
+          channelConfig.propFirms, // Pass prop firm configurations
+          channelConfig.tradeObfuscation // Pass trade obfuscation for sl/entry/tp
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

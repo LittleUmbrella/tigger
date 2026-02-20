@@ -136,7 +136,9 @@ export async function runEvaluation(
     undefined, // accounts
     config.startDate ? startDate : undefined, // startDate filter
     undefined, // channelBaseLeverage (not used in evaluation mode, use initiatorConfig.baseLeverage instead)
-    undefined // accountFilters (not used in evaluation mode)
+    undefined, // accountFilters (not used in evaluation mode)
+    undefined, // propFirms
+    undefined // tradeObfuscation
   );
 
   // Get all trades for this channel that need simulation

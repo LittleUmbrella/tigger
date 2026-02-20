@@ -121,6 +121,25 @@ export interface AccountFilter {
   rules: AccountFilterRule; // Filtering rules based on order properties
 }
 
+/**
+ * Random percent range for trade value obfuscation (e.g. { minPercent: -0.5, maxPercent: 0.5 } = ±0.5%)
+ */
+export interface PercentRange {
+  minPercent: number;
+  maxPercent: number;
+}
+
+/**
+ * Per-channel trade obfuscation to deter copy trading detection.
+ * Each field applies a random percent adjustment within its range.
+ * Obfuscation is applied before any rounding for exchange symbol constraints (tick size, etc.).
+ */
+export interface TradeObfuscationConfig {
+  sl?: PercentRange;
+  entry?: PercentRange;
+  tp?: PercentRange;
+}
+
 export interface ChannelSetConfig {
   channel: string;
   harvester: string; // Reference to harvester name
@@ -134,6 +153,7 @@ export interface ChannelSetConfig {
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
   useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
+  tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection
 }
 
 export interface SimulationConfig {

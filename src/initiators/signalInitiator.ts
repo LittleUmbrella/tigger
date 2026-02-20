@@ -1,8 +1,15 @@
-import { InitiatorConfig, AccountConfig, AccountFilter, CustomPropFirmConfig } from '../types/config.js';
+import {
+  InitiatorConfig,
+  AccountConfig,
+  AccountFilter,
+  CustomPropFirmConfig,
+  TradeObfuscationConfig
+} from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { parseMessage } from '../parsers/signalParser.js';
+import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
 
@@ -92,7 +99,8 @@ export const processUnparsedMessages = async (
   channelBaseLeverage?: number, // Per-channel override for baseLeverage
   maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
-  propFirms?: (string | CustomPropFirmConfig)[] // Prop firm names or custom configurations
+  propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
+  tradeObfuscation?: TradeObfuscationConfig // Random percent adjustment for sl/entry/tp
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -175,7 +183,8 @@ export const processUnparsedMessages = async (
     initiatorFunction,
     initiatorName,
     accountFilters,
-    propFirms
+    propFirms,
+    tradeObfuscation
   );
   
   logger.debug('Finished processing messages', {
@@ -202,7 +211,8 @@ export const processMessages = async (
   initiatorFunction?: (context: InitiatorContext) => Promise<void>,
   initiatorName?: string,
   accountFilters?: AccountFilter[],
-  propFirms?: (string | CustomPropFirmConfig)[]
+  propFirms?: (string | CustomPropFirmConfig)[],
+  tradeObfuscation?: TradeObfuscationConfig
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -242,8 +252,12 @@ export const processMessages = async (
         priceProvider.setCurrentTime(messageTime);
       }
 
-      const parsed = parseMessage(message.content, parserName);
+      let parsed = parseMessage(message.content, parserName);
       if (parsed) {
+        // Obfuscate before any rounding for exchange constraints (must stay first)
+        if (tradeObfuscation) {
+          parsed = applyTradeObfuscation(parsed, tradeObfuscation);
+        }
         // Log successful parsing - critical for investigations
         logger.info('Message parsed successfully', {
           channel,
