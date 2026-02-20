@@ -68,6 +68,18 @@
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
+    }, 
+    {
+      "name": "ctrader_gold_harvester_vip",
+      "channel": "3469900302",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD_VIP"
+      },
+      "pollInterval": 3000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
     }
   ],
   "parsers": [
@@ -199,6 +211,38 @@
     },
     {
       "channel": "3077664317",
+      "harvester": "ctrader_gold_harvester",
+      "parser": "ctrader_gold",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "breakevenAfterTPs": 1,
+      "entryTimeoutMinutes": 90,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"],
+      "tradeObfuscation": {
+        "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
+      }
+    },
+    {
+      "channel": "3469900302",
+      "harvester": "ctrader_gold_harvester_vip",
+      "parser": "ctrader_gold",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "breakevenAfterTPs": 1,
+      "entryTimeoutMinutes": 90,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"],
+      "tradeObfuscation": {
+        "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
+      }
+    },
+    {
+      "channel": "3469900302",
       "harvester": "ctrader_gold_harvester",
       "parser": "ctrader_gold",
       "initiator": "ctrader",
