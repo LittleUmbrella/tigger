@@ -14,6 +14,12 @@ export interface CTraderConnectionConfig {
  * cTrader OpenAPI connection handler
  * Manages TLS connection, protobuf encoding/decoding, and command/response mapping
  */
+/** Pending order command - cTrader responds with ExecutionEvent/OrderErrorEvent, not Res */
+interface PendingOrderCommand {
+  resolve: (value: any) => void;
+  reject: (reason: any) => void;
+}
+
 export class CTraderConnection {
   private socket: CTraderSocket;
   private commandMap: CTraderCommandMap;
@@ -22,6 +28,7 @@ export class CTraderConnection {
   private encoderDecoder: MessageEncoderDecoder;
   private connected: boolean = false;
   private initialized: boolean = false;
+  private pendingOrderCommand: PendingOrderCommand | null = null;
 
   constructor(config: CTraderConnectionConfig) {
     this.socket = new CTraderSocket(config);
@@ -36,12 +43,25 @@ export class CTraderConnection {
     });
 
     this.socket.on('error', (error: Error) => {
-      logger.error('CTrader socket error', { error: error.message });
+      logger.error('CTrader socket error', {
+        error: error.message,
+        exchange: 'ctrader'
+      });
+      if (this.pendingOrderCommand) {
+        this.pendingOrderCommand.reject(new Error(`CTrader socket error: ${error.message}`));
+        this.pendingOrderCommand = null;
+      }
     });
 
     this.socket.on('close', () => {
       this.connected = false;
       logger.info('CTrader socket closed');
+      // Reject any pending order so we fail fast instead of hanging
+      if (this.pendingOrderCommand) {
+        logger.warn('Rejecting pending order due to socket close', { exchange: 'ctrader' });
+        this.pendingOrderCommand.reject(new Error('CTrader socket closed - no order response received'));
+        this.pendingOrderCommand = null;
+      }
     });
   }
 
@@ -90,8 +110,29 @@ export class CTraderConnection {
       this.sendMessage(message);
       return Promise.resolve({});
     }
-
-    if (payloadName.endsWith('REQ')) {
+    if (payloadName.endsWith('Req') || payloadName.endsWith('REQ')) {
+      // ProtoOANewOrderReq: cTrader responds with ProtoOAExecutionEvent (success) or ProtoOAOrderErrorEvent (failure), not Res
+      if (payloadName === 'ProtoOANewOrderReq') {
+        logger.info('Sending ProtoOANewOrderReq, waiting for ExecutionEvent or OrderErrorEvent', {
+          payloadName: 'ProtoOANewOrderReq',
+          exchange: 'ctrader'
+        });
+        return new Promise<any>((resolve, reject) => {
+          this.pendingOrderCommand = { resolve, reject };
+          this.sendMessage(message);
+          // Timeout after 15s - if server never sends ExecutionEvent/OrderErrorEvent, fail fast
+          setTimeout(() => {
+            if (this.pendingOrderCommand) {
+              logger.warn('Order request timed out - no ExecutionEvent or OrderErrorEvent received', {
+                payloadName: 'ProtoOANewOrderReq',
+                exchange: 'ctrader'
+              });
+              this.pendingOrderCommand.reject(new Error('Order request timed out - no response from cTrader'));
+              this.pendingOrderCommand = null;
+            }
+          }, 15000);
+        });
+      }
       // Check if there's a corresponding RES type
       const resName = payloadName.slice(0, -3) + 'Res';
       const resType = this.protobufHandler.getPayloadTypeByName(resName);
@@ -114,6 +155,7 @@ export class CTraderConnection {
     } catch (error) {
       logger.warn('Failed to send command', {
         payloadName,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       return undefined;
@@ -254,6 +296,54 @@ export class CTraderConnection {
 
     // Check if it's an event (case-insensitive check)
     if (payloadName.toUpperCase().endsWith('EVENT')) {
+      // ProtoOAExecutionEvent / ProtoOAOrderErrorEvent: these are the actual responses to ProtoOANewOrderReq
+      if (this.pendingOrderCommand) {
+        logger.info('Event received while waiting for order response', {
+          payloadName,
+          exchange: 'ctrader'
+        });
+        if (payloadName === 'ProtoOAExecutionEvent') {
+          const errorCode = response.errorCode;
+          const executionType = response.executionType ?? response.order?.orderStatus;
+          logger.info('ProtoOAExecutionEvent received', {
+            executionType: response.executionType ?? response.order?.orderStatus,
+            orderId: response.order?.orderId ?? response.deal?.orderId,
+            hasPosition: !!response.position,
+            hasDeal: !!response.deal,
+            exchange: 'ctrader'
+          });
+          if (errorCode) {
+            this.pendingOrderCommand.reject(new Error(`Order rejected: ${errorCode} - ${response.description || ''}`));
+          } else {
+            const order = response.order;
+            const deal = response.deal;
+            let orderId = order?.orderId ?? deal?.orderId;
+            if (typeof orderId === 'object' && orderId?.low !== undefined) {
+              orderId = orderId.low;
+            }
+            if (orderId !== undefined && orderId !== null) {
+              this.pendingOrderCommand.resolve({ orderId: String(orderId), order, deal });
+            } else {
+              this.pendingOrderCommand.resolve(response);
+            }
+          }
+          this.pendingOrderCommand = null;
+          this.eventEmitter.emitEvent(decoded.payloadType.toString(), response);
+          return;
+        }
+        if (payloadName === 'ProtoOAOrderErrorEvent') {
+          const errMsg = response.description || response.errorCode || 'Order rejected';
+          logger.info('Received ProtoOAOrderErrorEvent', {
+            errorCode: response.errorCode,
+            description: response.description,
+            exchange: 'ctrader'
+          });
+          this.pendingOrderCommand.reject(new Error(errMsg));
+          this.pendingOrderCommand = null;
+          this.eventEmitter.emitEvent(decoded.payloadType.toString(), response);
+          return;
+        }
+      }
       this.eventEmitter.emitEvent(decoded.payloadType.toString(), response);
       return;
     }

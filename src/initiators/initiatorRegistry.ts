@@ -23,6 +23,7 @@ export interface InitiatorContext {
   accountFilters?: AccountFilter[]; // Channel-level account filtering rules
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
+  forcePlaceTrade?: boolean; // If true, bypass existing-trade check (for manual retries when DB has stale data)
 }
 
 /**

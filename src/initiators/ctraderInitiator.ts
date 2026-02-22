@@ -3,6 +3,7 @@ import { AccountConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
+import { protobufLongToNumber } from '../utils/protobufLong.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
@@ -372,14 +373,15 @@ const executeTradeForAccount = async (
       }
     }
     
-    // Check for existing open positions
-    const existingTrades = await db.getActiveTrades();
-    const existingTradeForSymbol = existingTrades.find(t => 
-      t.trading_pair === order.tradingPair && 
-      (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
-    );
-    
-    if (existingTradeForSymbol) {
+    // Check for existing open positions (skip if forcePlaceTrade - e.g. manual retry with stale DB)
+    if (!context.forcePlaceTrade) {
+      const existingTrades = await db.getActiveTrades();
+      const existingTradeForSymbol = existingTrades.find(t => 
+        t.trading_pair === order.tradingPair && 
+        (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
+      );
+      
+      if (existingTradeForSymbol) {
       logger.info('Skipping trade - existing open position for symbol', {
         channel,
         messageId: message.message_id,
@@ -391,9 +393,10 @@ const executeTradeForAccount = async (
         existingTradeStatus: existingTradeForSymbol.status
       });
       await db.markMessageParsed(message.id);
-      return;
+        return;
+      }
     }
-    
+
     // Determine trade side (BUY for long, SELL for short)
     const tradeSide = order.signalType === 'long' ? 'BUY' : 'SELL';
     
@@ -411,7 +414,10 @@ const executeTradeForAccount = async (
           }
         } catch (error) {
           logger.warn('Failed to get market price', {
+            channel,
             symbol,
+            accountName: accountName || 'default',
+            exchange: 'ctrader',
             ...serializeError(error)
           });
         }
@@ -466,6 +472,7 @@ const executeTradeForAccount = async (
     let minOrderVolume: number | undefined = undefined;
     let maxOrderVolume: number | undefined = undefined;
     let volumeStep: number | undefined = undefined;
+    let lotSize: number | undefined;
     
     if (ctraderClient) {
       try {
@@ -482,7 +489,9 @@ const executeTradeForAccount = async (
             volumePrecision: symbolInfo.volumePrecision,
             minVolume: symbolInfo.minVolume,
             maxVolume: symbolInfo.maxVolume,
-            volumeStep: symbolInfo.volumeStep
+            volumeStep: symbolInfo.volumeStep,
+            lotSize: symbolInfo.lotSize,
+            stepVolume: symbolInfo.stepVolume
           },
           accountName: accountName || 'default'
         });
@@ -499,13 +508,31 @@ const executeTradeForAccount = async (
         
         pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : getDecimalPrecision(finalEntryPrice);
         tickSize = symbolInfo.pipSize !== undefined ? symbolInfo.pipSize : undefined;
-        minOrderVolume = symbolInfo.minVolume !== undefined ? symbolInfo.minVolume : undefined;
-        maxOrderVolume = symbolInfo.maxVolume !== undefined ? symbolInfo.maxVolume : undefined;
-        volumeStep = symbolInfo.volumeStep !== undefined ? symbolInfo.volumeStep : undefined;
+        const rawLotSize = protobufLongToNumber(symbolInfo.lotSize);
+        if (rawLotSize == null || rawLotSize <= 0) {
+          logger.warn('Symbol missing or invalid lotSize', {
+            channel,
+            symbol,
+            accountName: accountName || 'default',
+            lotSize: symbolInfo.lotSize,
+            exchange: 'ctrader'
+          });
+          throw new Error(`Symbol ${symbol} lacks lotSize - cannot compute order quantities`);
+        }
+        lotSize = rawLotSize;
+        // cTrader min/max/step are in API units (cents); convert to lots for qty comparison
+        const rawMin = protobufLongToNumber(symbolInfo.minVolume);
+        const rawMax = protobufLongToNumber(symbolInfo.maxVolume);
+        const rawStep = protobufLongToNumber(symbolInfo.volumeStep) ?? protobufLongToNumber(symbolInfo.stepVolume);
+        minOrderVolume = rawMin != null && rawMin >= 0 ? rawMin / lotSize : undefined;
+        maxOrderVolume = rawMax != null && rawMax > 0 ? rawMax / lotSize : undefined;
+        volumeStep = rawStep != null && rawStep > 0 ? rawStep / lotSize : undefined;
       } catch (error) {
         logger.warn('Failed to get symbol info, using defaults', {
+          channel,
           symbol,
           accountName: accountName || 'default',
+          exchange: 'ctrader',
           ...serializeError(error)
         });
         pricePrecision = getDecimalPrecision(finalEntryPrice);
@@ -849,7 +876,20 @@ const executeTradeForAccount = async (
     // Check if current market price is already past stop loss before placing order (Gap #6)
     if (roundedStopLoss && roundedStopLoss > 0 && !isSimulation && ctraderClient) {
       try {
+        logger.info('Fetching current price for stop loss validation', {
+          channel,
+          symbol,
+          accountName: accountName || 'default',
+          exchange: 'ctrader'
+        });
         const currentPrice = await ctraderClient.getCurrentPrice(symbol);
+        logger.info('Current price received', {
+          channel,
+          symbol,
+          currentPrice,
+          accountName: accountName || 'default',
+          exchange: 'ctrader'
+        });
         if (currentPrice !== null && currentPrice > 0) {
           let priceAlreadyPastStopLoss = false;
           let reason = '';
@@ -901,9 +941,11 @@ const executeTradeForAccount = async (
         }
         // Otherwise, log warning but continue (don't block order placement if price check fails)
         logger.warn('Failed to check current price against stop loss, proceeding with order placement', {
+          channel,
           symbol,
           accountName: accountName || 'default',
           stopLoss: roundedStopLoss,
+          exchange: 'ctrader',
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -930,6 +972,15 @@ const executeTradeForAccount = async (
       });
     } else if (ctraderClient) {
       try {
+        logger.info('Placing cTrader limit order', {
+          channel,
+          symbol,
+          volume: qty,
+          tradeSide,
+          price: roundedEntryPrice,
+          accountName: accountName || 'default',
+          exchange: 'ctrader'
+        });
         // Place limit order at entry price
         orderId = await ctraderClient.placeLimitOrder({
           symbol,
@@ -951,6 +1002,7 @@ const executeTradeForAccount = async (
           channel,
           symbol,
           accountName: accountName || 'default',
+          exchange: 'ctrader',
           ...serializeError(error)
         });
         throw error;
@@ -1313,19 +1365,47 @@ const executeTradeForAccount = async (
               channel,
               symbol,
               accountName: accountName || 'default',
+              tradeId,
+              positionId,
+              orderId,
               qty: actualPositionQty || qty,
               numTPs: order.takeProfits.length,
-              minOrderVolume
+              minOrderVolume,
+              volumeStep,
+              exchange: 'ctrader'
             });
             // Don't throw error - let the monitor handle TP placement later
             logger.warn('TP orders will be placed by monitor after entry fills', {
               channel,
               symbol,
               accountName: accountName || 'default',
-              orderId
+              tradeId,
+              positionId,
+              orderId,
+              exchange: 'ctrader'
             });
           } else {
             // Place individual TP orders using placeLimitOrder
+            // cTrader placeLimitOrder expects volume in lots. When actualPositionQty is used (from
+            // getOpenPositions), quantities are in API units (cents). When qty is used, quantities are in lots.
+            const quantityInApiUnits = actualPositionQty !== undefined;
+            if (quantityInApiUnits && (lotSize == null || lotSize <= 0)) {
+              logger.warn('Skipping TP placement: lotSize required for API unit conversion', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                lotSize,
+                actualPositionQty,
+                positionId,
+                tradeId,
+                orderId,
+                validTPCount: validTPOrders.length,
+                exchange: 'ctrader'
+              });
+            } else {
+            const volumeLotsForPlaceLimit = (tpOrd: { quantity: number }) =>
+              quantityInApiUnits ? tpOrd.quantity / lotSize! : tpOrd.quantity;
+
             const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
             
             for (const tpOrder of validTPOrders) {
@@ -1334,10 +1414,11 @@ const executeTradeForAccount = async (
                 // For a Long position (BUY side), TP is SELL
                 // For a Short position (SELL side), TP is BUY
                 const tpSide = positionSide === 'BUY' ? 'SELL' : 'BUY';
+                const volumeLots = volumeLotsForPlaceLimit(tpOrder);
                 
                 const tpOrderId = await ctraderClient.placeLimitOrder({
                   symbol,
-                  volume: tpOrder.quantity,
+                  volume: volumeLots,
                   tradeSide: tpSide,
                   price: tpOrder.price
                 });
@@ -1346,7 +1427,7 @@ const executeTradeForAccount = async (
                   index: tpOrder.index,
                   orderId: tpOrderId,
                   price: tpOrder.price,
-                  quantity: tpOrder.quantity
+                  quantity: volumeLots
                 });
                 
                 logger.info('TP order placed', {
@@ -1356,7 +1437,10 @@ const executeTradeForAccount = async (
                   tpIndex: tpOrder.index,
                   tpOrderId,
                   tpPrice: tpOrder.price,
-                  tpQuantity: tpOrder.quantity
+                  tpQuantity: tpOrder.quantity,
+                  tradeId,
+                  positionId,
+                  exchange: 'ctrader'
                 });
               } catch (error) {
                 logger.error('Failed to place TP order', {
@@ -1365,6 +1449,9 @@ const executeTradeForAccount = async (
                   accountName: accountName || 'default',
                   tpIndex: tpOrder.index,
                   tpPrice: tpOrder.price,
+                  tradeId,
+                  positionId,
+                  exchange: 'ctrader',
                   ...serializeError(error)
                 });
                 // Continue placing other TPs even if one fails
@@ -1393,6 +1480,7 @@ const executeTradeForAccount = async (
                   });
                 }
               }
+            }
             }
           }
         }
@@ -1539,12 +1627,17 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
       }
     });
 
+    const failedCount = results.filter(r => r.status === 'rejected').length;
     logger.info('Trade initiation completed for all accounts', {
       channel,
       totalAccounts: accountsToUse.length,
       successful: results.filter(r => r.status === 'fulfilled').length,
-      failed: results.filter(r => r.status === 'rejected').length
+      failed: failedCount
     });
+    if (failedCount > 0) {
+      const firstFailure = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
+      throw firstFailure.reason;
+    }
   } catch (error) {
     logger.error('Error in ctraderInitiator', {
       channel,

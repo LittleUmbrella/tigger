@@ -173,7 +173,9 @@ export class CTraderClient {
   }
 
   /**
-   * Get symbol information
+   * Get symbol information including full volume fields (lotSize, stepVolume, minVolume, maxVolume)
+   * Uses ProtoOASymbolsListReq to resolve symbol name -> symbolId, then ProtoOASymbolByIdReq
+   * for the full ProtoOASymbol (LightSymbol lacks volume fields).
    */
   async getSymbolInfo(symbol: string): Promise<any> {
     if (!this.authenticated || !this.connection) {
@@ -185,28 +187,49 @@ export class CTraderClient {
     }
 
     try {
-      // First get the symbol ID from symbol name
       const accountIdNum = parseInt(this.config.accountId, 10);
       if (isNaN(accountIdNum)) {
         throw new Error(`Invalid account ID: ${this.config.accountId}`);
       }
 
+      // Step 1: Get symbol ID from symbol name (ProtoOASymbolsListReq returns ProtoOALightSymbol)
       const symbolListResponse = await this.connection.sendCommand('ProtoOASymbolsListReq', {
         ctidTraderAccountId: accountIdNum
       });
 
-      // Find the symbol in the list
       const symbols = symbolListResponse?.symbol || [];
-      const symbolInfo = symbols.find((s: any) => s.symbolName === symbol);
-      
-      if (!symbolInfo) {
+      const lightSymbol = symbols.find((s: any) => s.symbolName === symbol);
+
+      if (!lightSymbol) {
         throw new Error(`Symbol ${symbol} not found`);
       }
 
-      return symbolInfo;
+      const symbolId = typeof lightSymbol.symbolId === 'object' && lightSymbol.symbolId?.low !== undefined
+        ? lightSymbol.symbolId.low
+        : lightSymbol.symbolId;
+
+      // Step 2: Fetch full ProtoOASymbol (includes lotSize, stepVolume, minVolume, maxVolume)
+      const fullSymbolResponse = await this.connection.sendCommand('ProtoOASymbolByIdReq', {
+        ctidTraderAccountId: accountIdNum,
+        symbolId: [symbolId]
+      });
+
+      const fullSymbols = fullSymbolResponse?.symbol || [];
+      const fullSymbol = fullSymbols.find((s: any) => {
+        const sid = typeof s.symbolId === 'object' && s.symbolId?.low !== undefined ? s.symbolId.low : s.symbolId;
+        return sid === symbolId;
+      });
+
+      // Merge: prefer full symbol, fall back to light for name/enabled etc
+      const result = fullSymbol
+        ? { ...lightSymbol, ...fullSymbol, symbolName: symbol }
+        : { ...lightSymbol, symbolName: symbol };
+      return result;
     } catch (error) {
       logger.error('Failed to get symbol info', {
         symbol,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -227,13 +250,22 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      
+      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
+        ? symbolInfo.lotSize.low
+        : symbolInfo.lotSize ?? 100;
+      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
+        ? symbolInfo.stepVolume.low
+        : symbolInfo.stepVolume ?? lotSize;
+      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+        ? symbolInfo.symbolId.low
+        : symbolInfo.symbolId;
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-        symbolId: symbolInfo.symbolId,
+        symbolId,
         orderType: 'MARKET',
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
-        volume: params.volume
+        volume: volumeInApiUnits
       });
 
       const orderId = response?.orderId || response?.order?.orderId;
@@ -251,7 +283,11 @@ export class CTraderClient {
       return orderId.toString();
     } catch (error) {
       logger.error('Failed to place market order', {
-        params,
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -273,14 +309,35 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      
+      // cTrader volume is in 0.01 of a unit. lotSize from symbolInfo is in cents; volume = qty_lots * lotSize
+      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
+        ? symbolInfo.lotSize.low
+        : symbolInfo.lotSize ?? 100;
+      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
+        ? symbolInfo.stepVolume.low
+        : symbolInfo.stepVolume ?? lotSize;
+      // Round down to multiple of stepVolume (e.g. 8.33 lots with step 1.0 → 8 lots)
+      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+        ? symbolInfo.symbolId.low
+        : symbolInfo.symbolId;
+      logger.info('Placing limit order with volume conversion', {
+        symbol: params.symbol,
+        qtyLots: params.volume,
+        lotSize,
+        stepVolume,
+        volumeInApiUnits,
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
+      });
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-        symbolId: symbolInfo.symbolId,
+        symbolId,
         orderType: 'LIMIT',
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
-        volume: params.volume,
-        limitPrice: params.price
+        volume: volumeInApiUnits,
+        limitPrice: params.price,
+        timeInForce: 'GOOD_TILL_CANCEL' // Keep order on book until filled or manually cancelled (default may vary by broker)
       });
 
       const orderId = response?.orderId || response?.order?.orderId;
@@ -293,13 +350,20 @@ export class CTraderClient {
         symbol: params.symbol,
         tradeSide: params.tradeSide,
         volume: params.volume,
-        price: params.price
+        price: params.price,
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
       });
 
       return orderId.toString();
     } catch (error) {
       logger.error('Failed to place limit order', {
-        params,
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        price: params.price,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -307,7 +371,7 @@ export class CTraderClient {
   }
 
   /**
-   * Get open positions
+   * Get open positions (uses ProtoOAReconcileReq; positions have tradeData.symbolId, we enrich with symbolName)
    */
   async getOpenPositions(): Promise<any[]> {
     if (!this.authenticated || !this.connection) {
@@ -315,13 +379,51 @@ export class CTraderClient {
     }
 
     try {
-      const response = await this.connection.sendCommand('ProtoOAGetPositionsReq', {
+      const response = await this.connection.sendCommand('ProtoOAReconcileReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10)
       });
 
-      return response?.position || [];
+      const positions = response?.position || [];
+      if (positions.length === 0) return positions;
+
+      // Build symbolId -> symbolName map (ProtoOAPosition has tradeData.symbolId, initiator matches by symbolName)
+      const symbolList = await this.connection.sendCommand('ProtoOASymbolsListReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
+      });
+      const symbols = symbolList?.symbol || [];
+      const symbolIdToName = new Map<number, string>();
+      for (const s of symbols) {
+        const id = typeof s.symbolId === 'object' && s.symbolId?.low != null ? s.symbolId.low : s.symbolId;
+        if (s.symbolName != null) symbolIdToName.set(id, s.symbolName);
+      }
+
+      return positions.map((p: any) => {
+        const symbolId = p.tradeData?.symbolId;
+        const id = typeof symbolId === 'object' && symbolId?.low != null ? symbolId.low : symbolId;
+        const symbolName = id != null ? symbolIdToName.get(id) : undefined;
+        const volume = p.tradeData?.volume;
+        const vol = typeof volume === 'object' && volume?.low != null ? volume.low : volume;
+        const tradeSide = p.tradeData?.tradeSide;
+        const side = typeof tradeSide === 'number' ? ['BUY', 'SELL'][tradeSide] ?? tradeSide : tradeSide;
+        return {
+          ...p,
+          symbolName: symbolName ?? p.symbolName,
+          symbol: symbolName ?? p.symbol,
+          volume: vol ?? p.volume,
+          quantity: vol ?? p.quantity,
+          tradeSide: side ?? p.tradeSide,
+          side: side ?? p.side,
+          positionId: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+          id: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+          stopLoss: p.stopLoss,
+          avgPrice: p.price ?? p.avgPrice,
+          averagePrice: p.price ?? p.averagePrice
+        };
+      });
     } catch (error) {
       logger.error('Failed to get open positions', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -329,7 +431,7 @@ export class CTraderClient {
   }
 
   /**
-   * Get open orders
+   * Get open orders (uses ProtoOAReconcileReq; enriches orderId for monitor matching)
    */
   async getOpenOrders(): Promise<any[]> {
     if (!this.authenticated || !this.connection) {
@@ -337,13 +439,19 @@ export class CTraderClient {
     }
 
     try {
-      const response = await this.connection.sendCommand('ProtoOAGetOrdersReq', {
+      const response = await this.connection.sendCommand('ProtoOAReconcileReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10)
       });
 
-      return response?.order || [];
+      const orders = response?.order || [];
+      return orders.map((o: any) => {
+        const orderId = typeof o.orderId === 'object' && o.orderId?.low != null ? o.orderId.low : o.orderId;
+        return { ...o, orderId: orderId != null ? String(orderId) : o.orderId, id: orderId ?? o.id };
+      });
     } catch (error) {
       logger.error('Failed to get open orders', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -364,10 +472,16 @@ export class CTraderClient {
         orderId: parseInt(orderId, 10)
       });
 
-      logger.info('Order cancelled on cTrader', { orderId });
+      logger.info('Order cancelled on cTrader', {
+        orderId,
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
+      });
     } catch (error) {
       logger.error('Failed to cancel order', {
         orderId,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -387,7 +501,7 @@ export class CTraderClient {
     }
 
     try {
-      await this.connection.sendCommand('ProtoOAUpdateStopLossTakeProfitReq', {
+      await this.connection.sendCommand('ProtoOAAmendPositionSLTPReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         positionId: parseInt(params.positionId, 10),
         ...(params.stopLoss !== undefined && { stopLoss: params.stopLoss }),
@@ -397,7 +511,11 @@ export class CTraderClient {
       logger.info('Position modified on cTrader', params);
     } catch (error) {
       logger.error('Failed to modify position', {
-        params,
+        positionId: params.positionId,
+        stopLoss: params.stopLoss,
+        takeProfit: params.takeProfit,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;
@@ -418,10 +536,16 @@ export class CTraderClient {
         positionId: parseInt(positionId, 10)
       });
 
-      logger.info('Position closed on cTrader', { positionId });
+      logger.info('Position closed on cTrader', {
+        positionId,
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
+      });
     } catch (error) {
       logger.error('Failed to close position', {
         positionId,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });
       throw error;

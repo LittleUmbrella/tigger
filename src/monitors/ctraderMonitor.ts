@@ -5,6 +5,7 @@ import dayjs from 'dayjs';
 import { CTraderClient } from '../clients/ctraderClient.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
+import { protobufLongToNumber } from '../utils/protobufLong.js';
 import {
   getIsLong,
   checkTradeExpired,
@@ -56,7 +57,10 @@ const getCurrentPrice = async (
     if (isSimulation && priceProvider) {
       const price = priceProvider.getCurrentPrice(tradingPair);
       if (price === null) {
-        logger.warn('No historical price data available', { tradingPair });
+        logger.warn('No historical price data available', {
+          tradingPair,
+          exchange: 'ctrader'
+        });
       }
       return price;
     } else if (ctraderClient) {
@@ -66,7 +70,8 @@ const getCurrentPrice = async (
         logger.debug('Got current price from cTrader', {
           tradingPair,
           symbol,
-          price
+          price,
+          exchange: 'ctrader'
         });
         return price;
       }
@@ -75,6 +80,7 @@ const getCurrentPrice = async (
   } catch (error) {
     logger.error('Error getting current price from cTrader', {
       tradingPair,
+      exchange: 'ctrader',
       error: error instanceof Error ? error.message : String(error)
     });
     return null;
@@ -110,10 +116,11 @@ const checkEntryFilled = async (
     } else if (ctraderClient) {
       const symbol = normalizeCTraderSymbol(trade.trading_pair);
       
-      logger.debug('Checking cTrader positions for entry fill', {
+      logger.info('Checking cTrader entry fill status', {
         tradeId: trade.id,
         symbol,
         orderId: trade.order_id,
+        channel: trade.channel,
         exchange: 'ctrader'
       });
       
@@ -125,12 +132,12 @@ const checkEntryFilled = async (
       for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
           positions = await ctraderClient.getOpenPositions();
-          logger.debug('cTrader position API response', {
+          logger.info('cTrader positions received', {
             tradeId: trade.id,
             symbol,
             positionsCount: positions.length,
-            attempt,
-            maxRetries
+            channel: trade.channel,
+            exchange: 'ctrader'
           });
           
           if (positions.length >= 0) {
@@ -182,19 +189,21 @@ const checkEntryFilled = async (
       
       // Strategy 2: Check open orders by orderId
       if (trade.order_id) {
-        logger.debug('Order ID available, checking open orders', {
+        logger.info('Checking cTrader open orders', {
           tradeId: trade.id,
           symbol,
           orderId: trade.order_id,
+          channel: trade.channel,
           exchange: 'ctrader'
         });
         
         try {
           const openOrders = await ctraderClient.getOpenOrders();
-          logger.debug('Open orders retrieved', {
+          logger.info('cTrader open orders received', {
             tradeId: trade.id,
             symbol,
             openOrdersCount: openOrders.length,
+            channel: trade.channel,
             exchange: 'ctrader'
           });
           
@@ -386,6 +395,14 @@ const checkPositionClosed = async (
     } else if (ctraderClient && trade.position_id) {
       const symbol = normalizeCTraderSymbol(trade.trading_pair);
       
+      logger.info('Checking if cTrader position closed', {
+        tradeId: trade.id,
+        symbol,
+        positionId: trade.position_id,
+        channel: trade.channel,
+        exchange: 'ctrader'
+      });
+      
       // Get positions with retry logic (Gap #4)
       let positions: any[] = [];
       const maxRetries = 3;
@@ -395,13 +412,12 @@ const checkPositionClosed = async (
         try {
           positions = await ctraderClient.getOpenPositions();
           
-          logger.debug('Position API response received for close check', {
+          logger.info('cTrader positions received for close check', {
             tradeId: trade.id,
             symbol,
             positionId: trade.position_id,
             positionsCount: positions.length,
-            attempt,
-            maxRetries,
+            channel: trade.channel,
             exchange: 'ctrader'
           });
           
@@ -750,29 +766,30 @@ const placeTakeProfitOrders = async (
 
     const symbol = normalizeCTraderSymbol(trade.trading_pair);
     
+    logger.info('Placing cTrader take profit orders', {
+      tradeId: trade.id,
+      symbol,
+      tpCount: takeProfits.length,
+      takeProfits,
+      channel: trade.channel,
+      exchange: 'ctrader'
+    });
+    
     // Get position info with retry logic (Gap #4)
     let position: any = null;
     let positionResponse: any[] = [];
     const maxRetries = 3;
     const retryDelay = 1000; // 1 second
     
-    logger.debug('Getting position info for TP order placement', {
-      tradeId: trade.id,
-      symbol,
-      maxRetries,
-      exchange: 'ctrader'
-    });
-    
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         positionResponse = await ctraderClient.getOpenPositions();
         
-        logger.debug('Position API response received', {
+        logger.info('cTrader positions received for TP placement', {
           tradeId: trade.id,
           symbol,
           positionsCount: positionResponse.length,
-          attempt,
-          maxRetries,
+          channel: trade.channel,
           exchange: 'ctrader'
         });
 
@@ -893,19 +910,21 @@ const placeTakeProfitOrders = async (
       logger.warn('Failed to get symbol info, using defaults', {
         tradeId: trade.id,
         symbol,
-        error: error instanceof Error ? error.message : String(error),
-        exchange: 'ctrader'
+        channel: trade.channel,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error)
       });
       symbolInfo = {};
     }
 
-    // Extract precision from symbol info
-    // cTrader uses 'digits' for price precision and 'volume' or 'lotSize' for quantity precision
+    // Extract precision and volume limits from symbol info
+    // cTrader: ProtoOASymbol returns int64 as Long objects; normalize to number
     const pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : 5;
     const quantityPrecision = symbolInfo.volumePrecision !== undefined ? symbolInfo.volumePrecision : 2;
-    const minOrderVolume = symbolInfo.minVolume || symbolInfo.minLotSize || 0;
-    const maxOrderVolume = symbolInfo.maxVolume || symbolInfo.maxLotSize || undefined;
-    const volumeStep = symbolInfo.volumeStep || symbolInfo.lotSize || Math.pow(10, -quantityPrecision);
+    const lotSize = protobufLongToNumber(symbolInfo.lotSize) ?? 100;
+    const minOrderVolume = protobufLongToNumber(symbolInfo.minVolume) ?? protobufLongToNumber(symbolInfo.minLotSize) ?? 0;
+    const maxOrderVolume = protobufLongToNumber(symbolInfo.maxVolume) ?? protobufLongToNumber(symbolInfo.maxLotSize);
+    const volumeStep = protobufLongToNumber(symbolInfo.volumeStep) ?? protobufLongToNumber(symbolInfo.stepVolume) ?? protobufLongToNumber(symbolInfo.lotSize) ?? Math.pow(10, -quantityPrecision);
 
     logger.debug('Precision and limits extracted', {
       tradeId: trade.id,
@@ -1035,9 +1054,11 @@ const placeTakeProfitOrders = async (
           });
         } else {
           // Multiple TPs - place limit orders
+          // cTrader placeLimitOrder expects volume in lots; tpOrder.quantity is in API units (cents)
+          const volumeLots = tpVolume / lotSize;
           const orderId = await ctraderClient.placeLimitOrder({
             symbol,
-            volume: tpVolume,
+            volume: volumeLots,
             tradeSide: tpSide,
             price: tpPrice
           });
@@ -1046,20 +1067,21 @@ const placeTakeProfitOrders = async (
             tradeId: trade.id,
             tpIndex: tpOrder.index,
             tpPrice,
-            tpVolume,
+            tpVolumeApiUnits: tpVolume,
+            volumeLots,
             tpSide,
             orderId,
             positionId: positionId?.toString(),
             exchange: 'ctrader'
           });
           
-          // Store TP order in database
+          // Store TP order in database (quantity in lots for consistency with other exchanges)
           await db.insertOrder({
             trade_id: trade.id,
             order_type: 'take_profit',
             order_id: orderId,
             price: tpPrice,
-            quantity: tpVolume,
+            quantity: volumeLots,
             tp_index: tpOrder.index,
             status: 'pending'
           });
@@ -1067,19 +1089,24 @@ const placeTakeProfitOrders = async (
       } catch (error) {
         logger.error('Error placing cTrader take profit order', {
           tradeId: trade.id,
+          symbol,
+          channel: trade.channel,
           tpIndex: tpOrder.index,
           tpPrice,
           tpVolume,
-          error: error instanceof Error ? error.message : String(error),
-          exchange: 'ctrader'
+          positionId: positionId?.toString(),
+          exchange: 'ctrader',
+          error: error instanceof Error ? error.message : String(error)
         });
       }
     }
   } catch (error) {
     logger.error('Error placing cTrader take profit orders', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error),
-      exchange: 'ctrader'
+      symbol: normalizeCTraderSymbol(trade.trading_pair),
+      channel: trade.channel,
+      exchange: 'ctrader',
+      error: error instanceof Error ? error.message : String(error)
     });
   }
 };
@@ -1300,14 +1327,13 @@ const monitorTrade = async (
   useLimitOrderForBreakeven: boolean = true
 ): Promise<void> => {
   try {
-    // Log trade status at start for debugging
-    logger.debug('Monitoring cTrader trade', {
+    logger.info('Monitoring cTrader trade', {
       tradeId: trade.id,
       status: trade.status,
       symbol: trade.trading_pair,
       orderId: trade.order_id,
       positionId: trade.position_id,
-      entryFilledAt: trade.entry_filled_at,
+      channel: trade.channel,
       exchange: 'ctrader'
     });
 
