@@ -23,26 +23,7 @@ import {
   cancelTrade,
   sleep
 } from './shared.js';
-
-/**
- * Normalize trading pair symbol for cTrader
- * cTrader uses format like "BTCUSD" or "EURUSD"
- */
-const normalizeCTraderSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  
-  // cTrader typically uses formats like BTCUSD, EURUSD, etc.
-  // If it doesn't end with USD, add it
-  if (!normalized.endsWith('USD')) {
-    const commonQuotes = ['USDT', 'USDC', 'EUR', 'GBP', 'JPY'];
-    const hasQuote = commonQuotes.some(quote => normalized.endsWith(quote));
-    if (!hasQuote) {
-      normalized = normalized + 'USD';
-    }
-  }
-  
-  return normalized;
-};
+import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
 /**
  * Get current price from cTrader
