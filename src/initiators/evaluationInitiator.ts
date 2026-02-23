@@ -7,7 +7,7 @@
 
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
-import { validateSymbolWithPriceProvider, getSymbolInfo } from './symbolValidator.js';
+import { validateSymbolWithPriceProvider, getSymbolInfo, getCTraderSymbolInfo } from './symbolValidator.js';
 import { getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import dayjs from 'dayjs';
@@ -39,14 +39,24 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     signalType: order.signalType
   });
 
-  // Normalize trading pair to ensure it includes USDT
-  // Some parsers return just the symbol (e.g., "BTC") instead of "BTC/USDT" or "BTCUSDT"
+  // Normalize trading pair based on price provider (Bybit vs cTrader)
+  const isCTrader = typeof priceProvider?.getCTraderClient === 'function';
   let normalizedTradingPair = order.tradingPair.replace('/', '').toUpperCase();
-  if (!normalizedTradingPair.endsWith('USDT')) {
-    normalizedTradingPair = normalizedTradingPair + 'USDT';
+  let tradingPairForPriceProvider: string;
+
+  if (isCTrader) {
+    // cTrader: EURUSD, XAUUSD - forex/CFD symbols
+    if (!normalizedTradingPair.endsWith('USD')) {
+      normalizedTradingPair = normalizedTradingPair.replace(/USDT$|USDC$/, '') + 'USD';
+    }
+    tradingPairForPriceProvider = `${normalizedTradingPair.slice(0, -3)}/${normalizedTradingPair.slice(-3)}`;
+  } else {
+    // Bybit: crypto, ensure USDT
+    if (!normalizedTradingPair.endsWith('USDT') && !normalizedTradingPair.endsWith('USDC')) {
+      normalizedTradingPair = normalizedTradingPair + 'USDT';
+    }
+    tradingPairForPriceProvider = normalizedTradingPair.slice(0, -4) + '/' + normalizedTradingPair.slice(-4);
   }
-  // Convert back to format with slash for price provider (e.g., "BTC/USDT")
-  const tradingPairForPriceProvider = normalizedTradingPair.slice(0, -4) + '/' + normalizedTradingPair.slice(-4);
 
   // Validate symbol exists before creating trade
   if (priceProvider) {
@@ -118,16 +128,22 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   let pricePrecision: number | undefined = undefined;
   if (priceProvider) {
     try {
-      const bybitClient = priceProvider.getBybitClient();
-      if (bybitClient) {
-        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true); // Use cache in evaluation mode
+      const ctraderClient = priceProvider.getCTraderClient?.();
+      if (ctraderClient) {
+        const symbolInfo = await getCTraderSymbolInfo(ctraderClient, normalizedTradingPair);
         pricePrecision = symbolInfo?.pricePrecision;
+      } else {
+        const bybitClient = priceProvider.getBybitClient();
+        if (bybitClient) {
+          const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true);
+          pricePrecision = symbolInfo?.pricePrecision;
+        }
       }
     } catch (error) {
-      // Fallback to inferring from entry price
       pricePrecision = getDecimalPrecision(entryPrice);
     }
-  } else {
+  }
+  if (pricePrecision === undefined) {
     pricePrecision = getDecimalPrecision(entryPrice);
   }
 
@@ -197,7 +213,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
     risk_percentage: riskPercentage,
     quantity: qty,
-    exchange: 'bybit', // Keep as bybit for compatibility
+    exchange: isCTrader ? 'ctrader' : 'bybit',
     order_id: orderId,
     direction: order.signalType, // Store direction: 'long' or 'short'
     status: 'pending',

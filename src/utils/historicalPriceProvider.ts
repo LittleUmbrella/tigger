@@ -4,13 +4,6 @@ import { RestClientV5 } from 'bybit-api';
 import { RateLimiter, createBybitPublicRateLimiter } from './rateLimiter.js';
 import { getCachedResponse, setCachedResponse } from './bybitCache.js';
 
-interface PriceDataPoint {
-  timestamp: number;
-  price: number; // Close price (for backward compatibility and general price tracking)
-  high?: number; // High price of the candle (for TP/SL checks)
-  low?: number; // Low price of the candle (for TP/SL checks)
-}
-
 interface HistoricalPriceProviderState {
   priceCache: Map<string, PriceDataPoint[]>;
   inFlightRequests: Map<string, Promise<PriceDataPoint[]>>; // Track in-flight requests to prevent duplicate API calls
@@ -20,6 +13,14 @@ interface HistoricalPriceProviderState {
   bybitClient: RestClientV5;
   hasAuth: boolean;
   rateLimiter: RateLimiter;
+}
+
+/** Price data point (shared by Bybit and cTrader providers) */
+export interface PriceDataPoint {
+  timestamp: number;
+  price: number;
+  high?: number;
+  low?: number;
 }
 
 export interface HistoricalPriceProvider {
@@ -33,6 +34,8 @@ export interface HistoricalPriceProvider {
   hasData: (symbol: string) => boolean;
   getAvailableSymbols: () => string[];
   getBybitClient: () => RestClientV5 | null;
+  /** cTrader client for symbol info (when monitor type is ctrader) */
+  getCTraderClient?: () => import('../clients/ctraderClient.js').CTraderClient | null;
 }
 
 /**

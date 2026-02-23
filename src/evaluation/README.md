@@ -289,6 +289,33 @@ You can define custom prop firms in your configuration:
 }
 ```
 
+## cTrader (Forex/CFD) Evaluation
+
+To evaluate signals against Forex or CFD symbols (e.g., EURUSD, XAUUSD), use cTrader as the monitor type:
+
+```bash
+npm run evaluate evaluate -- -c your_channel -p your_parser --prop-firms hyrotrader --monitor-type ctrader
+```
+
+Or in config JSON:
+```json
+{
+  "evaluation": {
+    "monitor": { "type": "ctrader" }
+  }
+}
+```
+
+**Requirements:**
+- `CTRADER_ACCESS_TOKEN` and `CTRADER_ACCOUNT_ID` environment variables
+- Optional: `CTRADER_CLIENT_ID`, `CTRADER_CLIENT_SECRET`, `CTRADER_REFRESH_TOKEN`
+
+cTrader evaluation fetches historical data via the cTrader Open API:
+- **M1 candles** (default): `ProtoOAGetTrendbarsReq` – 1-minute OHLC
+- **Tick data** (optional): `ProtoOAGetTickDataReq` – individual price ticks (most precise; use `--ctrader-use-tick-data` or `monitor.ctraderUseTickData: true`)
+
+Symbol format: EURUSD, XAUUSD, GBPUSD (no slash).
+
 ## Database
 
 By default, evaluation uses a separate database (`data/evaluation.db` for SQLite) to avoid polluting the running bot's database. You can specify a different database path or use PostgreSQL by using the `--db-type` and `--db-path` options available on all commands (see command-specific documentation above).

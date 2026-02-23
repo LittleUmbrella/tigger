@@ -13,6 +13,7 @@ import { schoolParser } from './schoolParser.js';
 import { bigParser } from './bigParser.js';
 import { goldScalpsParser } from './goldScalpsParser.js';
 import { starFormatParser } from './starFormatParser.js';
+import { ctraderGoldParser } from './ctraderGoldParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -25,6 +26,7 @@ registerParser('school', schoolParser);
 registerParser('big', bigParser);
 registerParser('gold_scalps', goldScalpsParser);
 registerParser('star_format', starFormatParser);
+registerParser('ctrader_gold', ctraderGoldParser);
 
 /**
  * Parse a message using the specified parser name

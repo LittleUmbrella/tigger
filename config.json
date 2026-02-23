@@ -223,7 +223,8 @@
       "propFirms": ["hyrotrader"],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "slAdjustmentTolerancePercent": 0.03
     },
     {
       "channel": "3469900302",
@@ -239,7 +240,8 @@
       "propFirms": ["hyrotrader"],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "slAdjustmentTolerancePercent": 0.03
     },
     {
       "channel": "2385521106",
@@ -271,7 +273,8 @@
       "propFirms": ["hyrotrader"],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "slAdjustmentTolerancePercent": 0.03
     }
   ],
   "database": {
