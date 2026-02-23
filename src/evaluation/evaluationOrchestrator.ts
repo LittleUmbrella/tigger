@@ -7,6 +7,7 @@
 
 import { DatabaseManager, Trade, Message } from '../db/schema.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
+import { createCTraderHistoricalPriceProvider } from '../utils/ctraderHistoricalPriceProvider.js';
 import { parseMessage } from '../parsers/signalParser.js';
 import { createPropFirmEvaluator, PropFirmEvaluator, EvaluationResult } from './propFirmEvaluator.js';
 import { PropFirmRule, getPropFirmRule, createCustomPropFirmRule } from './propFirmRules.js';
@@ -18,7 +19,7 @@ import { EvaluationResultRecord } from '../db/schema.js';
 import { createMockExchange } from './mockExchange.js';
 import { createBybitPublicRateLimiter } from '../utils/rateLimiter.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount } from '../utils/positionSizing.js';
-import { getSymbolInfo } from '../initiators/symbolValidator.js';
+import { getSymbolInfo, getCTraderSymbolInfo } from '../initiators/symbolValidator.js';
 import dayjs from 'dayjs';
 
 export interface EvaluationRunResult {
@@ -61,22 +62,55 @@ export async function runEvaluation(
     startDate = new Date().toISOString();
   }
 
-  const apiKey = process.env.BYBIT_API_KEY;
-  const apiSecret = process.env.BYBIT_API_SECRET;
-  const sharedRateLimiter = createBybitPublicRateLimiter();
+  const monitorType = monitorConfig.type || 'bybit';
+  let priceProvider: HistoricalPriceProvider;
 
-  const priceProvider = createHistoricalPriceProvider(
-    startDate,
-    config.speedMultiplier || 0, // Use max speed by default
-    apiKey,
-    apiSecret,
-    sharedRateLimiter
-  );
-
-  logger.info('Historical price provider initialized', {
-    startDate,
-    speedMultiplier: config.speedMultiplier || 0
-  });
+  if (monitorType === 'ctrader') {
+    const clientId = process.env.CTRADER_CLIENT_ID;
+    const clientSecret = process.env.CTRADER_CLIENT_SECRET;
+    const accessToken = process.env.CTRADER_ACCESS_TOKEN;
+    const refreshToken = process.env.CTRADER_REFRESH_TOKEN;
+    const accountId = process.env.CTRADER_ACCOUNT_ID;
+    if (!accessToken || !accountId) {
+      throw new Error(
+        'cTrader evaluation requires CTRADER_ACCESS_TOKEN and CTRADER_ACCOUNT_ID environment variables'
+      );
+    }
+    priceProvider = createCTraderHistoricalPriceProvider(
+      startDate,
+      config.speedMultiplier || 0,
+      {
+        clientId: clientId || '',
+        clientSecret: clientSecret || '',
+        accessToken,
+        refreshToken,
+        accountId,
+        environment: (monitorConfig as any).demo ? 'demo' : 'live',
+        symbolMap: monitorConfig.ctraderSymbolMap,
+      },
+      { useTickData: monitorConfig.ctraderUseTickData }
+    );
+    logger.info('cTrader historical price provider initialized', {
+      startDate,
+      speedMultiplier: config.speedMultiplier || 0,
+      useTickData: monitorConfig.ctraderUseTickData,
+    });
+  } else {
+    const apiKey = process.env.BYBIT_API_KEY;
+    const apiSecret = process.env.BYBIT_API_SECRET;
+    const sharedRateLimiter = createBybitPublicRateLimiter();
+    priceProvider = createHistoricalPriceProvider(
+      startDate,
+      config.speedMultiplier || 0,
+      apiKey,
+      apiSecret,
+      sharedRateLimiter
+    );
+    logger.info('Bybit historical price provider initialized', {
+      startDate,
+      speedMultiplier: config.speedMultiplier || 0,
+    });
+  }
 
   // Get all messages for this channel (including parsed ones for evaluation)
   // In evaluation mode, we want to process all messages, not just unparsed ones
@@ -136,9 +170,11 @@ export async function runEvaluation(
     undefined, // accounts
     config.startDate ? startDate : undefined, // startDate filter
     undefined, // channelBaseLeverage (not used in evaluation mode, use initiatorConfig.baseLeverage instead)
+    undefined, // maxStalenessMinutes (evaluation processes all messages by date filter)
     undefined, // accountFilters (not used in evaluation mode)
-    undefined, // propFirms
-    undefined // tradeObfuscation
+    undefined, // propFirms (evaluation validates prop firms after simulation)
+    config.tradeObfuscation,
+    config.slAdjustmentTolerancePercent
   );
 
   // Get all trades for this channel that need simulation
@@ -537,16 +573,23 @@ async function recalculateQuantitiesHistorically(
       baseLeverage
     );
 
-    // Get decimal precision
+    // Get decimal precision from exchange symbol info
     let decimalPrecision: number | undefined;
     if (priceProvider) {
-      const bybitClient = priceProvider.getBybitClient();
-      if (bybitClient) {
-        const normalizedTradingPair = trade.trading_pair.replace('/', '').toUpperCase();
-        // Use cache in evaluation mode (recalculateQuantitiesHistorically is only called during evaluation)
-        const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true);
+      const normalizedTradingPair = trade.trading_pair.replace('/', '').toUpperCase();
+      const ctraderClient = priceProvider.getCTraderClient?.();
+      if (ctraderClient) {
+        const symbolInfo = await getCTraderSymbolInfo(ctraderClient, normalizedTradingPair);
         if (symbolInfo?.qtyPrecision !== undefined) {
           decimalPrecision = symbolInfo.qtyPrecision;
+        }
+      } else {
+        const bybitClient = priceProvider.getBybitClient();
+        if (bybitClient) {
+          const symbolInfo = await getSymbolInfo(bybitClient, normalizedTradingPair, true);
+          if (symbolInfo?.qtyPrecision !== undefined) {
+            decimalPrecision = symbolInfo.qtyPrecision;
+          }
         }
       }
     }

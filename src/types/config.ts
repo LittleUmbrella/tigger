@@ -107,6 +107,10 @@ export interface MonitorConfig {
   entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
   useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
+  /** cTrader only: use tick data instead of M1 candles for evaluation (more precise, more API calls) */
+  ctraderUseTickData?: boolean;
+  /** cTrader only: map canonical symbols to broker-specific names (e.g. {"XAUUSD": "GOLD"} if broker uses GOLD) */
+  ctraderSymbolMap?: Record<string, string>;
 }
 
 export interface AccountFilterRule {
@@ -154,6 +158,8 @@ export interface ChannelSetConfig {
   useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection
+  /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */
+  slAdjustmentTolerancePercent?: number;
 }
 
 export interface SimulationConfig {
@@ -217,4 +223,6 @@ export interface EvaluationConfig {
   startDate?: string; // ISO date string - when to start evaluation (optional, uses earliest message if not provided)
   speedMultiplier?: number; // How fast to play back (0 or Infinity = maximum speed, no delays)
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
+  tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp (same as channel config)
+  slAdjustmentTolerancePercent?: number; // When price past SL, max overshoot % to allow proportional adjustment (0 = reject)
 }

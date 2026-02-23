@@ -13,6 +13,8 @@ export interface CTraderClientConfig {
   environment?: 'demo' | 'live';
   host?: string;
   port?: number;
+  /** Map canonical symbol names to broker-specific names (e.g. {"XAUUSD": "GOLD"}) */
+  symbolMap?: Record<string, string>;
 }
 
 /**
@@ -72,6 +74,9 @@ export class CTraderClient {
   async authenticate(): Promise<void> {
     if (!this.connected || !this.connection) {
       throw new Error('Not connected to cTrader OpenAPI');
+    }
+    if (this.authenticated) {
+      return;
     }
 
     try {
@@ -173,9 +178,211 @@ export class CTraderClient {
   }
 
   /**
+   * Get historical OHLC trendbars for a symbol (for evaluation/backtesting)
+   * Uses ProtoOAGetTrendbarsReq. Requires account authentication.
+   * @param symbol - Symbol name (e.g., EURUSD, XAUUSD)
+   * @param fromTimestamp - Start time in milliseconds
+   * @param toTimestamp - End time in milliseconds
+   * @param period - Bar period (M1, M5, etc.). Default M1 for evaluation
+   */
+  async getTrendbars(params: {
+    symbol: string;
+    fromTimestamp: number;
+    toTimestamp: number;
+    period?: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1';
+  }): Promise<Array<{ timestamp: number; price: number; high?: number; low?: number }>> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get trendbars');
+    }
+
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) {
+      throw new Error(`Invalid account ID: ${this.config.accountId}`);
+    }
+
+    const symbolInfo = await this.getSymbolInfo(params.symbol);
+    const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+      ? symbolInfo.symbolId.low
+      : symbolInfo.symbolId;
+
+    const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+    const digits = symbolInfo.digits ?? 5;
+    const scale = Math.pow(10, digits);
+
+    const periodMap: Record<string, number> = {
+      M1: 1, M5: 5, M15: 7, M30: 8, H1: 9, H4: 10, D1: 12
+    };
+    const periodNum = periodMap[params.period ?? 'M1'] ?? 1;
+
+    const result: Array<{ timestamp: number; price: number; high?: number; low?: number }> = [];
+    const maxChunkMs = params.period === 'M1' || params.period === 'M5' ? 5 * 7 * 24 * 60 * 60 * 1000 : 35 * 7 * 24 * 60 * 60 * 1000;
+    let currentFrom = params.fromTimestamp;
+    const toTs = params.toTimestamp;
+
+    while (currentFrom < toTs) {
+      const currentTo = Math.min(currentFrom + maxChunkMs, toTs);
+
+      try {
+        const response = await this.connection.sendCommand('ProtoOAGetTrendbarsReq', {
+          ctidTraderAccountId: accountIdNum,
+          fromTimestamp: currentFrom,
+          toTimestamp: currentTo,
+          period: periodNum,
+          symbolId,
+          count: 2000
+        });
+
+        const trendbars = response?.trendbar || [];
+        for (const bar of trendbars) {
+          const lowRaw = protobufLongToNumber(bar.low) ?? 0;
+          const deltaOpen = protobufLongToNumber(bar.deltaOpen) ?? 0;
+          const deltaHigh = protobufLongToNumber(bar.deltaHigh) ?? 0;
+          const deltaClose = protobufLongToNumber(bar.deltaClose) ?? 0;
+
+          const low = lowRaw / scale;
+          const open = (lowRaw + deltaOpen) / scale;
+          const high = (lowRaw + deltaHigh) / scale;
+          const close = (lowRaw + deltaClose) / scale;
+          const utcMinutes = protobufLongToNumber(bar.utcTimestampInMinutes) ?? 0;
+          const timestamp = utcMinutes * 60 * 1000;
+
+          result.push({
+            timestamp,
+            price: close,
+            high,
+            low
+          });
+        }
+      } catch (error) {
+        logger.warn('getTrendbars chunk failed', {
+          symbol: params.symbol,
+          from: new Date(currentFrom).toISOString(),
+          to: new Date(currentTo).toISOString(),
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+
+      currentFrom = currentTo + 1;
+      if (currentFrom < toTs) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    result.sort((a, b) => a.timestamp - b.timestamp);
+    return result;
+  }
+
+  /**
+   * Get historical tick data for a symbol (most granular - individual price updates)
+   * Uses ProtoOAGetTickDataReq. Max 1 week per request. Requires account authentication.
+   * @param symbol - Symbol name (e.g., EURUSD, XAUUSD)
+   * @param fromTimestamp - Start time in milliseconds
+   * @param toTimestamp - End time in milliseconds
+   * @param type - BID or ASK (default: BID for evaluation)
+   */
+  async getTickData(params: {
+    symbol: string;
+    fromTimestamp: number;
+    toTimestamp: number;
+    type?: 'BID' | 'ASK';
+  }): Promise<Array<{ timestamp: number; price: number }>> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get tick data');
+    }
+
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) {
+      throw new Error(`Invalid account ID: ${this.config.accountId}`);
+    }
+
+    const symbolInfo = await this.getSymbolInfo(params.symbol);
+    const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+      ? symbolInfo.symbolId.low
+      : symbolInfo.symbolId;
+
+    const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+    const digits = symbolInfo.digits ?? 5;
+    const scale = Math.pow(10, digits);
+
+    const typeNum = params.type === 'ASK' ? 2 : 1; // ProtoOAQuoteType: BID=1, ASK=2
+    const maxChunkMs = 7 * 24 * 60 * 60 * 1000; // 1 week
+    const result: Array<{ timestamp: number; price: number }> = [];
+    let currentFrom = params.fromTimestamp;
+    const toTs = params.toTimestamp;
+
+    while (currentFrom < toTs) {
+      const currentTo = Math.min(currentFrom + maxChunkMs, toTs);
+      let chunkFrom = currentFrom;
+
+      try {
+        while (chunkFrom < currentTo) {
+          const response = await this.connection.sendCommand('ProtoOAGetTickDataReq', {
+            ctidTraderAccountId: accountIdNum,
+            symbolId,
+            type: typeNum,
+            fromTimestamp: chunkFrom,
+            toTimestamp: currentTo,
+          });
+
+          const ticks = response?.tickData || [];
+          let lastTimestampMs: number | null = null;
+          for (const t of ticks) {
+            const tsRaw = protobufLongToNumber(t.timestamp) ?? 0;
+            const tickRaw = protobufLongToNumber(t.tick) ?? 0;
+            const absTimestamp: number = lastTimestampMs === null ? tsRaw : lastTimestampMs + tsRaw;
+            lastTimestampMs = absTimestamp;
+            const price = tickRaw / scale;
+            result.push({ timestamp: absTimestamp, price });
+          }
+
+          const hasMore = response?.hasMore === true;
+          if (!hasMore || ticks.length === 0) break;
+          const nextFrom = lastTimestampMs !== null ? lastTimestampMs + 1 : chunkFrom;
+          if (nextFrom >= currentTo) break;
+          chunkFrom = nextFrom;
+          await new Promise(r => setTimeout(r, 100));
+        }
+      } catch (error) {
+        logger.warn('getTickData chunk failed', {
+          symbol: params.symbol,
+          from: new Date(currentFrom).toISOString(),
+          to: new Date(currentTo).toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
+      currentFrom = currentTo + 1;
+      if (currentFrom < toTs) {
+        await new Promise(r => setTimeout(r, 250));
+      }
+    }
+
+    result.sort((a, b) => a.timestamp - b.timestamp);
+    return result;
+  }
+
+  /**
+   * Common cTrader symbol aliases by broker (primary -> alternatives).
+   * Brokers may use GOLD, GOLD.a, XAUUSDm, etc. instead of XAUUSD.
+   */
+  private static readonly SYMBOL_ALIASES: Record<string, string[]> = {
+    XAUUSD: ['GOLD', 'GOLD.a', 'GOLDm', 'XAUUSDm', 'XAUUSD.i', '#GOLD'],
+    XAGUSD: ['SILVER', 'SILVER.a', 'SILVERm', 'XAGUSDm', 'XAGUSD.i', '#SILVER'],
+  };
+
+  /**
    * Get symbol information including full volume fields (lotSize, stepVolume, minVolume, maxVolume)
    * Uses ProtoOASymbolsListReq to resolve symbol name -> symbolId, then ProtoOASymbolByIdReq
    * for the full ProtoOASymbol (LightSymbol lacks volume fields).
+   * Tries exact match first, then case-insensitive, then known aliases (e.g. XAUUSD -> GOLD).
    */
   async getSymbolInfo(symbol: string): Promise<any> {
     if (!this.authenticated || !this.connection) {
@@ -198,8 +405,59 @@ export class CTraderClient {
       });
 
       const symbols = symbolListResponse?.symbol || [];
-      const lightSymbol = symbols.find((s: any) => s.symbolName === symbol);
+      const symbolVariants = (sym: string): string[] => {
+        const v: string[] = [sym];
+        const noSlash = sym.replace('/', '');
+        const withSlash = sym.length >= 6 ? `${sym.slice(0, 3)}/${sym.slice(-3)}` : null;
+        if (noSlash !== sym) v.push(noSlash);
+        if (withSlash && withSlash !== sym) v.push(withSlash);
+        return [...new Set(v)];
+      };
+      const symbolsToTry = this.config.symbolMap?.[symbol]
+        ? [this.config.symbolMap[symbol], symbol]
+        : [symbol];
+      let lightSymbol: any = null;
+      for (const sym of symbolsToTry) {
+        for (const variant of symbolVariants(sym)) {
+          lightSymbol = symbols.find((s: any) => s.symbolName === variant);
+          if (!lightSymbol) {
+            lightSymbol = symbols.find((s: any) => s.symbolName?.toUpperCase() === variant?.toUpperCase());
+          }
+          if (lightSymbol) {
+            if (sym !== symbol || variant !== symbol) {
+              logger.debug('Resolved cTrader symbol', { requested: symbol, resolved: lightSymbol.symbolName });
+            }
+            break;
+          }
+        }
+        if (lightSymbol) break;
+      }
 
+      if (!lightSymbol) {
+        const aliases = CTraderClient.SYMBOL_ALIASES[symbol.toUpperCase()];
+        if (aliases) {
+          for (const alias of aliases) {
+            lightSymbol = symbols.find((s: any) => s.symbolName === alias || s.symbolName?.toUpperCase() === alias);
+            if (lightSymbol) {
+              logger.debug('Resolved cTrader symbol via alias', { requested: symbol, alias, brokerSymbol: lightSymbol.symbolName });
+              break;
+            }
+          }
+        }
+      }
+      if (!lightSymbol) {
+        // Fuzzy fallback: for XAUUSD, find symbols containing GOLD or XAU (broker-specific naming)
+        const upper = symbol.toUpperCase();
+        if (upper.includes('XAU') || upper === 'GOLD') {
+          lightSymbol = symbols.find((s: any) => {
+            const name = (s.symbolName || '').toUpperCase();
+            return name.includes('XAU') || name.includes('GOLD');
+          });
+          if (lightSymbol) {
+            logger.debug('Resolved cTrader symbol via fuzzy match', { requested: symbol, brokerSymbol: lightSymbol.symbolName });
+          }
+        }
+      }
       if (!lightSymbol) {
         throw new Error(`Symbol ${symbol} not found`);
       }

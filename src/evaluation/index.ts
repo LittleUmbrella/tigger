@@ -9,7 +9,7 @@ import { Command } from 'commander';
 import { DatabaseManager } from '../db/schema.js';
 import { harvestMessages, HarvestOptions } from './messageHarvester.js';
 import { runEvaluation } from './evaluationOrchestrator.js';
-import { EvaluationConfig } from '../types/config.js';
+import { EvaluationConfig, TradeObfuscationConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs-extra';
 import path from 'path';
@@ -22,6 +22,23 @@ program
   .name('evaluate')
   .description('Evaluate Telegram channel signals against prop firm rules')
   .version('1.0.0');
+
+/** Parse "min,max" string into { minPercent, maxPercent }. Returns undefined if invalid or not provided. */
+const parsePercentRange = (value: string | undefined): { minPercent: number; maxPercent: number } | undefined => {
+  if (!value || typeof value !== 'string') return undefined;
+  const parts = value.split(',').map((s) => parseFloat(s.trim()));
+  if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return undefined;
+  return { minPercent: parts[0], maxPercent: parts[1] };
+};
+
+/** Build TradeObfuscationConfig from CLI options. Returns undefined if none provided. */
+const buildTradeObfuscationFromCli = (options: { obfuscationSl?: string; obfuscationEntry?: string; obfuscationTp?: string }): TradeObfuscationConfig | undefined => {
+  const sl = parsePercentRange(options.obfuscationSl);
+  const entry = parsePercentRange(options.obfuscationEntry);
+  const tp = parsePercentRange(options.obfuscationTp);
+  if (!sl && !entry && !tp) return undefined;
+  return { ...(sl && { sl }), ...(entry && { entry }), ...(tp && { tp }) };
+};
 
 // Helper function to log all options
 const logOptions = (commandName: string, options: any) => {
@@ -112,6 +129,14 @@ program
   .option('--risk-percentage <n>', 'Risk percentage per trade', '3')
   .option('--base-leverage <n>', 'Base/default leverage if not specified in message. Also used as confidence indicator for risk adjustment')
   .option('--breakeven-after-tps <n>', 'Number of take profits to hit before moving stop-loss to breakeven (default: 1)', '1')
+  .option('--entry-timeout-minutes <n>', 'Minutes to wait for entry before cancelling trade (default: 2880 = 2 days)', '2880')
+  .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
+  .option('--obfuscation-sl <min,max>', 'Trade obfuscation for SL: percent range as "min,max" (e.g. "-0.5,0.5")')
+  .option('--obfuscation-entry <min,max>', 'Trade obfuscation for entry: percent range as "min,max" (e.g. "-0.3,0.3")')
+  .option('--obfuscation-tp <min,max>', 'Trade obfuscation for TP: percent range as "min,max" (e.g. "-0.2,0.2")')
+  .option('--monitor-type <type>', 'Monitor/exchange type: bybit or ctrader (default: bybit)', 'bybit')
+  .option('--ctrader-use-tick-data', 'Use tick data instead of M1 candles (ctrader only, more precise)', false)
+  .option('--ctrader-symbol-map <json>', 'cTrader symbol map JSON, e.g. \'{"XAUUSD":"GOLD"}\' when broker uses different names')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -151,10 +176,18 @@ program
             testnet: false,
           },
           monitor: {
-            type: 'bybit',
+            type: options.monitorType || 'bybit',
             testnet: false,
+            ctraderUseTickData: options.ctraderUseTickData || false,
+            ctraderSymbolMap: options.ctraderSymbolMap ? (() => {
+              try {
+                return JSON.parse(options.ctraderSymbolMap) as Record<string, string>;
+              } catch {
+                throw new Error('Invalid --ctrader-symbol-map JSON');
+              }
+            })() : undefined,
             pollInterval: 10000,
-            entryTimeoutMinutes: 2880, // 2 days = 2880 minutes
+            entryTimeoutMinutes: parseInt(options.entryTimeoutMinutes || '2880', 10),
             breakevenAfterTPs: parseInt(options.breakevenAfterTps || '1', 10),
           },
           propFirms,
@@ -162,6 +195,8 @@ program
           startDate: options.startDate,
           speedMultiplier: parseFloat(options.speedMultiplier) || 0,
           maxTradeDurationDays: parseFloat(options.maxTradeDuration) || 7,
+          slAdjustmentTolerancePercent: options.slAdjustmentTolerancePercent != null ? parseFloat(options.slAdjustmentTolerancePercent) : undefined,
+          tradeObfuscation: buildTradeObfuscationFromCli(options),
         };
       }
 

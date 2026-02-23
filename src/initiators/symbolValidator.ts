@@ -21,6 +21,45 @@ export interface SymbolInfo {
   tickSize?: number;
 }
 
+/**
+ * Get symbol information from cTrader for quantity/precision (evaluation mode)
+ */
+export async function getCTraderSymbolInfo(
+  ctraderClient: { getSymbolInfo: (symbol: string) => Promise<any> },
+  symbol: string
+): Promise<SymbolInfo | null> {
+  try {
+    const raw = await ctraderClient.getSymbolInfo(symbol);
+    if (!raw) return null;
+
+    const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+    const digits = raw.digits ?? 5;
+    const lotSize = protobufLongToNumber(raw.lotSize) ?? 100;
+    const stepVolume = protobufLongToNumber(raw.stepVolume) ?? protobufLongToNumber(raw.volumeStep) ?? lotSize;
+    const minVolume = protobufLongToNumber(raw.minVolume);
+    const maxVolume = protobufLongToNumber(raw.maxVolume);
+
+    const qtyPrecision = stepVolume > 0 && lotSize > 0
+      ? Math.max(0, -Math.floor(Math.log10(stepVolume / lotSize)))
+      : 2;
+
+    return {
+      qtyPrecision,
+      pricePrecision: digits,
+      tickSize: Math.pow(10, -digits),
+      minOrderQty: minVolume != null && lotSize > 0 ? minVolume / lotSize : undefined,
+      maxOrderQty: maxVolume != null && lotSize > 0 ? maxVolume / lotSize : undefined,
+      qtyStep: stepVolume > 0 && lotSize > 0 ? stepVolume / lotSize : undefined,
+    };
+  } catch (error) {
+    logger.warn('Failed to get cTrader symbol info', {
+      symbol,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
+
 // In-memory cache for validation results (valid for the duration of the run)
 // Key: symbol string, Value: validation result
 const validationCache = new Map<string, { valid: boolean; error?: string; actualSymbol?: string }>();
@@ -589,105 +628,115 @@ export async function validateBybitSymbol(
 
 /**
  * Validate if a symbol exists using price provider (for evaluation mode)
- * Uses Bybit client from price provider to check instruments list (more reliable than price data)
- * Tries asset variant (e.g., "1000SHIB" -> "SHIB1000") as fallback
+ * Uses Bybit or cTrader client from price provider when available
  */
 export async function validateSymbolWithPriceProvider(
   priceProvider: HistoricalPriceProvider,
   tradingPair: string
 ): Promise<{ valid: boolean; error?: string }> {
   try {
-    // Get Bybit client from price provider
+    // Try cTrader first if provider has cTrader client
+    const getCTraderClient = priceProvider.getCTraderClient;
+    if (getCTraderClient) {
+      const ctraderClient = getCTraderClient();
+      if (ctraderClient) {
+        const normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
+        const symbol = normalizedSymbol.endsWith('USD') ? normalizedSymbol : `${normalizedSymbol.replace(/USDT$|USDC$/, '')}USD`;
+        try {
+          if (!ctraderClient.isConnected?.()) {
+            await ctraderClient.connect();
+            await ctraderClient.authenticate();
+          }
+          await ctraderClient.getSymbolInfo(symbol);
+          return { valid: true };
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : String(err);
+          return { valid: false, error: errMsg.includes('not found') ? `Symbol ${symbol} not found on cTrader` : errMsg };
+        }
+      }
+    }
+
+    // Bybit path
     const bybitClient = priceProvider.getBybitClient();
     if (!bybitClient) {
-      // Fallback to price-based validation if no client available
       return await validateSymbolWithPriceData(priceProvider, tradingPair);
     }
-    
-    // Use Bybit instruments API for validation (more reliable)
-    // Normalize trading pair
+
     let normalizedPair = tradingPair.replace('/', '').toUpperCase();
-    
-    // Ensure symbol ends with USDT or USDC
     const baseSymbol = normalizedPair.replace(/USDT$|USDC$/, '');
     const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
-    
-    // Try original symbol first
-    // Always use cache in evaluation mode (validateSymbolWithPriceProvider is only used in evaluation)
     const originalSymbol = `${baseSymbol}${quoteCurrency}`;
     const validation = await validateBybitSymbol(bybitClient, originalSymbol, true);
-    if (validation.valid) {
-      return { valid: true };
-    }
-    
-    // If original didn't work, try asset variant as fallback
+    if (validation.valid) return { valid: true };
+
     const assetVariant = getAssetVariant(baseSymbol);
     if (assetVariant) {
       const variantSymbol = `${assetVariant}${quoteCurrency}`;
       const variantValidation = await validateBybitSymbol(bybitClient, variantSymbol, true);
-      if (variantValidation.valid) {
-        return { valid: true };
-      }
+      if (variantValidation.valid) return { valid: true };
     }
-    
-    return { 
-      valid: false, 
-      error: validation.error || `Symbol ${baseSymbol} not found on Bybit` 
+
+    return {
+      valid: false,
+      error: validation.error || `Symbol ${baseSymbol} not found on Bybit`,
     };
   } catch (error) {
-    // Fallback to price-based validation on error
     return await validateSymbolWithPriceData(priceProvider, tradingPair);
   }
 }
 
 /**
- * Fallback validation using price data (used when Bybit client is not available)
+ * Fallback validation using price data (used when no exchange client available)
  */
 async function validateSymbolWithPriceData(
   priceProvider: HistoricalPriceProvider,
   tradingPair: string
 ): Promise<{ valid: boolean; error?: string }> {
   try {
-    // Normalize trading pair
-    let normalizedPair = tradingPair.replace('/', '').toUpperCase();
-    
-    // Ensure symbol ends with USDT or USDC
+    const normalizedPair = tradingPair.replace('/', '').toUpperCase();
+
+    // cTrader forex/CFD: EURUSD, XAUUSD - try as-is
+    if (normalizedPair.endsWith('USD') && !normalizedPair.endsWith('USDT') && !normalizedPair.endsWith('USDC')) {
+      try {
+        const price = await priceProvider.getCurrentPrice(normalizedPair);
+        if (price && price > 0) return { valid: true };
+      } catch {
+        /* continue */
+      }
+      return { valid: false, error: `Symbol ${normalizedPair} not found or no price data` };
+    }
+
+    // Bybit: ensure USDT/USDC
     const baseSymbol = normalizedPair.replace(/USDT$|USDC$/, '');
     const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
-    
-    // Try original symbol first
     const originalSymbol = `${baseSymbol}${quoteCurrency}`;
+
     try {
-      const currentPrice = await priceProvider.getCurrentPrice(originalSymbol);
-      if (currentPrice && currentPrice > 0) {
-        return { valid: true };
-      }
-    } catch (error) {
-      // Continue to try variant
+      const price = await priceProvider.getCurrentPrice(originalSymbol);
+      if (price && price > 0) return { valid: true };
+    } catch {
+      /* continue */
     }
-    
-    // If original didn't work, try asset variant as fallback
+
     const assetVariant = getAssetVariant(baseSymbol);
     if (assetVariant) {
       const variantSymbol = `${assetVariant}${quoteCurrency}`;
       try {
-        const currentPrice = await priceProvider.getCurrentPrice(variantSymbol);
-        if (currentPrice && currentPrice > 0) {
-          return { valid: true };
-        }
-      } catch (error) {
-        // Variant also failed
+        const price = await priceProvider.getCurrentPrice(variantSymbol);
+        if (price && price > 0) return { valid: true };
+      } catch {
+        /* continue */
       }
     }
-    
-    return { 
-      valid: false, 
-      error: `Symbol ${baseSymbol} not found or no price data available` 
+
+    return {
+      valid: false,
+      error: `Symbol ${baseSymbol} not found or no price data available`,
     };
   } catch (error) {
-    return { 
-      valid: false, 
-      error: error instanceof Error ? error.message : String(error) 
+    return {
+      valid: false,
+      error: error instanceof Error ? error.message : String(error),
     };
   }
 }
