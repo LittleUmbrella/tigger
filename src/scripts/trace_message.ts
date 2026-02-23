@@ -133,8 +133,8 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
   const db = new DatabaseManager();
   await db.initialize();
 
-  // Load config to get parser name for channel
-  const configPath = process.env.CONFIG_PATH || 'config.json';
+  // Load config to get parser name for channel (resolve from project root for MCP invocations)
+  const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
   let config: BotConfig | null = null;
   if (fs.existsSync(configPath)) {
     try {
@@ -172,7 +172,7 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       });
     } else {
       // Search all channels
-      const channels = ['2394142145', '3241720654', '2427485240', '3272135406', '2385521106', '1634731277']; // All config channels
+      const channels = ['2394142145', '3241720654', '2427485240', '3272135406', '2385521106', '1634731277', '3077664317', '3469900302'];
       logger.debug('traceMessage - searching all channels', {
         messageId,
         channelsToSearch: channels
@@ -225,10 +225,11 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       details: {}
     });
 
-    // Get parser name from config for this channel
+    // Get parser name from config for this channel (ensure channel is string for lookup)
     let parserName: string | undefined;
-    if (config && channel) {
-      const channelConfig = config.channels?.find(ch => ch.channel === channel);
+    const channelStr = channel ? String(channel) : undefined;
+    if (config && channelStr) {
+      const channelConfig = config.channels?.find((ch: { channel: string }) => String(ch.channel) === channelStr);
       if (channelConfig?.parser) {
         parserName = channelConfig.parser;
       }
@@ -280,58 +281,65 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       recommendations.push('Check if message was marked as parsed before trade creation');
       recommendations.push('Verify initiator configuration is correct');
 
-      // Run symbol validation to rule out "invalid symbol" as root cause
-      const symbolToValidate = normalizeBybitSymbol(parsedOrder.tradingPair);
-      try {
-        const configPath = process.env.CONFIG_PATH || 'config.json';
-        let config: BotConfig | null = null;
-        if (fs.existsSync(configPath)) {
-          const configContent = await fs.readFile(configPath, 'utf-8');
-          config = JSON.parse(configContent);
-        }
-        const accountName = config?.accounts?.[0]?.name;
-        const credentials = await getAccountCredentials(accountName, config);
-        if (credentials.apiKey && credentials.apiSecret) {
-          const bybitClient = new RestClientV5({
-            key: credentials.apiKey,
-            secret: credentials.apiSecret,
-            testnet: credentials.testnet,
-            ...(credentials.baseUrl && { baseUrl: credentials.baseUrl })
-          });
-          const validation = await validateBybitSymbol(bybitClient, symbolToValidate);
-          steps[2].details = {
-            symbolValidation: {
-              symbol: symbolToValidate,
-              valid: validation.valid,
-              actualSymbol: validation.actualSymbol,
-              error: validation.error
+      // Run symbol validation (Bybit only - cTrader uses different symbols e.g. XAUUSD)
+      const channelConfig = config?.channels?.find((ch: { channel: string }) => String(ch.channel) === String(channel || ''));
+      const isCTraderChannel = channelConfig?.initiator === 'ctrader' || channelConfig?.monitor === 'ctrader';
+
+      if (!isCTraderChannel) {
+        const symbolToValidate = normalizeBybitSymbol(parsedOrder.tradingPair);
+        try {
+          const validateConfigPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+          let validateConfig: BotConfig | null = config;
+          if (!validateConfig && fs.existsSync(validateConfigPath)) {
+            const configContent = await fs.readFile(validateConfigPath, 'utf-8');
+            validateConfig = JSON.parse(configContent);
+          }
+          const accountName = validateConfig?.accounts?.[0]?.name;
+          const credentials = await getAccountCredentials(accountName, validateConfig);
+          if (credentials.apiKey && credentials.apiSecret) {
+            const bybitClient = new RestClientV5({
+              key: credentials.apiKey,
+              secret: credentials.apiSecret,
+              testnet: credentials.testnet,
+              ...(credentials.baseUrl && { baseUrl: credentials.baseUrl })
+            });
+            const validation = await validateBybitSymbol(bybitClient, symbolToValidate);
+            steps[2].details = {
+              symbolValidation: {
+                symbol: symbolToValidate,
+                valid: validation.valid,
+                actualSymbol: validation.actualSymbol,
+                error: validation.error
+              }
+            };
+            if (validation.valid) {
+              recommendations.push(
+                `Symbol ${symbolToValidate} exists on Bybit - rule out invalid symbol; run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+              );
+              recommendations.push('Investigate: prop firm rules, initiator error, or other validation failure');
+            } else {
+              recommendations.push(
+                `Symbol validation failed: ${validation.error} - run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+              );
             }
-          };
-          if (validation.valid) {
-            recommendations.push(
-              `Symbol ${symbolToValidate} exists on Bybit - rule out invalid symbol; run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
-            );
-            recommendations.push('Investigate: prop firm rules, initiator error, or other validation failure');
           } else {
             recommendations.push(
-              `Symbol validation failed: ${validation.error} - run: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
+              `Run symbol validation manually: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
             );
           }
-        } else {
+        } catch (validationError) {
+          steps[2].details = {
+            symbolValidation: {
+              symbol: normalizeBybitSymbol(parsedOrder.tradingPair),
+              error: validationError instanceof Error ? validationError.message : String(validationError)
+            }
+          };
           recommendations.push(
             `Run symbol validation manually: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
           );
         }
-      } catch (validationError) {
-        steps[2].details = {
-          symbolValidation: {
-            symbol: symbolToValidate,
-            error: validationError instanceof Error ? validationError.message : String(validationError)
-          }
-        };
-        recommendations.push(
-          `Run symbol validation manually: npm run validate-symbol ${parsedOrder.tradingPair.replace('/', '')}`
-        );
+      } else {
+        recommendations.push('cTrader channel: symbol validation uses cTrader (XAUUSD etc). Check initiator logs for cTrader-specific errors.');
       }
 
       return {
@@ -353,6 +361,7 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
         accountName: t.account_name,
         orderId: t.order_id,
         positionId: t.position_id,
+        exchange: (t as Trade).exchange,
         createdAt: t.created_at
       }))
     };
@@ -394,107 +403,116 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
         entryFilledAt: trade.entry_filled_at
       };
 
-      // Step 4.x+1: Check entry order on Bybit
+      // Step 4.x+1: Check entry order on exchange (Bybit or cTrader)
+      const isCTraderTrade = (trade as Trade).exchange === 'ctrader';
+      const exchangeLabel = isCTraderTrade ? 'cTrader' : 'Bybit';
       steps.push({
-        step: `${tpStepIndex}. Trade ${i + 1} - Entry Order on Bybit`,
+        step: `${tpStepIndex}. Trade ${i + 1} - Entry Order on ${exchangeLabel}`,
         status: 'unknown',
         details: {
           orderId: trade.order_id,
-          symbol: normalizeBybitSymbol(trade.trading_pair)
+          symbol: trade.trading_pair,
+          exchange: isCTraderTrade ? 'ctrader' : 'bybit'
         }
       });
 
-      // Load config to get account credentials
-      const configPath = process.env.CONFIG_PATH || 'config.json';
-      let config: BotConfig | null = null;
-      if (fs.existsSync(configPath)) {
-        try {
-          const configContent = await fs.readFile(configPath, 'utf-8');
-          config = JSON.parse(configContent);
-        } catch (error) {
-          logger.warn('Failed to load config', { error });
+      if (isCTraderTrade) {
+        // cTrader: report from DB only (cTrader API not used in trace)
+        steps[tpStepIndex].status = 'success';
+        steps[tpStepIndex].details = {
+          ...steps[tpStepIndex].details,
+          source: 'database',
+          tradeStatus: trade.status,
+          positionId: trade.position_id,
+          entryFilledAt: trade.entry_filled_at,
+          note: 'cTrader order verification requires cTrader API (not available in trace). Status from DB.'
+        };
+      } else {
+        // Bybit: verify order on exchange
+        const bybitConfigPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+        let tradeConfig: BotConfig | null = null;
+        if (fs.existsSync(bybitConfigPath)) {
+          try {
+            const configContent = await fs.readFile(bybitConfigPath, 'utf-8');
+            tradeConfig = JSON.parse(configContent);
+          } catch (error) {
+            logger.warn('Failed to load config', { error });
+          }
+        }
+
+        const credentials = await getAccountCredentials(trade.account_name, tradeConfig);
+        if (!credentials.apiKey || !credentials.apiSecret) {
+          steps[tpStepIndex].status = 'failure';
+          steps[tpStepIndex].error = 'Bybit API credentials not found';
+          recommendations.push(`Trade ${i + 1}: Cannot verify order on Bybit - missing credentials`);
+        } else {
+          const bybitClient = new RestClientV5({
+            key: credentials.apiKey,
+            secret: credentials.apiSecret,
+            testnet: credentials.testnet,
+            ...(credentials.baseUrl && { baseUrl: credentials.baseUrl })
+          });
+
+          const symbol = normalizeBybitSymbol(trade.trading_pair);
+
+          try {
+            const activeOrders = await bybitClient.getActiveOrders({
+              category: 'linear',
+              symbol: symbol,
+              orderId: trade.order_id
+            });
+
+            if (activeOrders.retCode === 0 && activeOrders.result?.list && activeOrders.result.list.length > 0) {
+              const order = activeOrders.result.list[0];
+              steps[tpStepIndex].status = 'success';
+              steps[tpStepIndex].details = {
+                ...steps[tpStepIndex].details,
+                foundIn: 'active_orders',
+                orderStatus: getBybitField<string>(order, 'orderStatus', 'order_status'),
+                orderType: order.orderType,
+                price: order.price,
+                qty: order.qty,
+                cumExecQty: getBybitField<string>(order, 'cumExecQty', 'cum_exec_qty'),
+                avgPrice: getBybitField<string>(order, 'avgPrice', 'avg_price')
+              };
+            } else {
+              const orderHistory = await bybitClient.getHistoricOrders({
+                category: 'linear',
+                symbol: symbol,
+                orderId: trade.order_id,
+                limit: 10
+              });
+
+              if (orderHistory.retCode === 0 && orderHistory.result?.list && orderHistory.result.list.length > 0) {
+                const order = orderHistory.result.list[0];
+                steps[tpStepIndex].status = 'success';
+                steps[tpStepIndex].details = {
+                  ...steps[tpStepIndex].details,
+                  foundIn: 'order_history',
+                  orderStatus: getBybitField<string>(order, 'orderStatus', 'order_status'),
+                  orderType: order.orderType,
+                  avgPrice: getBybitField<string>(order, 'avgPrice', 'avg_price'),
+                  cumExecQty: getBybitField<string>(order, 'cumExecQty', 'cum_exec_qty'),
+                  filledAt: getBybitField<string>(order, 'createdTime', 'created_time')
+                };
+              } else {
+                steps[tpStepIndex].status = 'failure';
+                steps[tpStepIndex].error = 'Order not found on Bybit exchange';
+                recommendations.push(`Trade ${i + 1}: Entry order ${trade.order_id} was never created on Bybit`);
+                recommendations.push(`Check initiator logs for API errors when creating order`);
+                recommendations.push(`Verify Bybit API credentials are correct for account: ${trade.account_name || 'default'}`);
+              }
+            }
+          } catch (error) {
+            logger.warn('Error checking Bybit orders', { error });
+            steps[tpStepIndex].status = 'failure';
+            steps[tpStepIndex].error = 'Error querying Bybit API';
+            recommendations.push(`Trade ${i + 1}: Error checking entry order ${trade.order_id}`);
+          }
         }
       }
 
-      const credentials = await getAccountCredentials(trade.account_name, config);
-      if (!credentials.apiKey || !credentials.apiSecret) {
-        steps[tpStepIndex].status = 'failure';
-        steps[tpStepIndex].error = 'Bybit API credentials not found';
-        recommendations.push(`Trade ${i + 1}: Cannot verify order on Bybit - missing credentials`);
-        continue;
-      }
-
-      const bybitClient = new RestClientV5({
-        key: credentials.apiKey,
-        secret: credentials.apiSecret,
-        testnet: credentials.testnet,
-        ...(credentials.baseUrl && { baseUrl: credentials.baseUrl })
-      });
-
-      const symbol = normalizeBybitSymbol(trade.trading_pair);
-
-      // Check active orders
-      try {
-        const activeOrders = await bybitClient.getActiveOrders({
-          category: 'linear',
-          symbol: symbol,
-          orderId: trade.order_id
-        });
-
-        if (activeOrders.retCode === 0 && activeOrders.result?.list && activeOrders.result.list.length > 0) {
-          const order = activeOrders.result.list[0];
-          steps[tpStepIndex].status = 'success';
-          steps[tpStepIndex].details = {
-            ...steps[tpStepIndex].details,
-            foundIn: 'active_orders',
-            orderStatus: getBybitField<string>(order, 'orderStatus', 'order_status'),
-            orderType: order.orderType,
-            price: order.price,
-            qty: order.qty,
-            cumExecQty: getBybitField<string>(order, 'cumExecQty', 'cum_exec_qty'),
-            avgPrice: getBybitField<string>(order, 'avgPrice', 'avg_price')
-          };
-          continue;
-        }
-      } catch (error) {
-        logger.warn('Error checking active orders', { error });
-      }
-
-      // Check order history
-      try {
-        const orderHistory = await bybitClient.getHistoricOrders({
-          category: 'linear',
-          symbol: symbol,
-          orderId: trade.order_id,
-          limit: 10
-        });
-
-        if (orderHistory.retCode === 0 && orderHistory.result?.list && orderHistory.result.list.length > 0) {
-          const order = orderHistory.result.list[0];
-          steps[tpStepIndex].status = 'success';
-          steps[tpStepIndex].details = {
-            ...steps[tpStepIndex].details,
-            foundIn: 'order_history',
-            orderStatus: getBybitField<string>(order, 'orderStatus', 'order_status'),
-            orderType: order.orderType,
-            avgPrice: getBybitField<string>(order, 'avgPrice', 'avg_price'),
-            cumExecQty: getBybitField<string>(order, 'cumExecQty', 'cum_exec_qty'),
-            filledAt: getBybitField<string>(order, 'createdTime', 'created_time')
-          };
-          continue;
-        }
-      } catch (error) {
-        logger.warn('Error checking order history', { error });
-      }
-
-      // Order not found on Bybit
-      steps[tpStepIndex].status = 'failure';
-      steps[tpStepIndex].error = 'Order not found on Bybit exchange';
-      recommendations.push(`Trade ${i + 1}: Entry order ${trade.order_id} was never created on Bybit`);
-      recommendations.push(`Check initiator logs for API errors when creating order`);
-      recommendations.push(`Verify Bybit API credentials are correct for account: ${trade.account_name || 'default'}`);
-
-      // Step 4.x+2: Check TP/SL orders
+      // Step 4.x+2: Check TP/SL orders (Bybit: verify on exchange; cTrader: report from DB)
       const orders = await db.getOrdersByTradeId(trade.id);
       if (orders.length > 0) {
         const stepIndexTP = tpStepIndex + 1;
@@ -513,33 +531,71 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
           }
         });
 
-        let allTPOrdersFound = true;
-        for (const order of orders) {
-          if (!order.order_id) {
-            allTPOrdersFound = false;
-            recommendations.push(`Trade ${i + 1}: ${order.order_type} order (TP ${order.tp_index || 'N/A'}) was never created`);
-            continue;
-          }
-
-          try {
-            const orderHistory = await bybitClient.getHistoricOrders({
-              category: 'linear',
-              symbol: symbol,
-              orderId: order.order_id,
-              limit: 10
+        if (isCTraderTrade) {
+          // cTrader: report from DB only (no exchange verification)
+          const hasUncreatedOrders = orders.some(o => !o.order_id);
+          steps[stepIndexTP].status = hasUncreatedOrders ? 'failure' : 'success';
+          if (hasUncreatedOrders) {
+            orders.filter(o => !o.order_id).forEach(o => {
+              recommendations.push(`Trade ${i + 1}: ${o.order_type} order (TP ${o.tp_index ?? 'N/A'}) was never created`);
             });
-
-            if (orderHistory.retCode !== 0 || !orderHistory.result?.list || orderHistory.result.list.length === 0) {
-              allTPOrdersFound = false;
-              recommendations.push(`Trade ${i + 1}: ${order.order_type} order ${order.order_id} not found on Bybit`);
-            }
-          } catch (error) {
-            allTPOrdersFound = false;
-            recommendations.push(`Trade ${i + 1}: Error checking ${order.order_type} order ${order.order_id}`);
           }
-        }
+        } else {
+          // Bybit: verify each order on exchange
+          let bybitClient: RestClientV5 | undefined;
+          let symbol: string | undefined;
+          const tpTradeConfigPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+          let tradeConfig: BotConfig | null = null;
+          if (fs.existsSync(tpTradeConfigPath)) {
+            try {
+              tradeConfig = JSON.parse(await fs.readFile(tpTradeConfigPath, 'utf-8'));
+            } catch {
+              /* ignore */
+            }
+          }
+          const creds = await getAccountCredentials(trade.account_name, tradeConfig);
+          if (creds.apiKey && creds.apiSecret) {
+            bybitClient = new RestClientV5({
+              key: creds.apiKey,
+              secret: creds.apiSecret,
+              testnet: creds.testnet,
+              ...(creds.baseUrl && { baseUrl: creds.baseUrl })
+            });
+            symbol = normalizeBybitSymbol(trade.trading_pair);
+          }
 
-        steps[stepIndexTP].status = allTPOrdersFound ? 'success' : 'failure';
+          let allTPOrdersFound = true;
+          for (const order of orders) {
+            if (!order.order_id) {
+              allTPOrdersFound = false;
+              recommendations.push(`Trade ${i + 1}: ${order.order_type} order (TP ${order.tp_index || 'N/A'}) was never created`);
+              continue;
+            }
+
+            if (bybitClient && symbol) {
+              try {
+                const orderHistory = await bybitClient.getHistoricOrders({
+                  category: 'linear',
+                  symbol: symbol,
+                  orderId: order.order_id,
+                  limit: 10
+                });
+
+                if (orderHistory.retCode !== 0 || !orderHistory.result?.list || orderHistory.result.list.length === 0) {
+                  allTPOrdersFound = false;
+                  recommendations.push(`Trade ${i + 1}: ${order.order_type} order ${order.order_id} not found on Bybit`);
+                }
+              } catch (error) {
+                allTPOrdersFound = false;
+                recommendations.push(`Trade ${i + 1}: Error checking ${order.order_type} order ${order.order_id}`);
+              }
+            } else {
+              allTPOrdersFound = false;
+            }
+          }
+
+          steps[stepIndexTP].status = allTPOrdersFound ? 'success' : 'failure';
+        }
       }
     }
 

@@ -16,8 +16,41 @@ import { WorkflowEngine, WorkflowStep, createWorkflowContext } from '../workflow
 import { logger } from '../../utils/logger.js';
 import { traceMessage } from '../../scripts/trace_message.js';
 import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
-import { getGoldPriceComparison } from '../utils/goldPriceCheck.js';
-import { validateBybitSymbol } from '../../initiators/symbolValidator.js';
+import { queryCTraderOrdersForMessage } from '../utils/ctraderOrderQuery.js';
+import { getGoldPriceComparison, getGoldPriceComparisonForCTrader } from '../utils/goldPriceCheck.js';
+import { validateBybitSymbol, validateCTraderSymbol } from '../../initiators/symbolValidator.js';
+import fs from 'fs-extra';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../../..');
+
+/**
+ * Determine if channel/trace is cTrader (vs Bybit)
+ */
+function isCTraderFromTrace(traceResult: any): boolean {
+  const trades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades;
+  if (trades?.length > 0 && trades[0]?.exchange === 'ctrader') return true;
+  return false;
+}
+
+/**
+ * Determine if channel is cTrader from config (when trace has no trades)
+ */
+async function isCTraderChannel(channel: string): Promise<boolean> {
+  const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+  if (!channel || !(await fs.pathExists(configPath))) return false;
+  try {
+    const config = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+    const ch = String(channel);
+    const channelConfig = config?.channels?.find((c: any) => String(c.channel) === ch);
+    return channelConfig?.initiator === 'ctrader' || channelConfig?.monitor === 'ctrader';
+  } catch {
+    return false;
+  }
+}
 
 export async function investigateCommandHandler(context: CommandContext): Promise<CommandResult> {
   const messageId = context.args.message;
@@ -45,7 +78,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     required: true,
     execute: async (ctx) => {
       const msgId = String(ctx.args.messageId);
-      const ch = ctx.args.channel;
+      const ch = ctx.args.channel != null ? String(ctx.args.channel) : undefined;
       
       logger.debug('Trace step - calling traceMessage', {
         messageId: msgId,
@@ -105,9 +138,10 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Get timestamp from trace
-      const timestamp = traceResult.steps[0]?.timestamp || new Date().toISOString();
-      const windowMinutes = 10;
+      // Get timestamp from Message Storage step (when message was received/stored)
+      const messageStep = traceResult.steps?.find((s: any) => s.step?.includes('Message Storage'));
+      const timestamp = messageStep?.details?.date || messageStep?.timestamp || traceResult.steps?.[0]?.timestamp || new Date().toISOString();
+      const windowMinutes = 30; // Wider window: logs may be slightly delayed; ±30min catches more
       const timeRange = {
         from: new Date(new Date(timestamp).getTime() - windowMinutes * 60 * 1000).toISOString(),
         until: new Date(new Date(timestamp).getTime() + windowMinutes * 60 * 1000).toISOString()
@@ -137,6 +171,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         // Query for Bybit API errors in the time window
         const bybitErrors = await ctx.logglyClient!.searchBybitErrors(timeRange);
 
+        const queryUsed = `messageId:${messageId} AND channel:${channel || ''}`;
         return {
           success: true,
           message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors`,
@@ -144,7 +179,8 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             messageLogs,
             messageScopedErrors,
             errorLogs,
-            bybitErrors
+            bybitErrors,
+            searchParams: { query: queryUsed, from: timeRange.from, until: timeRange.until }
           }
         };
       } catch (error) {
@@ -163,7 +199,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
   // Step 2b: Cross-check Loggly for order placement (catches trace-vs-logs mismatch)
   engine.addStep({
     id: 'logglyOrderPlacementCheck',
-    name: 'Cross-check: Bybit Order Placement & Errors',
+    name: 'Cross-check: Order Placement & Errors (Bybit/cTrader)',
     required: false,
     execute: async (ctx) => {
       if (!ctx.logglyClient) {
@@ -183,6 +219,9 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         return { success: false, message: 'Trace step must complete first' };
       }
 
+      const isCTrader = isCTraderFromTrace(traceResult) || await isCTraderChannel(channel || '');
+      const exchangeTerms = isCTrader ? '(order OR ctrader OR trade)' : '(order OR bybit OR trade)';
+
       const timestamp = traceResult.steps[0]?.timestamp || traceResult.steps[0]?.details?.date || new Date().toISOString();
       const windowMinutes = 15;
       const timeRange = {
@@ -193,8 +232,8 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       try {
         // Query for message + order/trade activity (order placement evidence)
         const orderPlacementQuery = channel
-          ? `messageId:${messageId} AND channel:${channel} AND (order OR bybit OR trade)`
-          : `messageId:${messageId} AND (order OR bybit OR trade)`;
+          ? `messageId:${messageId} AND channel:${channel} AND ${exchangeTerms}`
+          : `messageId:${messageId} AND ${exchangeTerms}`;
 
         const orderPlacementLogs = await ctx.logglyClient!.search({
           query: orderPlacementQuery,
@@ -215,7 +254,9 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           'Trade initiated successfully',
           'Trade stored in database',
           'Limit order placed',
-          'Trade initiation completed for all accounts'
+          'Trade initiation completed for all accounts',
+          'exchange: \'ctrader\'',
+          'Trade initiation completed'
         ];
 
         const foundSuccessLogs = events.filter((e: any) => {
@@ -257,38 +298,70 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 3: Query Bybit orders
+  // Step 3: Query order details (Bybit or cTrader)
   engine.addStep({
     id: 'bybitOrders',
-    name: 'Query Bybit Order Details',
+    name: 'Query Order Details (Bybit/cTrader)',
     required: false,
     execute: async (ctx) => {
-      if (!ctx.getBybitClient) {
-        return {
-          success: false,
-          message: 'Bybit client helper not available',
-          skipRemaining: false
-        };
-      }
-
       const traceResult = ctx.stepResults.get('trace')?.data;
       const messageId = ctx.args.messageId;
       const channel = ctx.args.channel;
 
       if (!traceResult) {
-        return {
-          success: false,
-          message: 'Trace step must complete first'
-        };
+        return { success: false, message: 'Trace step must complete first' };
       }
 
-      // Get trades from trace result
       const trades = traceResult.steps?.find((s: any) => s.step.includes('Trade Creation'))?.details?.trades;
       if (!trades || trades.length === 0) {
+        return { success: true, message: 'No trades found to query orders for', data: { orders: [] } };
+      }
+
+      if (isCTraderFromTrace(traceResult)) {
+        if (!ctx.getCTraderClient) {
+          return {
+            success: true,
+            message: 'cTrader client not available - skipping order query',
+            data: { orders: [], skipped: true }
+          };
+        }
+        try {
+          const dbTrades = await ctx.db.getTradesByMessageId(String(messageId), channel || 'unknown');
+          if (dbTrades.length === 0) {
+            return { success: true, message: 'No trades in database', data: { orders: [] } };
+          }
+          const orderDetails = await queryCTraderOrdersForMessage(
+            ctx.getCTraderClient,
+            dbTrades.map(t => ({
+              order_id: t.order_id,
+              position_id: t.position_id,
+              trading_pair: t.trading_pair,
+              account_name: t.account_name,
+              created_at: t.created_at
+            }))
+          );
+          const found = orderDetails.filter(o => o.found);
+          const notFound = orderDetails.filter(o => !o.found);
+          return {
+            success: true,
+            message: `Queried ${orderDetails.length} cTrader orders: ${found.length} found, ${notFound.length} not found`,
+            data: { orders: orderDetails, foundCount: found.length, notFoundCount: notFound.length }
+          };
+        } catch (error) {
+          logger.error('Error querying cTrader orders', { error: error instanceof Error ? error.message : String(error) });
+          return {
+            success: false,
+            message: 'Failed to query cTrader orders',
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }
+
+      if (!ctx.getBybitClient) {
         return {
-          success: true,
-          message: 'No trades found to query orders for',
-          data: { orders: [] }
+          success: false,
+          message: 'Bybit client helper not available',
+          skipRemaining: false
         };
       }
 
@@ -342,7 +415,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
   // Step 4: Symbol validation (when Trade Creation failed - rule out invalid symbol)
   engine.addStep({
     id: 'symbolValidation',
-    name: 'Validate Symbol on Bybit',
+    name: 'Validate Symbol (Bybit/cTrader)',
     required: false,
     execute: async (ctx) => {
       const traceResult = ctx.stepResults.get('trace')?.data;
@@ -355,7 +428,6 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       }
 
       const failurePoint = traceResult.failurePoint;
-      const tradeCreationStep = traceResult.steps?.find((s: any) => s.step?.includes('Trade Creation'));
       const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Parsing'));
 
       if (failurePoint !== 'Trade Creation' || !parsingStep?.details?.tradingPair) {
@@ -367,6 +439,52 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       }
 
       const tradingPair = parsingStep.details.tradingPair;
+      const channel = ctx.args.channel;
+      const isCTrader = await isCTraderChannel(channel || '');
+
+      if (isCTrader) {
+        if (!ctx.getCTraderClient) {
+          return {
+            success: true,
+            message: 'cTrader client not available for symbol validation',
+            data: { skipped: true }
+          };
+        }
+        try {
+          const ctraderClient = await ctx.getCTraderClient();
+          if (!ctraderClient) {
+            return { success: false, message: 'Could not create cTrader client for symbol validation' };
+        }
+          const symbolToValidate = tradingPair.replace('/', '').toUpperCase();
+          const ctraderSymbol = symbolToValidate.endsWith('USDT') || symbolToValidate.endsWith('USDC')
+            ? `${symbolToValidate.replace(/USDT$|USDC$/, '')}USD`
+            : symbolToValidate;
+          const validation = await validateCTraderSymbol(ctraderClient, ctraderSymbol);
+          return {
+            success: true,
+            message: validation.valid
+              ? `Symbol ${ctraderSymbol} is valid on cTrader`
+              : `Symbol validation failed: ${validation.error}`,
+            data: {
+              symbol: ctraderSymbol,
+              valid: validation.valid,
+              actualSymbol: validation.actualSymbol,
+              error: validation.error
+            }
+          };
+        } catch (error) {
+          logger.error('cTrader symbol validation error', {
+            tradingPair,
+            error: error instanceof Error ? error.message : String(error)
+          });
+          return {
+            success: false,
+            message: 'cTrader symbol validation failed',
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }
+
       const symbolToValidate = tradingPair.replace('/', '').toUpperCase();
       const symbol = symbolToValidate.endsWith('USDT') || symbolToValidate.endsWith('USDC')
         ? symbolToValidate
@@ -417,10 +535,10 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   });
 
-  // Step 5: Check gold/XAUT prices for XAUT trades
+  // Step 5: Check gold/XAUT prices for XAUT/Gold trades (Bybit or cTrader)
   engine.addStep({
     id: 'goldPriceCheck',
-    name: 'Check Gold/XAUT Prices (XAUT trades only)',
+    name: 'Check Gold/XAUT Prices (XAUT/Gold trades only)',
     required: false,
     execute: async (ctx) => {
       const traceResult = ctx.stepResults.get('trace')?.data;
@@ -432,14 +550,16 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Check if this is a XAUT trade
+      // Check if this is a XAUT/Gold trade
       const parsingStep = traceResult.steps?.find((s: any) => s.step.includes('Parsing'));
       const tradingPair = parsingStep?.details?.tradingPair;
       
-      if (!tradingPair || (!tradingPair.toUpperCase().includes('XAUT') && tradingPair.toUpperCase() !== 'GOLD')) {
+      const upperPair = tradingPair?.toUpperCase() ?? '';
+      const isGoldTrade = upperPair.includes('XAUT') || upperPair.includes('XAU') || upperPair === 'GOLD';
+      if (!tradingPair || !isGoldTrade) {
         return {
           success: true,
-          message: 'Not a XAUT/Gold trade - skipping gold price check',
+          message: 'Not a XAUT/XAU/Gold trade - skipping gold price check',
           data: { skipped: true }
         };
       }
@@ -485,15 +605,40 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       }
 
-      // Get XAUT entry price from parsing or trade
-      const xautPrice = parsingStep?.details?.entryPrice || firstTrade.entryPrice;
+      // Get entry price from parsing or trade
+      const entryPrice = parsingStep?.details?.entryPrice ?? firstTrade.entryPrice;
+
+      if (isCTraderFromTrace(traceResult)) {
+        try {
+          const ctraderClient = await ctx.getCTraderClient?.(firstTrade.accountName);
+          const comparison = await getGoldPriceComparisonForCTrader(
+            new Date(entryTimestamp),
+            entryPrice ?? 0,
+            ctraderClient
+          );
+          return {
+            success: true,
+            message: 'cTrader Gold/XAU price comparison completed',
+            data: { comparison }
+          };
+        } catch (error) {
+          logger.error('Error checking cTrader gold prices', {
+            error: error instanceof Error ? error.message : String(error)
+          });
+          return {
+            success: false,
+            message: 'Failed to check gold prices',
+            error: error instanceof Error ? error.message : String(error)
+          };
+        }
+      }
 
       try {
         const bybitClient = await ctx.getBybitClient?.(firstTrade.accountName);
         const comparison = await getGoldPriceComparison(
           bybitClient,
           new Date(entryTimestamp),
-          xautPrice
+          entryPrice
         );
 
         return {
@@ -618,25 +763,43 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             findings.push(`  Found ${msgErrors.length} error log(s) for this message`);
           }
         } else {
-          findings.push('\n📋 Log confirmation: No logs found for this message (check Loggly config or time range)');
+          const params = logglyData.searchParams;
+          findings.push('\n📋 Log confirmation: No logs found for this message');
+          if (params) {
+            findings.push(`   Query: ${params.query}`);
+            findings.push(`   Window: ${params.from} → ${params.until}`);
+            recommendations.push('If logs exist: check field names (messageId vs message_id) or run: npm run query-loggly -- message ' + ctx.args.messageId + ' ' + (ctx.args.channel || ''));
+          } else {
+            recommendations.push('Run npm run loggly-diagnose to verify connection; check time range covers when message was processed');
+          }
         }
       } else {
-        findings.push('\n📋 Log confirmation: Logs not queried (Loggly client unavailable - set LOGGLY_API_TOKEN)');
-        recommendations.push('Configure LOGGLY_API_TOKEN and LOGGLY_SUBDOMAIN for log confirmation in investigations');
+        const status = ctx.logglyConfigStatus;
+        if (status && !status.configured) {
+          findings.push(`\n📋 Log confirmation: Loggly not configured (${status.missing.join(', ')} missing)`);
+          findings.push(`   ${status.hint}`);
+          recommendations.push(`Set ${status.missing.join(' and ')} for Loggly log searches`);
+        } else {
+          findings.push('\n📋 Log confirmation: Logs not queried (Loggly client unavailable)');
+          recommendations.push('Set LOGGLY_SUBDOMAIN and LOGGLY_API_TOKEN (or LOGGLY_TOKEN) in .env-investigation');
+        }
       }
 
-      // Add order details to findings if available
+      // Add order details to findings if available (Bybit or cTrader)
       if (orderData?.orders && orderData.orders.length > 0) {
-        findings.push(`Bybit Orders: ${orderData.foundCount} found, ${orderData.notFoundCount} not found`);
-        
+        const exchangeLabel = isCTraderFromTrace(traceResult) ? 'cTrader' : 'Bybit';
+        findings.push(`${exchangeLabel} Orders: ${orderData.foundCount} found, ${orderData.notFoundCount} not found`);
+
         orderData.orders.forEach((order: any) => {
           if (order.found) {
             findings.push(`  ✅ Order ${order.orderId} (${order.accountName}): ${order.orderStatus || 'unknown'} - ${order.foundIn}`);
             if (order.avgPrice) {
-              findings.push(`     Avg Price: ${order.avgPrice}, Executed Qty: ${order.cumExecQty || '0'}/${order.qty || 'N/A'}`);
+              const qty = order.cumExecQty ?? order.quantity ?? order.qty ?? '0';
+              findings.push(`     Avg Price: ${order.avgPrice}, Qty: ${qty}`);
             }
           } else {
-            findings.push(`  ❌ Order ${order.orderId} (${order.accountName}): Not found on Bybit`);
+            const exchange = isCTraderFromTrace(traceResult) ? 'cTrader' : 'Bybit';
+            findings.push(`  ❌ Order ${order.orderId} (${order.accountName}): Not found on ${exchange}`);
             if (order.error) {
               findings.push(`     Error: ${order.error}`);
             }
@@ -644,19 +807,28 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         });
       }
 
-      // Add gold/PAXG price comparison for XAUT trades
+      // Add gold/PAXG price comparison for XAUT/XAU trades
       if (goldPriceData?.comparison && !goldPriceData.skipped) {
         const comp = goldPriceData.comparison;
+        const isCTrader = isCTraderFromTrace(traceResult);
+        const entryLabel = isCTrader ? 'XAU' : 'XAUT'; // cTrader trades XAUUSD (spot gold); Bybit trades XAUT
         findings.push(`\n🥇 Gold Price Comparison at Entry:`);
         
         if (comp.paxgPrice) {
           findings.push(`  PAXG Price: $${comp.paxgPrice.toFixed(2)}`);
         }
         if (comp.xautPrice) {
-          findings.push(`  XAUT Price: $${comp.xautPrice.toFixed(2)}`);
+          findings.push(`  ${entryLabel} Price: $${comp.xautPrice.toFixed(2)}`);
         }
         if (comp.goldPrice) {
-          findings.push(`  Gold (XAU/USD) Price: $${comp.goldPrice.toFixed(2)} ${comp.goldSource ? `(${comp.goldSource})` : ''}`);
+          const sourceNote = comp.goldSource
+            ? (comp.goldTimestampUsed
+              ? `(${comp.goldSource}, at: ${comp.goldTimestampUsed})`
+              : comp.goldDateUsed
+                ? `(${comp.goldSource}, date: ${comp.goldDateUsed})`
+                : `(${comp.goldSource})`)
+            : '';
+          findings.push(`  Gold (XAU/USD) Price: $${comp.goldPrice.toFixed(2)} ${sourceNote}`);
         }
 
         if (comp.comparison) {
@@ -666,7 +838,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           }
           if (comp.comparison.xautVsGold) {
             const { difference, percent } = comp.comparison.xautVsGold;
-            findings.push(`  XAUT vs Gold: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
+            findings.push(`  ${entryLabel} vs Gold: $${difference > 0 ? '+' : ''}${difference.toFixed(2)} (${percent > 0 ? '+' : ''}${percent.toFixed(3)}%)`);
           }
         }
 

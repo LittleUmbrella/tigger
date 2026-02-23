@@ -6,10 +6,17 @@
  */
 
 import { DatabaseManager } from '../db/schema.js';
-import { LogglyApiClient, createLogglyApiClient } from '../utils/logglyApiClient.js';
+import { LogglyApiClient, createLogglyApiClient, getLogglyConfigStatus } from '../utils/logglyApiClient.js';
 import { RestClientV5 } from 'bybit-api';
+import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import { logger } from '../utils/logger.js';
 import { traceMessage } from '../scripts/trace_message.js';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const projectRoot = path.resolve(__dirname, '../..');
 
 export interface WorkflowStep {
   id: string;
@@ -29,7 +36,9 @@ export interface WorkflowStepResult {
 export interface WorkflowContext {
   db: DatabaseManager;
   logglyClient?: LogglyApiClient;
+  logglyConfigStatus?: import('../utils/logglyApiClient.js').LogglyConfigStatus;
   getBybitClient?: (accountName?: string) => Promise<RestClientV5 | undefined>;
+  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>;
   args: Record<string, any>;
   stepResults: Map<string, WorkflowStepResult>;
   [key: string]: any;
@@ -170,7 +179,7 @@ export async function createWorkflowContext(
 
   // Helper to get Bybit client (loads config and creates client)
   const getBybitClient = async (accountName?: string): Promise<RestClientV5 | undefined> => {
-    const configPath = process.env.CONFIG_PATH || 'config.json';
+    const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
     let config: any = null;
     
     try {
@@ -226,10 +235,88 @@ export async function createWorkflowContext(
     });
   };
 
+  // Helper to get cTrader client (loads config and creates client)
+  const getCTraderClient = async (accountName?: string): Promise<CTraderClient | undefined> => {
+    const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+    let config: any = null;
+
+    try {
+      const fs = await import('fs-extra');
+      if (await fs.default.pathExists(configPath)) {
+        const configContent = await fs.default.readFile(configPath, 'utf-8');
+        config = JSON.parse(configContent);
+      }
+    } catch (error) {
+      logger.warn('Failed to load config for cTrader client', { error });
+    }
+
+    const account = config?.accounts?.find((acc: any) =>
+      acc.exchange === 'ctrader' && (accountName ? acc.name === accountName : true)
+    ) || config?.accounts?.find((acc: any) => acc.exchange === 'ctrader');
+
+    if (!account) {
+      const clientId = process.env.CTRADER_CLIENT_ID;
+      const clientSecret = process.env.CTRADER_CLIENT_SECRET;
+      const accessToken = process.env.CTRADER_ACCESS_TOKEN;
+      const accountId = process.env.CTRADER_ACCOUNT_ID;
+      if (!clientId || !clientSecret || !accessToken || !accountId) return undefined;
+      const clientConfig: CTraderClientConfig = {
+        clientId,
+        clientSecret,
+        accessToken,
+        accountId,
+        environment: 'demo'
+      };
+      const client = new CTraderClient(clientConfig);
+      try {
+        await client.connect();
+        await client.authenticate();
+        return client;
+      } catch (err) {
+        logger.warn('cTrader connect failed', { error: err });
+        return undefined;
+      }
+    }
+
+    const envKey = account.envVarNames?.apiKey || account.envVars?.apiKey;
+    const envSecret = account.envVarNames?.apiSecret || account.envVars?.apiSecret;
+    const envToken = account.envVarNames?.accessToken || account.envVars?.accessToken;
+    const envAccountId = account.envVarNames?.accountId || account.envVars?.accountId;
+
+    const clientId = envKey ? process.env[envKey] : process.env.CTRADER_CLIENT_ID;
+    const clientSecret = envSecret ? process.env[envSecret] : process.env.CTRADER_CLIENT_SECRET;
+    const accessToken = envToken ? process.env[envToken] : process.env.CTRADER_ACCESS_TOKEN;
+    const accountId = envAccountId ? process.env[envAccountId] : process.env.CTRADER_ACCOUNT_ID;
+
+    if (!clientId || !clientSecret || !accessToken || !accountId) return undefined;
+
+    const clientConfig: CTraderClientConfig = {
+      clientId,
+      clientSecret,
+      accessToken,
+      accountId,
+      environment: account.demo ? 'demo' : 'live'
+    };
+
+    const client = new CTraderClient(clientConfig);
+    try {
+      await client.connect();
+      await client.authenticate();
+      return client;
+    } catch (err) {
+      logger.warn('cTrader connect failed', { accountName: account.name, error: err });
+      return undefined;
+    }
+  };
+
+  const logglyConfigStatus = getLogglyConfigStatus();
+
   return {
     db,
     logglyClient: logglyClient || undefined,
+    logglyConfigStatus,
     getBybitClient,
+    getCTraderClient,
     args,
     stepResults: new Map()
   };

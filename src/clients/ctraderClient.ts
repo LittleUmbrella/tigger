@@ -2,6 +2,14 @@ import { logger } from '../utils/logger.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
 
 /**
+ * Fixed price scale for cTrader Open API.
+ * Per official docs (help.ctrader.com/open-api/symbol-data): all price fields
+ * (trendbars, ticks, spot bid/ask) use the same encoding: divide by 100000.
+ * Do NOT use symbol.digits for scale - that causes wrong prices for symbols like XAUUSD (digits=2).
+ */
+const CTRADER_PRICE_SCALE = 100000;
+
+/**
  * cTrader OpenAPI client configuration
  */
 export interface CTraderClientConfig {
@@ -210,8 +218,6 @@ export class CTraderClient {
       : symbolInfo.symbolId;
 
     const { protobufLongToNumber } = await import('../utils/protobufLong.js');
-    const digits = symbolInfo.digits ?? 5;
-    const scale = Math.pow(10, digits);
 
     const periodMap: Record<string, number> = {
       M1: 1, M5: 5, M15: 7, M30: 8, H1: 9, H4: 10, D1: 12
@@ -243,10 +249,10 @@ export class CTraderClient {
           const deltaHigh = protobufLongToNumber(bar.deltaHigh) ?? 0;
           const deltaClose = protobufLongToNumber(bar.deltaClose) ?? 0;
 
-          const low = lowRaw / scale;
-          const open = (lowRaw + deltaOpen) / scale;
-          const high = (lowRaw + deltaHigh) / scale;
-          const close = (lowRaw + deltaClose) / scale;
+          const low = lowRaw / CTRADER_PRICE_SCALE;
+          const open = (lowRaw + deltaOpen) / CTRADER_PRICE_SCALE;
+          const high = (lowRaw + deltaHigh) / CTRADER_PRICE_SCALE;
+          const close = (lowRaw + deltaClose) / CTRADER_PRICE_SCALE;
           const utcMinutes = protobufLongToNumber(bar.utcTimestampInMinutes) ?? 0;
           const timestamp = utcMinutes * 60 * 1000;
 
@@ -309,8 +315,6 @@ export class CTraderClient {
       : symbolInfo.symbolId;
 
     const { protobufLongToNumber } = await import('../utils/protobufLong.js');
-    const digits = symbolInfo.digits ?? 5;
-    const scale = Math.pow(10, digits);
 
     const typeNum = params.type === 'ASK' ? 2 : 1; // ProtoOAQuoteType: BID=1, ASK=2
     const maxChunkMs = 7 * 24 * 60 * 60 * 1000; // 1 week
@@ -334,13 +338,18 @@ export class CTraderClient {
 
           const ticks = response?.tickData || [];
           let lastTimestampMs: number | null = null;
+          // Each response chunk: first tick is absolute price, subsequent are deltas (cTrader format)
+          let lastPrice: number | null = null;
           for (const t of ticks) {
             const tsRaw = protobufLongToNumber(t.timestamp) ?? 0;
             const tickRaw = protobufLongToNumber(t.tick) ?? 0;
             const absTimestamp: number = lastTimestampMs === null ? tsRaw : lastTimestampMs + tsRaw;
             lastTimestampMs = absTimestamp;
-            const price = tickRaw / scale;
-            result.push({ timestamp: absTimestamp, price });
+            // First tick in chunk: absolute price. Subsequent: delta from previous (cTrader format)
+            const priceDelta = tickRaw / CTRADER_PRICE_SCALE;
+            const tickPrice: number = lastPrice === null ? priceDelta : lastPrice + priceDelta;
+            lastPrice = tickPrice;
+            result.push({ timestamp: absTimestamp, price: tickPrice });
           }
 
           const hasMore = response?.hasMore === true;
@@ -708,6 +717,53 @@ export class CTraderClient {
       });
     } catch (error) {
       logger.error('Failed to get open orders', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get closed orders (cancelled, filled, expired) within a time window.
+   * Uses ProtoOAOrderListReq. Max window 1 week (604800000 ms).
+   */
+  async getClosedOrders(fromTimestamp: number, toTimestamp: number): Promise<any[]> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    const maxWindow = 604800000; // 1 week
+    if (toTimestamp - fromTimestamp > maxWindow) {
+      toTimestamp = fromTimestamp + maxWindow;
+    }
+
+    try {
+      const response = await this.connection.sendCommand('ProtoOAOrderListReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        fromTimestamp,
+        toTimestamp
+      });
+
+      const orders = response?.order || [];
+      return orders.map((o: any) => {
+        const orderId = typeof o.orderId === 'object' && o.orderId?.low != null ? o.orderId.low : o.orderId;
+        const status = o.orderStatus ?? o.order_status ?? 'unknown';
+        const statusStr = typeof status === 'number'
+          ? ['', 'ACCEPTED', 'FILLED', 'REJECTED', 'EXPIRED', 'CANCELLED'][status] || String(status)
+          : String(status);
+        return {
+          ...o,
+          orderId: orderId != null ? String(orderId) : o.orderId,
+          id: orderId ?? o.id,
+          orderStatus: statusStr,
+          limitPrice: o.limitPrice ?? o.limit_price,
+          executionPrice: o.executionPrice ?? o.execution_price
+        };
+      });
+    } catch (error) {
+      logger.error('Failed to get closed orders', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)

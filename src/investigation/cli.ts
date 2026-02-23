@@ -1,9 +1,9 @@
 #!/usr/bin/env tsx
 /**
  * Investigation CLI
- * 
+ *
  * Command-line interface for investigation slash commands.
- * 
+ *
  * Usage:
  *   npm run investigate -- /trace message:12345 channel:2394142145
  *   npm run investigate -- /investigate message:12345
@@ -11,33 +11,31 @@
  *   npm run investigate -- /check-logs message:12345 channel:2394142145
  */
 
+// MUST load env first, before logger (which checks LOGGLY_TOKEN at import time)
+import '../scripts/dotenv-preload.js';
+
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
 import { parseCommandFlexible } from './commandParser.js';
 import { commandRegistry } from './index.js';
 import { createWorkflowContext } from './workflowEngine.js';
 import { logger } from '../utils/logger.js';
-import dotenv from 'dotenv';
-import path from 'path';
-import { fileURLToPath } from 'url';
-import fs from 'fs';
 
-// Load .env-investigation first, then fall back to .env
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const projectRoot = path.resolve(__dirname, '../..');
 
-// Try .env-investigation first, then .env
+// Re-apply in case dotenv-preload didn't run (e.g. different entry)
 const envInvestigationPath = path.join(projectRoot, '.env-investigation');
 const envPath = path.join(projectRoot, '.env');
-
-// Load .env-investigation if it exists, otherwise load .env
 if (fs.existsSync(envInvestigationPath)) {
   dotenv.config({ path: envInvestigationPath });
   logger.info('Loaded environment variables from .env-investigation');
 } else if (fs.existsSync(envPath)) {
   dotenv.config({ path: envPath });
   logger.info('Loaded environment variables from .env');
-} else {
-  dotenv.config(); // Fallback to default behavior
 }
 
 async function main() {

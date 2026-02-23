@@ -470,6 +470,40 @@ export class LogglyApiClient {
   }
 }
 
+export interface LogglyConfigStatus {
+  configured: boolean;
+  subdomain: string | null;
+  tokenSource: 'LOGGLY_API_TOKEN' | 'LOGGLY_TOKEN' | null;
+  missing: string[];
+  hint: string;
+}
+
+/**
+ * Get diagnostic status of Loggly API configuration
+ */
+export function getLogglyConfigStatus(): LogglyConfigStatus {
+  const subdomain = process.env.LOGGLY_SUBDOMAIN?.trim() || null;
+  const apiToken = process.env.LOGGLY_API_TOKEN?.trim() || null;
+  const logToken = process.env.LOGGLY_TOKEN?.trim() || null;
+  const missing: string[] = [];
+  if (!subdomain) missing.push('LOGGLY_SUBDOMAIN');
+  if (!apiToken && !logToken) missing.push('LOGGLY_API_TOKEN or LOGGLY_TOKEN');
+
+  let hint = '';
+  if (missing.length > 0) {
+    hint = `Set ${missing.join(' and ')} in .env-investigation or .env. ` +
+      'LOGGLY_API_TOKEN is for API searches; LOGGLY_TOKEN is for logging - either can work for search.';
+  }
+
+  return {
+    configured: !!subdomain && !!(apiToken || logToken),
+    subdomain,
+    tokenSource: apiToken ? 'LOGGLY_API_TOKEN' : (logToken ? 'LOGGLY_TOKEN' : null),
+    missing,
+    hint
+  };
+}
+
 /**
  * Create a Loggly API client for reading/searching logs via API
  * 
@@ -477,17 +511,14 @@ export class LogglyApiClient {
  * 
  * Logging vs API Calls:
  * - Logging (writing): winston-loggly-bulk uses LOGGLY_TOKEN
- * - API Calls (reading): This client uses LOGGLY_API_TOKEN
- * 
- * These are completely separate tokens with different purposes.
+ * - API Calls (reading): Prefers LOGGLY_API_TOKEN, falls back to LOGGLY_TOKEN if unset
  * 
  * Supports LOGGLY_USERNAME for Basic Auth (if required by your Loggly account)
  */
 export function createLogglyApiClient(): LogglyApiClient | null {
-  const subdomain = process.env.LOGGLY_SUBDOMAIN;
-  // MUST use API token - do NOT use LOGGLY_TOKEN (that's for logging via winston)
-  const token = process.env.LOGGLY_API_TOKEN;
-  const username = process.env.LOGGLY_USERNAME;
+  const subdomain = process.env.LOGGLY_SUBDOMAIN?.trim();
+  const token = process.env.LOGGLY_API_TOKEN?.trim() || process.env.LOGGLY_TOKEN?.trim();
+  const username = process.env.LOGGLY_USERNAME?.trim();
 
   if (!subdomain || !token) {
     return null;

@@ -24,6 +24,30 @@ export interface SymbolInfo {
 /**
  * Get symbol information from cTrader for quantity/precision (evaluation mode)
  */
+/**
+ * Validate if a symbol exists on cTrader (for investigation)
+ */
+export async function validateCTraderSymbol(
+  ctraderClient: { getSymbolInfo: (symbol: string) => Promise<any> },
+  symbol: string
+): Promise<{ valid: boolean; error?: string; actualSymbol?: string }> {
+  try {
+    const normalized = symbol.replace('/', '').toUpperCase();
+    const toTry = normalized.endsWith('USDT') || normalized.endsWith('USDC')
+      ? `${normalized.replace(/USDT$|USDC$/, '')}USD`
+      : normalized;
+    const info = await ctraderClient.getSymbolInfo(toTry);
+    if (info) {
+      const name = info.symbolName ?? info.symbol ?? toTry;
+      return { valid: true, actualSymbol: name };
+    }
+    return { valid: false, error: `Symbol ${toTry} not found on cTrader` };
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    return { valid: false, error: msg.includes('not found') ? `Symbol ${symbol} not found on cTrader` : msg };
+  }
+}
+
 export async function getCTraderSymbolInfo(
   ctraderClient: { getSymbolInfo: (symbol: string) => Promise<any> },
   symbol: string
