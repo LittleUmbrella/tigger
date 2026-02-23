@@ -6,6 +6,7 @@ import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
+import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
@@ -336,7 +337,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent } = context;
 
   try {
     // Log trade initiation start for this account - critical for investigations
@@ -754,8 +755,8 @@ const executeTradeForAccount = async (
       return formatted.replace(/\.?0+$/, '');
     };
 
-    // Round stop loss to exchange precision
-    const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
+    // Round stop loss to exchange precision (let: may be adjusted when price past SL)
+    let roundedStopLoss = order.stopLoss && order.stopLoss > 0 
       ? roundPrice(order.stopLoss, pricePrecision, tickSize)
       : order.stopLoss;
 
@@ -1175,18 +1176,55 @@ const executeTradeForAccount = async (
               }
               
               if (priceAlreadyPastStopLoss) {
-                logger.warn('Rejecting order: current market price is already past stop loss', {
-                  channel,
-                  symbol,
-                  messageId: message.message_id,
-                  signalType: order.signalType,
+                const tolerance = slAdjustmentTolerancePercent ?? 0;
+                if (tolerance <= 0) {
+                  logger.warn('Rejecting order: current market price is already past stop loss', {
+                    channel,
+                    symbol,
+                    messageId: message.message_id,
+                    signalType: order.signalType,
+                    currentPrice,
+                    stopLoss: roundedStopLoss,
+                    entryPrice: roundedEntryPrice,
+                    reason
+                  });
+                  throw new Error(`Order rejected: ${reason}. Entry would trigger stop loss immediately.`);
+                }
+                const messageEntry = order.entryPrice && order.entryPrice > 0 ? order.entryPrice : roundedEntryPrice;
+                const adjustResult = tryAdjustStopLossWhenPastSL(
+                  messageEntry,
+                  roundedStopLoss,
                   currentPrice,
-                  stopLoss: roundedStopLoss,
-                  entryPrice: roundedEntryPrice,
-                  reason
-                });
-                
-                throw new Error(`Order rejected: ${reason}. Entry would trigger stop loss immediately.`);
+                  order.signalType,
+                  tolerance,
+                  (p) => roundPrice(p, pricePrecision, tickSize)
+                );
+                if (adjustResult.adjusted) {
+                  const originalSl = roundedStopLoss;
+                  roundedStopLoss = adjustResult.newStopLoss;
+                  logger.info('Adjusted stop loss proportionally - price was past original SL within tolerance', {
+                    channel,
+                    symbol,
+                    signalType: order.signalType,
+                    currentPrice,
+                    originalStopLoss: originalSl,
+                    adjustedStopLoss: roundedStopLoss,
+                    messageEntry,
+                    tolerancePercent: tolerance
+                  });
+                } else {
+                  logger.warn('Rejecting order: current market price past stop loss, adjustment not within tolerance', {
+                    channel,
+                    symbol,
+                    messageId: message.message_id,
+                    signalType: order.signalType,
+                    currentPrice,
+                    stopLoss: roundedStopLoss,
+                    entryPrice: roundedEntryPrice,
+                    rejectReason: adjustResult.rejectReason
+                  });
+                  throw new Error(`Order rejected: ${adjustResult.rejectReason}`);
+                }
               }
               
               logger.debug('Stop loss validation passed', {

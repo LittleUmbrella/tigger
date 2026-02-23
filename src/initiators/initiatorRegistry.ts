@@ -24,6 +24,7 @@ export interface InitiatorContext {
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   forcePlaceTrade?: boolean; // If true, bypass existing-trade check (for manual retries when DB has stale data)
+  slAdjustmentTolerancePercent?: number; // Per-channel: when price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
 }
 
 /**

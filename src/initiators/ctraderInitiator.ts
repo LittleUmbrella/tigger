@@ -5,7 +5,9 @@ import { logger } from '../utils/logger.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
+import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
+import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
@@ -159,28 +161,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
 };
 
 /**
- * Normalize trading pair symbol for cTrader
- * cTrader uses format like "BTCUSD" or "EURUSD"
- */
-const normalizeCTraderSymbol = (tradingPair: string): string => {
-  // Remove slash and convert to uppercase
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  
-  // cTrader typically uses formats like BTCUSD, EURUSD, etc.
-  // If it doesn't end with USD, add it
-  if (!normalized.endsWith('USD')) {
-    // Try to detect if it already has a quote currency
-    const commonQuotes = ['USDT', 'USDC', 'EUR', 'GBP', 'JPY'];
-    const hasQuote = commonQuotes.some(quote => normalized.endsWith(quote));
-    if (!hasQuote) {
-      normalized = normalized + 'USD';
-    }
-  }
-  
-  return normalized;
-};
-
-/**
  * Execute a trade for a single account
  */
 const executeTradeForAccount = async (
@@ -188,7 +168,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent } = context;
 
   let ctraderClient: CTraderClient | undefined = undefined;
 
@@ -704,8 +684,8 @@ const executeTradeForAccount = async (
       positionSize
     });
     
-    // Round stop loss to exchange precision (Gap #3)
-    const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
+    // Round stop loss to exchange precision (Gap #3) (let: may be adjusted when price past SL)
+    let roundedStopLoss = order.stopLoss && order.stopLoss > 0 
       ? roundPrice(order.stopLoss, pricePrecision, tickSize)
       : order.stopLoss;
 
@@ -909,19 +889,58 @@ const executeTradeForAccount = async (
           }
           
           if (priceAlreadyPastStopLoss) {
-            logger.warn('Rejecting order: current market price is already past stop loss', {
-              channel,
-              symbol,
-              messageId: message.message_id,
-              accountName: accountName || 'default',
-              signalType: order.signalType,
+            const tolerance = slAdjustmentTolerancePercent ?? 0;
+            if (tolerance <= 0) {
+              logger.warn('Rejecting order: current market price is already past stop loss', {
+                channel,
+                symbol,
+                messageId: message.message_id,
+                accountName: accountName || 'default',
+                signalType: order.signalType,
+                currentPrice,
+                stopLoss: roundedStopLoss,
+                entryPrice: roundedEntryPrice,
+                reason
+              });
+              throw new Error(`Order rejected: ${reason}. Entry would trigger stop loss immediately.`);
+            }
+            const messageEntry = order.entryPrice && order.entryPrice > 0 ? order.entryPrice : roundedEntryPrice;
+            const adjustResult = tryAdjustStopLossWhenPastSL(
+              messageEntry,
+              roundedStopLoss,
               currentPrice,
-              stopLoss: roundedStopLoss,
-              entryPrice: roundedEntryPrice,
-              reason
-            });
-            
-            throw new Error(`Order rejected: ${reason}. Entry would trigger stop loss immediately.`);
+              order.signalType,
+              tolerance,
+              (p) => roundPrice(p, pricePrecision, tickSize)
+            );
+            if (adjustResult.adjusted) {
+              const originalSl = roundedStopLoss;
+              roundedStopLoss = adjustResult.newStopLoss;
+              logger.info('Adjusted stop loss proportionally - price was past original SL within tolerance', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                signalType: order.signalType,
+                currentPrice,
+                originalStopLoss: originalSl,
+                adjustedStopLoss: roundedStopLoss,
+                messageEntry,
+                tolerancePercent: tolerance
+              });
+            } else {
+              logger.warn('Rejecting order: current market price past stop loss, adjustment not within tolerance', {
+                channel,
+                symbol,
+                messageId: message.message_id,
+                accountName: accountName || 'default',
+                signalType: order.signalType,
+                currentPrice,
+                stopLoss: roundedStopLoss,
+                entryPrice: roundedEntryPrice,
+                rejectReason: adjustResult.rejectReason
+              });
+              throw new Error(`Order rejected: ${adjustResult.rejectReason}`);
+            }
           }
           
           logger.debug('Stop loss validation passed', {

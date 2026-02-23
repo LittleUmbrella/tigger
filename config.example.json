@@ -106,7 +106,8 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "breakevenAfterTPs": 1,
-      "baseLeverage": 15
+      "baseLeverage": 15,
+      "slAdjustmentTolerancePercent": 10
     }
   ],
   "database": {

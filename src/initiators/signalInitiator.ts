@@ -100,7 +100,8 @@ export const processUnparsedMessages = async (
   maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
   propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
-  tradeObfuscation?: TradeObfuscationConfig // Random percent adjustment for sl/entry/tp
+  tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
+  slAdjustmentTolerancePercent?: number // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -184,7 +185,8 @@ export const processUnparsedMessages = async (
     initiatorName,
     accountFilters,
     propFirms,
-    tradeObfuscation
+    tradeObfuscation,
+    slAdjustmentTolerancePercent
   );
   
   logger.debug('Finished processing messages', {
@@ -212,7 +214,8 @@ export const processMessages = async (
   initiatorName?: string,
   accountFilters?: AccountFilter[],
   propFirms?: (string | CustomPropFirmConfig)[],
-  tradeObfuscation?: TradeObfuscationConfig
+  tradeObfuscation?: TradeObfuscationConfig,
+  slAdjustmentTolerancePercent?: number
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -290,7 +293,8 @@ export const processMessages = async (
           config: mergedInitiatorConfig,
           accounts,
           accountFilters,
-          propFirms
+          propFirms,
+          slAdjustmentTolerancePercent
         };
 
         try {

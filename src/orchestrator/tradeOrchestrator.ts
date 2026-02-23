@@ -898,7 +898,8 @@ export const startTradeOrchestrator = async (
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
           channelConfig.propFirms, // Pass prop firm configurations
-          channelConfig.tradeObfuscation // Pass trade obfuscation for sl/entry/tp
+          channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
+          channelConfig.slAdjustmentTolerancePercent // Pass SL adjustment tolerance when price past SL
         );
       }
     };
@@ -952,7 +953,8 @@ export const startTradeOrchestrator = async (
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
           channelConfig.propFirms, // Pass prop firm configurations
-          channelConfig.tradeObfuscation // Pass trade obfuscation for sl/entry/tp
+          channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
+          channelConfig.slAdjustmentTolerancePercent // Pass SL adjustment tolerance when price past SL
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,
