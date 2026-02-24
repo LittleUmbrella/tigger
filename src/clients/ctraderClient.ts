@@ -324,27 +324,32 @@ export class CTraderClient {
 
     while (currentFrom < toTs) {
       const currentTo = Math.min(currentFrom + maxChunkMs, toTs);
-      let chunkFrom = currentFrom;
+      let chunkTo = currentTo;
 
       try {
-        while (chunkFrom < currentTo) {
+        // cTrader returns ticks in descending order (newest first). When hasMore, request OLDER data
+        // by using the oldest timestamp we got as the new toTimestamp.
+        while (currentFrom <= chunkTo) {
           const response = await this.connection.sendCommand('ProtoOAGetTickDataReq', {
             ctidTraderAccountId: accountIdNum,
             symbolId,
             type: typeNum,
-            fromTimestamp: chunkFrom,
-            toTimestamp: currentTo,
+            fromTimestamp: currentFrom,
+            toTimestamp: chunkTo,
           });
 
           const ticks = response?.tickData || [];
           let lastTimestampMs: number | null = null;
+          let minTimestampMs: number | null = null;
           // Each response chunk: first tick is absolute price, subsequent are deltas (cTrader format)
+          // Ticks are in descending order (newest first)
           let lastPrice: number | null = null;
           for (const t of ticks) {
             const tsRaw = protobufLongToNumber(t.timestamp) ?? 0;
             const tickRaw = protobufLongToNumber(t.tick) ?? 0;
             const absTimestamp: number = lastTimestampMs === null ? tsRaw : lastTimestampMs + tsRaw;
             lastTimestampMs = absTimestamp;
+            if (minTimestampMs === null || absTimestamp < minTimestampMs) minTimestampMs = absTimestamp;
             // First tick in chunk: absolute price. Subsequent: delta from previous (cTrader format)
             const priceDelta = tickRaw / CTRADER_PRICE_SCALE;
             const tickPrice: number = lastPrice === null ? priceDelta : lastPrice + priceDelta;
@@ -354,9 +359,10 @@ export class CTraderClient {
 
           const hasMore = response?.hasMore === true;
           if (!hasMore || ticks.length === 0) break;
-          const nextFrom = lastTimestampMs !== null ? lastTimestampMs + 1 : chunkFrom;
-          if (nextFrom >= currentTo) break;
-          chunkFrom = nextFrom;
+          // Request older ticks: use oldest timestamp in this chunk as new toTimestamp
+          const nextChunkTo = minTimestampMs !== null ? minTimestampMs - 1 : chunkTo - 1;
+          if (nextChunkTo < currentFrom) break;
+          chunkTo = nextChunkTo;
           await new Promise(r => setTimeout(r, 100));
         }
       } catch (error) {
@@ -717,6 +723,48 @@ export class CTraderClient {
       });
     } catch (error) {
       logger.error('Failed to get open orders', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get deal history (executions) within a time window.
+   * Uses ProtoOADealListReq. Deals include orderId - useful to find if an order was filled.
+   */
+  async getDealList(fromTimestamp: number, toTimestamp: number, maxRows: number = 1000): Promise<any[]> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    const maxWindow = 604800000; // 1 week
+    if (toTimestamp - fromTimestamp > maxWindow) {
+      toTimestamp = fromTimestamp + maxWindow;
+    }
+
+    try {
+      const response = await this.connection.sendCommand('ProtoOADealListReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        fromTimestamp,
+        toTimestamp,
+        maxRows
+      });
+
+      const deals = response?.deal || [];
+      return deals.map((d: any) => {
+        const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+        return {
+          ...d,
+          orderId: orderId != null ? String(orderId) : d.orderId,
+          dealStatus: d.dealStatus ?? d.deal_status,
+          executionPrice: d.executionPrice ?? d.execution_price
+        };
+      });
+    } catch (error) {
+      logger.error('Failed to get deal list', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)

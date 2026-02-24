@@ -1478,13 +1478,15 @@ const executeTradeForAccount = async (
         throw new Error(`Order placement failed after retries: ${JSON.stringify(orderResponse)}`);
       }
 
-      // Insert trade record early so we can update it if needed (e.g., if we need to close position)
+      // Use explicit UTC for created_at; DB CURRENT_TIMESTAMP can differ by timezone
+      const nowUtc = dayjs().toISOString();
       const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
       try {
         tradeId = await db.insertTrade({
           message_id: message.message_id,
           channel: channel,
           trading_pair: order.tradingPair,
+          created_at: nowUtc,
           leverage: effectiveLeverage,
           entry_price: roundedEntryPrice,
           stop_loss: roundedStopLoss || order.stopLoss,
@@ -2220,6 +2222,7 @@ const executeTradeForAccount = async (
     // Update trade record if it was already inserted earlier, otherwise insert it now
     // (For market orders, trade was inserted earlier to allow closing position if needed)
     if (!tradeId) {
+      const nowUtc = dayjs().toISOString();
       const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
       tradeId = await db.insertTrade({
         message_id: message.message_id,
@@ -2238,7 +2241,8 @@ const executeTradeForAccount = async (
         direction: order.signalType, // Store direction: 'long' or 'short'
         status: 'pending',
         stop_loss_breakeven: false,
-        expires_at: expiresAt
+        expires_at: expiresAt,
+        created_at: nowUtc
       });
     } else {
       // Update existing trade with final TP prices (may have been filtered)

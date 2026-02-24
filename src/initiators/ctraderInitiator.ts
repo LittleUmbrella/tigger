@@ -1030,7 +1030,8 @@ const executeTradeForAccount = async (
       throw new Error('No cTrader client available');
     }
 
-    // Calculate expiration time
+    // Use explicit UTC for created_at; DB CURRENT_TIMESTAMP can differ by timezone
+    const nowUtc = dayjs().toISOString();
     const expiresAt = dayjs().add(entryTimeoutMinutes, 'minute').toISOString();
 
     // Insert trade record early so we can update it if needed
@@ -1038,6 +1039,7 @@ const executeTradeForAccount = async (
       tradeId = await db.insertTrade({
         channel,
         message_id: message.message_id,
+        created_at: nowUtc,
         trading_pair: order.tradingPair,
         direction: order.signalType, // long/short
         entry_price: roundedEntryPrice,
@@ -1525,9 +1527,10 @@ const executeTradeForAccount = async (
           account_name: accountName || undefined,
           order_id: orderId,
           entry_order_type: 'limit',
-          status: 'pending',
-          stop_loss_breakeven: false,
-          expires_at: expiresAt
+        status: 'pending',
+        stop_loss_breakeven: false,
+        expires_at: expiresAt,
+        created_at: nowUtc
         });
       } catch (error) {
         logger.error('Failed to insert trade record', {
