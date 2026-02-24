@@ -387,7 +387,8 @@ const executeTradeForAccount = async (
     if (isUsingMarketPrice) {
       if (!isSimulation && ctraderClient) {
         try {
-          const currentPrice = await ctraderClient.getCurrentPrice(symbol);
+          const priceSide: 'buy' | 'sell' = order.signalType === 'long' ? 'buy' : 'sell';
+          const currentPrice = await ctraderClient.getCurrentPrice(symbol, priceSide);
           if (currentPrice !== null && currentPrice > 0) {
             entryPrice = currentPrice;
             logger.info('Using current market price for limit order entry', { symbol, entryPrice });

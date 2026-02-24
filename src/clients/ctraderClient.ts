@@ -917,8 +917,10 @@ export class CTraderClient {
   /**
    * Get current price for a symbol
    * Subscribes to spot events and waits for the first spot event which contains current prices
+   * @param side - When provided, returns ask for 'buy' and bid for 'sell' to improve fill probability
+   *               on limit orders. When omitted, returns mid price (bid+ask)/2.
    */
-  async getCurrentPrice(symbol: string): Promise<number | null> {
+  async getCurrentPrice(symbol: string, side?: 'buy' | 'sell'): Promise<number | null> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -983,7 +985,14 @@ export class CTraderClient {
             const ask = event.ask ? event.ask / 100000 : null;
             
             if (bid && ask) {
-              resolve((bid + ask) / 2); // Return mid price
+              // Use side-appropriate price for better fill probability on limit orders
+              if (side === 'buy') {
+                resolve(ask);
+              } else if (side === 'sell') {
+                resolve(bid);
+              } else {
+                resolve((bid + ask) / 2); // Mid price when no side specified
+              }
             } else if (bid) {
               resolve(bid);
             } else if (ask) {
