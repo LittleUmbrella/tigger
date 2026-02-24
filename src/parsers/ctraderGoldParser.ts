@@ -5,7 +5,10 @@ import { ParserOptions } from './parserRegistry.js';
 
 /**
  * Parser for cTrader gold trading signals with two formats:
- * 
+ *
+ * When "now" precedes the entry range (e.g. "gold buy Now!! - 5054"), the signal
+ * is treated as a market order and the entry price range is ignored.
+ *
  * Format 1:
  * gold buy Now!! - 5054
  * 
@@ -51,31 +54,37 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     let entryPrice: number | undefined;
     let stopLoss: number | undefined;
     
+    // When "now" precedes the entry range, treat as market order and ignore entry price
+    const firstLine = normalizedContent.split(/\r?\n/)[0] ?? '';
+    const nowPrecedesEntry = /\bnow\b/i.test(firstLine);
+    
     // Try Format 2 first: "gold buy Now!!@5055 - 5051"
     // Entry price after @, value after dash might be stop loss or something else
     // We'll use the SL line for stop loss, but extract entry from @
-    const format2Match = normalizedContent.match(/@\s*([\d.]+)/i);
-    if (format2Match) {
-      const entryPriceStr = format2Match[1];
-      entryPrice = parseFloat(entryPriceStr);
-      
-      if (isNaN(entryPrice) || entryPrice <= 0) {
-        return null;
-      }
-      // Stop loss will be extracted from SL line below
-    } else {
-      // Try Format 1: "gold buy Now!! - 5054"
-      // Entry price after dash on first line
-      const format1Match = normalizedContent.match(/-\s*([\d.]+)/);
-      if (format1Match) {
-        const entryPriceStr = format1Match[1];
+    if (!nowPrecedesEntry) {
+      const format2Match = normalizedContent.match(/@\s*([\d.]+)/i);
+      if (format2Match) {
+        const entryPriceStr = format2Match[1];
         entryPrice = parseFloat(entryPriceStr);
         
         if (isNaN(entryPrice) || entryPrice <= 0) {
           return null;
         }
+        // Stop loss will be extracted from SL line below
       } else {
-        return null; // Neither format matched
+        // Try Format 1: "gold buy Now!! - 5054"
+        // Entry price after dash on first line
+        const format1Match = normalizedContent.match(/-\s*([\d.]+)/);
+        if (format1Match) {
+          const entryPriceStr = format1Match[1];
+          entryPrice = parseFloat(entryPriceStr);
+          
+          if (isNaN(entryPrice) || entryPrice <= 0) {
+            return null;
+          }
+        } else {
+          return null; // Neither format matched
+        }
       }
     }
     

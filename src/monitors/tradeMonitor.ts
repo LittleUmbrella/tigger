@@ -758,14 +758,20 @@ const placeTakeProfitOrders = async (
       return;
     }
 
-    // Check if TP orders already exist first (before checking bybitClient)
-    // This allows the function to work in simulation mode where orders are created by the initiator/mock exchange
+    const takeProfits = JSON.parse(trade.take_profits) as number[];
+    if (!takeProfits || takeProfits.length === 0) {
+      return;
+    }
+
+    // Check if TP orders already exist - only skip when we have ALL expected TPs
+    // Partial placement (e.g. TP1 placed, TP2 failed) must retry on next monitor cycle
     let existingOrders = await db.getOrdersByTradeId(trade.id);
     const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
-    if (existingTPOrders.length > 0) {
-      logger.debug('Take profit orders already exist, skipping placement', {
+    if (existingTPOrders.length >= takeProfits.length) {
+      logger.debug('All take profit orders already exist, skipping placement', {
         tradeId: trade.id,
-        existingTPCount: existingTPOrders.length
+        existingTPCount: existingTPOrders.length,
+        expectedTPCount: takeProfits.length
       });
       return;
     }
@@ -777,11 +783,6 @@ const placeTakeProfitOrders = async (
         exchange: trade.exchange,
         hasBybitClient: !!bybitClient
       });
-      return;
-    }
-
-    const takeProfits = JSON.parse(trade.take_profits) as number[];
-    if (!takeProfits || takeProfits.length === 0) {
       return;
     }
 
@@ -1545,24 +1546,19 @@ const monitorTrade = async (
                       orderId: trade.order_id,
                       orderStatus,
                       exchange: 'bybit',
-                      note: 'Position may have been closed already'
+                      note: 'Position closed before monitor could place TPs (likely SL hit or expiry)'
                     });
-                    
-                    // Entry was filled but position is closed - update status but can't place TPs
-                    const fillTime = trade.entry_filled_at || dayjs().toISOString();
-                    await db.updateTrade(trade.id, {
-                      status: 'active',
-                      entry_filled_at: fillTime
-                    });
-                    trade.status = 'active';
-                    trade.entry_filled_at = fillTime;
 
+                    const fillTime = trade.entry_filled_at || dayjs().toISOString();
                     await updateEntryOrderToFilled(trade, db, fillTime);
-                    
-                    logger.warn('Entry was filled but position is closed - TP orders cannot be placed', {
+
+                    // Position already closed - mark trade closed, do not set active (TPs were never placed)
+                    await updateTradeOnPositionClosed(trade, db);
+                    logger.warn('Entry was filled but position is closed - trade closed without TP orders', {
                       tradeId: trade.id,
                       symbol
                     });
+                    return;
                   }
                 }
               }
@@ -1667,7 +1663,30 @@ const monitorTrade = async (
           channel: trade.channel,
           exchange: 'bybit'
         });
-        const fillTime = dayjs().toISOString();
+        // Use actual fill time from order when available; dayjs() is monitor poll time and can be delayed
+        let fillTime: string | undefined;
+        if (trade.order_id && bybitClient) {
+          try {
+            const sym = normalizeBybitSymbol(trade.trading_pair);
+            const hist = await bybitClient.getHistoricOrders({
+              category: 'linear',
+              symbol: sym,
+              orderId: trade.order_id,
+              limit: 1
+            });
+            if (hist.retCode === 0 && hist.result?.list?.[0]) {
+              const ord = hist.result.list[0];
+              const status = getBybitField<string>(ord, 'orderStatus', 'order_status');
+              const updatedMs = getBybitField<string>(ord, 'updatedTime', 'updated_time');
+              if (status === 'Filled' && updatedMs) {
+                fillTime = new Date(parseInt(updatedMs, 10)).toISOString();
+              }
+            }
+          } catch {
+            /* ignore */
+          }
+        }
+        fillTime = fillTime ?? dayjs().toISOString();
         await db.updateTrade(trade.id, {
           status: 'active',
           entry_filled_at: fillTime,
@@ -1686,8 +1705,27 @@ const monitorTrade = async (
 
     // Monitor active trades
     if (trade.status === 'active' || trade.status === 'filled') {
-      // Check SL/TP orders for fills
       const orders = await db.getOrdersByTradeId(trade.id);
+
+      // Retry TP placement if entry filled but we have fewer TPs than expected
+      // Handles: initial placement failed, partial placement failed, monitor was down when entry filled
+      if (trade.entry_filled_at && bybitClient) {
+        const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
+        if (takeProfits.length > 0) {
+          const tpCount = orders.filter((o) => o.order_type === 'take_profit').length;
+          if (tpCount < takeProfits.length) {
+            logger.info('Retrying TP placement - active trade has fewer TPs than expected', {
+              tradeId: trade.id,
+              tpCount,
+              expectedCount: takeProfits.length,
+              exchange: 'bybit'
+            });
+            await placeTakeProfitOrders(trade, bybitClient, db);
+          }
+        }
+      }
+
+      // Check SL/TP orders for fills
       const pendingOrders = orders.filter(o => o.status === 'pending');
 
       for (const order of pendingOrders) {

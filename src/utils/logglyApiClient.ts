@@ -403,16 +403,45 @@ export class LogglyApiClient {
   }
 
   /**
-   * Search logs for a specific message ID
+   * Search logs for a specific message ID.
+   * Uses json. prefix for JSON logs (Winston outputs JSON; Loggly parses as logtype "json").
+   * Falls back to full-text if field query returns nothing.
    */
-  async searchByMessageId(messageId: number, channel: string, timeRange?: { from: string; until: string }, daysBack?: number): Promise<LogglySearchResponse> {
-    const query = `messageId:${messageId} AND channel:${channel}`;
-    return this.search({
-      query,
+  async searchByMessageId(messageId: number | string, channel: string, timeRange?: { from: string; until: string }, daysBack?: number): Promise<LogglySearchResponse> {
+    const msgId = String(messageId);
+    // Loggly indexes JSON logs under json.* - see https://documentation.solarwinds.com/en/success_center/loggly/content/admin/search-query-language.htm
+    const fieldQuery = `json.messageId:${msgId} AND json.channel:${channel}`;
+    const result = await this.search({
+      query: fieldQuery,
       from: timeRange?.from,
       until: timeRange?.until,
-      size: 1000, // Get more results for message-specific searches
+      size: 1000,
     });
+    // Fallback: try without json. prefix (legacy/different log formats)
+    if ((result.total_events ?? result.events?.length ?? 0) === 0) {
+      const fallbackQuery = `(messageId:${msgId} OR json.message_id:${msgId}) AND (channel:${channel} OR json.channel:${channel})`;
+      const fallback = await this.search({
+        query: fallbackQuery,
+        from: timeRange?.from,
+        until: timeRange?.until,
+        size: 1000,
+      });
+      if ((fallback.total_events ?? fallback.events?.length ?? 0) > 0) {
+        return fallback;
+      }
+      // Last resort: full-text (every string is searchable)
+      const textQuery = `"${msgId}" AND "${channel}"`;
+      const textResult = await this.search({
+        query: textQuery,
+        from: timeRange?.from,
+        until: timeRange?.until,
+        size: 1000,
+      });
+      if ((textResult.total_events ?? textResult.events?.length ?? 0) > 0) {
+        return textResult;
+      }
+    }
+    return result;
   }
 
   /**

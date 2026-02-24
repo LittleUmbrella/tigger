@@ -362,7 +362,9 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
         orderId: t.order_id,
         positionId: t.position_id,
         exchange: (t as Trade).exchange,
-        createdAt: t.created_at
+        createdAt: t.created_at,
+        takeProfits: t.take_profits ? (JSON.parse(t.take_profits) as number[]) : [],
+        entryFilledAt: (t as Trade).entry_filled_at
       }))
     };
 

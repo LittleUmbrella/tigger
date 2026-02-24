@@ -300,7 +300,7 @@ export async function getGoldPriceComparison(
 
 /**
  * Get gold (XAUUSD) price at a timestamp from Dukascopy historical data.
- * Uses dukascopy-node package. Returns null if unavailable or no data.
+ * Uses dukascopy-node M1 (tick causes OOM for XAUUSD). Returns null if unavailable or no data.
  */
 async function getGoldPriceFromDukascopy(timestamp: Date): Promise<GoldPriceData | null> {
   try {
@@ -312,29 +312,27 @@ async function getGoldPriceFromDukascopy(timestamp: Date): Promise<GoldPriceData
     const data = await getHistoricalRates({
       instrument: 'xauusd',
       dates: { from: fromDate, to: toDate },
-      timeframe: 'tick',
+      timeframe: 'm1',
       format: 'json'
     });
 
     if (!Array.isArray(data) || data.length === 0) return null;
 
-    type TickBar = { timestamp?: number; askPrice?: number; bidPrice?: number };
-    const ticks = data as TickBar[];
-    const withTs = ticks.filter((t): t is TickBar & { timestamp: number } => typeof t.timestamp === 'number');
+    type Candle = { timestamp?: number; open?: number; high?: number; low?: number; close?: number };
+    const candles = data as Candle[];
+    const withTs = candles.filter((c): c is Candle & { timestamp: number } => typeof c.timestamp === 'number');
     if (withTs.length === 0) return null;
     const closest = withTs.reduce((a, b) =>
       Math.abs(a.timestamp - targetMs) <= Math.abs(b.timestamp - targetMs) ? a : b
     );
-    const bid = closest.bidPrice;
-    const ask = closest.askPrice;
-    const price = (bid != null && ask != null) ? (bid + ask) / 2 : (bid ?? ask);
+    const price = closest.close ?? closest.open;
     if (typeof price !== 'number' || !Number.isFinite(price)) return null;
 
-    logger.debug('Gold price from Dukascopy tick data', {
+    logger.debug('Gold price from Dukascopy M1 data', {
       timestamp: timestamp.toISOString(),
       price,
-      tickTime: new Date(closest.timestamp).toISOString(),
-      tickCount: ticks.length
+      candleTime: new Date(closest.timestamp).toISOString(),
+      candleCount: candles.length
     });
     return {
       price,
@@ -471,7 +469,7 @@ export async function getGoldPriceComparisonForCTrader(
     }
   }
 
-  // 2. Fall back to Dukascopy (dukascopy-node) - historical XAUUSD tick data
+  // 2. Fall back to Dukascopy (dukascopy-node) - historical XAUUSD M1 data
   if (result.goldPrice === null) {
     const dukascopyPrice = await getGoldPriceFromDukascopy(timestamp);
     if (dukascopyPrice) {

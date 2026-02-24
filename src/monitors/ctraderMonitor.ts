@@ -77,7 +77,7 @@ const checkEntryFilled = async (
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
-): Promise<{ filled: boolean; positionId?: string }> => {
+): Promise<{ filled: boolean; positionId?: string; filledAt?: string }> => {
   try {
     if (isSimulation) {
       if (priceProvider) {
@@ -157,6 +157,9 @@ const checkEntryFilled = async (
       
       if (position) {
         const positionId = position.positionId || position.id;
+        const openTs = position.tradeData?.openTimestamp ?? position.openTimestamp;
+        const tsMs = protobufLongToNumber(openTs);
+        const filledAt = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
         logger.info('Found open cTrader position for trade, entry likely filled', {
           tradeId: trade.id,
           symbol,
@@ -165,7 +168,7 @@ const checkEntryFilled = async (
           orderId: trade.order_id,
           exchange: 'ctrader'
         });
-        return { filled: true, positionId: positionId?.toString() };
+        return { filled: true, positionId: positionId?.toString(), filledAt };
       }
       
       // Strategy 2: Check open orders by orderId
@@ -220,14 +223,17 @@ const checkEntryFilled = async (
             });
             
             if (positionAgain) {
-              const positionId = positionAgain.positionId || positionAgain.id;
+              const posId = positionAgain.positionId || positionAgain.id;
+              const openTs = positionAgain.tradeData?.openTimestamp ?? positionAgain.openTimestamp;
+              const tsMs = protobufLongToNumber(openTs);
+              const filledAt = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
               logger.info('Found position on re-check after order not found', {
                 tradeId: trade.id,
                 symbol,
-                positionId: positionId?.toString(),
+                positionId: posId?.toString(),
                 exchange: 'ctrader'
               });
-              return { filled: true, positionId: positionId?.toString() };
+              return { filled: true, positionId: posId?.toString(), filledAt };
             }
             
             // Order filled but position closed already (edge case)
@@ -251,6 +257,9 @@ const checkEntryFilled = async (
             
             if (orderStatus === 'FILLED' || orderStatus === 'PARTIALLY_FILLED') {
               const positionId = order.positionId || order.id;
+              const updTs = order.utcLastUpdateTimestamp ?? order.tradeData?.openTimestamp;
+              const tsMs = protobufLongToNumber(updTs);
+              const filledAt = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
               logger.info('Order status indicates filled', {
                 tradeId: trade.id,
                 symbol,
@@ -259,7 +268,7 @@ const checkEntryFilled = async (
                 positionId: positionId?.toString(),
                 exchange: 'ctrader'
               });
-              return { filled: true, positionId: positionId?.toString() };
+              return { filled: true, positionId: positionId?.toString(), filledAt };
             }
           }
         } catch (error) {
@@ -498,6 +507,9 @@ const cancelOrder = async (
       logger.info('cTrader order cancelled', {
         tradeId: trade.id,
         orderId: trade.order_id,
+        channel: trade.channel,
+        messageId: trade.message_id,
+        symbol: trade.trading_pair,
         exchange: 'ctrader'
       });
     }
@@ -713,14 +725,24 @@ const placeTakeProfitOrders = async (
       return;
     }
 
-    // Check if TP orders already exist first (before checking ctraderClient)
-    // This allows the function to work in simulation mode where orders are created by the initiator/mock exchange
+    const takeProfits = JSON.parse(trade.take_profits) as number[];
+    if (!takeProfits || takeProfits.length === 0) {
+      logger.debug('No take profits configured', {
+        tradeId: trade.id,
+        exchange: 'ctrader'
+      });
+      return;
+    }
+
+    // Check if TP orders already exist - only skip when we have ALL expected TPs
+    // Partial placement (e.g. TP1 placed, TP2 failed) must retry on next monitor cycle
     let existingOrders = await db.getOrdersByTradeId(trade.id);
     const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
-    if (existingTPOrders.length > 0) {
-      logger.debug('Take profit orders already exist for cTrader trade, skipping placement', {
+    if (existingTPOrders.length >= takeProfits.length) {
+      logger.debug('All take profit orders already exist for cTrader trade, skipping placement', {
         tradeId: trade.id,
         existingTPCount: existingTPOrders.length,
+        expectedTPCount: takeProfits.length,
         exchange: 'ctrader'
       });
       return;
@@ -732,15 +754,6 @@ const placeTakeProfitOrders = async (
         tradeId: trade.id,
         exchange: trade.exchange,
         hasCTraderClient: !!ctraderClient
-      });
-      return;
-    }
-
-    const takeProfits = JSON.parse(trade.take_profits) as number[];
-    if (!takeProfits || takeProfits.length === 0) {
-      logger.debug('No take profits configured', {
-        tradeId: trade.id,
-        exchange: 'ctrader'
       });
       return;
     }
@@ -1322,8 +1335,12 @@ const monitorTrade = async (
     if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
       logger.info('cTrader trade expired - cancelling order', {
         tradeId: trade.id,
+        orderId: trade.order_id,
         channel: trade.channel,
+        messageId: trade.message_id,
+        symbol: trade.trading_pair,
         expiresAt: trade.expires_at,
+        cancelReason: 'expired',
         exchange: 'ctrader'
       });
       await cancelOrder(trade, ctraderClient);
@@ -1444,7 +1461,8 @@ const monitorTrade = async (
           exchange: 'ctrader'
         });
         
-        const fillTime = dayjs().toISOString();
+        // Use actual fill time from position when available; dayjs() is monitor poll time and can be delayed
+        const fillTime = entryResult.filledAt ?? dayjs().toISOString();
         await db.updateTrade(trade.id, {
           status: 'active',
           entry_filled_at: fillTime,
@@ -1461,8 +1479,27 @@ const monitorTrade = async (
 
     // Monitor active trades
     if (trade.status === 'active' || trade.status === 'filled') {
-      // Check SL/TP orders for fills
       const orders = await db.getOrdersByTradeId(trade.id);
+
+      // Retry TP placement if entry filled but we have fewer TPs than expected
+      // Handles: initial placement failed, partial placement failed, monitor was down when entry filled
+      if (trade.entry_filled_at && ctraderClient) {
+        const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
+        if (takeProfits.length > 0) {
+          const tpCount = orders.filter((o) => o.order_type === 'take_profit').length;
+          if (tpCount < takeProfits.length) {
+            logger.info('Retrying TP placement - active trade has fewer TPs than expected', {
+              tradeId: trade.id,
+              tpCount,
+              expectedCount: takeProfits.length,
+              exchange: 'ctrader'
+            });
+            await placeTakeProfitOrders(trade, ctraderClient, db);
+          }
+        }
+      }
+
+      // Check SL/TP orders for fills
       const pendingOrders = orders.filter(o => o.status === 'pending');
 
       for (const order of pendingOrders) {

@@ -27,9 +27,34 @@ export interface CTraderOrderDetails {
 }
 
 /**
+ * Build time windows for order/deal queries.
+ * Uses messageDate (when available) as primary since it's closer to actual order placement than DB created_at.
+ */
+function buildTimeWindows(created_at?: string | null, messageDate?: string | null): Array<[number, number]> {
+  const windows: Array<[number, number]> = [];
+  const twoHours = 2 * 60 * 60 * 1000;
+  const twentyFourHours = 24 * 60 * 60 * 1000;
+
+  if (messageDate) {
+    const center = new Date(messageDate).getTime();
+    windows.push([center - twoHours, center + twoHours]);
+  }
+  if (created_at) {
+    const center = new Date(created_at).getTime();
+    windows.push([center - twentyFourHours, center + twentyFourHours]);
+    // Also try ±2h around created_at in case of timezone quirks
+    if (!messageDate) {
+      windows.push([center - twoHours, center + twoHours]);
+    }
+  }
+  return windows;
+}
+
+/**
  * Query cTrader for order/position by order ID.
  * Checks open orders first; if not found, open positions (order may have filled → position);
- * then closed orders (cancelled, expired, filled) if created_at provided.
+ * then closed orders (cancelled, expired, filled); then deal list (filled executions).
+ * Uses messageDate when available for better time window (DB created_at may have timezone offset).
  */
 export async function queryCTraderOrder(
   ctraderClient: CTraderClient,
@@ -37,7 +62,8 @@ export async function queryCTraderOrder(
   symbol: string,
   accountName: string,
   positionId?: string | null,
-  created_at?: string | null
+  created_at?: string | null,
+  messageDate?: string | null
 ): Promise<CTraderOrderDetails> {
   const normalizedSymbol = normalizeCTraderSymbol(symbol);
 
@@ -113,25 +139,59 @@ export async function queryCTraderOrder(
       return result;
     }
 
-    // Check closed orders (cancelled, expired, filled) if we have a time window
-    if (created_at) {
-      const created = new Date(created_at).getTime();
-      const fromTs = Math.max(0, created - 3600000); // 1 hour before
-      const toTs = created + 86400000; // 1 day after
-      const closedOrders = await ctraderClient.getClosedOrders(fromTs, toTs);
-      const orderIdStr = String(orderId);
-      const matchingClosed = closedOrders.find((o: any) => {
-        const id = o.orderId ?? o.id;
-        return id != null && String(id) === orderIdStr;
-      });
-      if (matchingClosed) {
-        result.found = true;
-        result.foundIn = 'closed_orders';
-        result.orderStatus = matchingClosed.orderStatus ?? 'closed';
-        result.avgPrice = matchingClosed.executionPrice ?? matchingClosed.limitPrice;
-        result.price = matchingClosed.limitPrice ?? matchingClosed.executionPrice;
-        result.quantity = matchingClosed.executedVolume ?? matchingClosed.volume;
-        return result;
+    // Check closed orders and deal list - try multiple time windows (messageDate ±2h, created_at ±24h)
+    const windows = buildTimeWindows(created_at, messageDate);
+    for (const [fromTs, toTs] of windows) {
+      try {
+        const closedOrders = await ctraderClient.getClosedOrders(fromTs, toTs);
+        const orderIdStr = String(orderId);
+        const matchingClosed = closedOrders.find((o: any) => {
+          const id = o.orderId ?? o.id;
+          return id != null && String(id) === orderIdStr;
+        });
+        if (matchingClosed) {
+          result.found = true;
+          result.foundIn = 'closed_orders';
+          result.orderStatus = matchingClosed.orderStatus ?? 'closed';
+          result.avgPrice = matchingClosed.executionPrice ?? matchingClosed.limitPrice;
+          result.price = matchingClosed.limitPrice ?? matchingClosed.executionPrice;
+          result.quantity = matchingClosed.executedVolume ?? matchingClosed.volume;
+          logger.info('cTrader order found in closed orders', {
+            orderId,
+            orderStatus: result.orderStatus,
+            window: `[${new Date(fromTs).toISOString()}, ${new Date(toTs).toISOString()}]`,
+            closedCount: closedOrders.length
+          });
+          return result;
+        }
+
+        // Also check deal list - filled orders create deals
+        const deals = await ctraderClient.getDealList(fromTs, toTs);
+        const matchingDeal = deals.find((d: any) => {
+          const id = d.orderId ?? d.order_id;
+          return id != null && String(id) === orderIdStr;
+        });
+        if (matchingDeal) {
+          result.found = true;
+          result.foundIn = 'closed_orders';
+          result.orderStatus = 'FILLED';
+          result.avgPrice = matchingDeal.executionPrice ?? matchingDeal.execution_price;
+          result.quantity = matchingDeal.volume ?? matchingDeal.executedVolume;
+          logger.info('cTrader order found in deal list (order was filled)', {
+            orderId,
+            dealId: matchingDeal.dealId ?? matchingDeal.deal_id,
+            window: `[${new Date(fromTs).toISOString()}, ${new Date(toTs).toISOString()}]`,
+            dealCount: deals.length
+          });
+          return result;
+        }
+      } catch (err) {
+        logger.debug('cTrader closed/deal query failed for window', {
+          orderId,
+          fromTs,
+          toTs,
+          error: err instanceof Error ? err.message : String(err)
+        });
       }
     }
 
@@ -150,11 +210,13 @@ export async function queryCTraderOrder(
 }
 
 /**
- * Query multiple orders for a message/trade (cTrader)
+ * Query multiple orders for a message/trade (cTrader).
+ * Pass messageDate from trace when available - improves closed/deal query time window (DB created_at may have offset).
  */
 export async function queryCTraderOrdersForMessage(
   getCTraderClient: (accountName?: string) => Promise<CTraderClient | undefined>,
-  trades: Array<{ order_id?: string; position_id?: string | null; trading_pair: string; account_name?: string; created_at?: string | null }>
+  trades: Array<{ order_id?: string; position_id?: string | null; trading_pair: string; account_name?: string; created_at?: string | null }>,
+  messageDate?: string | null
 ): Promise<CTraderOrderDetails[]> {
   const orderDetails: CTraderOrderDetails[] = [];
 
@@ -182,7 +244,8 @@ export async function queryCTraderOrdersForMessage(
       trade.trading_pair,
       trade.account_name,
       trade.position_id,
-      trade.created_at
+      trade.created_at,
+      messageDate
     );
     orderDetails.push(details);
   }

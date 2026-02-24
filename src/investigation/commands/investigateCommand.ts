@@ -37,6 +37,71 @@ function isCTraderFromTrace(traceResult: any): boolean {
 }
 
 /**
+ * Extract order IDs from trace for order-specific Loggly searches (cancellations, etc.)
+ */
+function extractOrderIdsFromTrace(traceResult: any): string[] {
+  const trades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades || [];
+  const ids = trades
+    .map((t: any) => t.orderId ?? t.order_id)
+    .filter((id: any): id is string | number => id != null && String(id).trim() !== '');
+  return [...new Set(ids.map((id: string | number) => String(id)))] as string[];
+}
+
+/**
+ * Extract TP order IDs from trace (from TP/SL Orders steps) for Loggly searches
+ */
+function extractTpOrderIdsFromTrace(traceResult: any): string[] {
+  const tpSlSteps = traceResult?.steps?.filter((s: any) => s.step?.includes('TP/SL Orders')) || [];
+  const ids: (string | number)[] = [];
+  for (const step of tpSlSteps) {
+    const orders = step.details?.orders || [];
+    for (const o of orders) {
+      if ((o.type === 'take_profit' || o.order_type === 'take_profit') && (o.orderId ?? o.order_id)) {
+        ids.push(o.orderId ?? o.order_id);
+      }
+    }
+  }
+  return [...new Set(ids.map((id) => String(id)))];
+}
+
+/**
+ * Build TP placement analysis from trace and DB orders
+ */
+function buildTpPlacementAnalysis(
+  traceResult: any,
+  dbOrdersByTradeId: Record<number, Array<{ order_type: string; price?: number; tp_index?: number }>>
+): Array<{ tradeId: number; expectedCount: number; actualCount: number; expectedPrices: number[]; actualPrices: number[]; status: string }> {
+  const trades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades || [];
+  return trades.map((t: any) => {
+    const expectedPrices: number[] = Array.isArray(t.takeProfits) ? t.takeProfits : [];
+    const orders = (t.id != null ? dbOrdersByTradeId[t.id] : []) || [];
+    const tpOrders = orders.filter((o) => o.order_type === 'take_profit');
+    const actualPrices = tpOrders
+      .sort((a, b) => (a.tp_index ?? 0) - (b.tp_index ?? 0))
+      .map((o) => o.price)
+      .filter((p): p is number => p != null);
+    const expectedCount = expectedPrices.length;
+    const actualCount = tpOrders.length;
+    let status: string;
+    if (expectedCount === 0) status = 'No TPs configured';
+    else if (actualCount >= expectedCount) {
+      const pricesMatch = expectedPrices.every((p, j) => Math.abs((actualPrices[j] ?? 0) - p) < 0.01);
+      status = pricesMatch ? `${actualCount}/${expectedCount} placed correctly` : `${actualCount}/${expectedCount} placed (verify prices)`;
+    } else {
+      status = `${actualCount}/${expectedCount} placed — missing ${expectedCount - actualCount}`;
+    }
+    return {
+      tradeId: t.id,
+      expectedCount,
+      actualCount,
+      expectedPrices,
+      actualPrices,
+      status
+    };
+  });
+}
+
+/**
  * Determine if channel is cTrader from config (when trace has no trades)
  */
 async function isCTraderChannel(channel: string): Promise<boolean> {
@@ -159,7 +224,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         const messageScopedErrors = await ctx.logglyClient!.searchErrorsAroundTime(
           timestamp,
           windowMinutes,
-          `messageId:${messageId} AND channel:${channel || ''}`
+          `json.messageId:${messageId} AND json.channel:${channel || ''}`
         );
 
         // Query for general errors around that time (fallback if scoped returns nothing)
@@ -171,15 +236,66 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         // Query for Bybit API errors in the time window
         const bybitErrors = await ctx.logglyClient!.searchBybitErrors(timeRange);
 
-        const queryUsed = `messageId:${messageId} AND channel:${channel || ''}`;
+        // Query for order-specific logs (cancellations, etc.) - wider window since cancels can happen hours later
+        const entryOrderIds = extractOrderIdsFromTrace(traceResult);
+        const tpOrderIds = extractTpOrderIdsFromTrace(traceResult);
+        const allOrderIds = [...new Set([...entryOrderIds, ...tpOrderIds])];
+        const orderLogsByOrderId: Record<string, { total_events: number; events: any[] }> = {};
+        const orderWindowHours = 6;
+        const orderTimeRange = {
+          from: new Date(new Date(timestamp).getTime() - orderWindowHours * 60 * 60 * 1000).toISOString(),
+          until: new Date(new Date(timestamp).getTime() + orderWindowHours * 60 * 60 * 1000).toISOString()
+        };
+        for (const orderId of allOrderIds) {
+          try {
+            const result = await ctx.logglyClient!.search({
+              query: `json.orderId:${orderId}`,
+              from: orderTimeRange.from,
+              until: orderTimeRange.until,
+              size: 100
+            });
+            orderLogsByOrderId[orderId] = {
+              total_events: result.total_events ?? 0,
+              events: result.events ?? []
+            };
+          } catch {
+            orderLogsByOrderId[orderId] = { total_events: 0, events: [] };
+          }
+        }
+
+        // Query for TP placement logs (take profit order placement success/failure)
+        const tpPlacementQuery =
+          channel && String(channel).trim()
+            ? `json.messageId:${messageId} json.channel:${channel} "take profit"`
+            : `json.messageId:${messageId} "take profit"`;
+        let tpPlacementLogs = { total_events: 0, events: [] as any[] };
+        try {
+          const tpResult = await ctx.logglyClient!.search({
+            query: tpPlacementQuery,
+            from: timeRange.from,
+            until: timeRange.until,
+            size: 50
+          });
+          tpPlacementLogs = {
+            total_events: tpResult.total_events ?? 0,
+            events: tpResult.events ?? []
+          };
+        } catch {
+          /* ignore */
+        }
+
+        const queryUsed = `json.messageId:${messageId} AND json.channel:${channel || ''}`;
+        const orderLogsTotal = Object.values(orderLogsByOrderId).reduce((s, o) => s + o.total_events, 0);
         return {
           success: true,
-          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors`,
+          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors, ${orderLogsTotal} order logs, ${tpPlacementLogs.total_events} TP placement logs`,
           data: {
             messageLogs,
             messageScopedErrors,
             errorLogs,
             bybitErrors,
+            orderLogsByOrderId,
+            tpPlacementLogs,
             searchParams: { query: queryUsed, from: timeRange.from, until: timeRange.until }
           }
         };
@@ -232,8 +348,8 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       try {
         // Query for message + order/trade activity (order placement evidence)
         const orderPlacementQuery = channel
-          ? `messageId:${messageId} AND channel:${channel} AND ${exchangeTerms}`
-          : `messageId:${messageId} AND ${exchangeTerms}`;
+          ? `json.messageId:${messageId} AND json.channel:${channel} AND ${exchangeTerms}`
+          : `json.messageId:${messageId} AND ${exchangeTerms}`;
 
         const orderPlacementLogs = await ctx.logglyClient!.search({
           query: orderPlacementQuery,
@@ -330,6 +446,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           if (dbTrades.length === 0) {
             return { success: true, message: 'No trades in database', data: { orders: [] } };
           }
+          const messageDate = traceResult.steps?.find((s: any) => s.step?.includes('Message Storage'))?.details?.date;
           const orderDetails = await queryCTraderOrdersForMessage(
             ctx.getCTraderClient,
             dbTrades.map(t => ({
@@ -338,7 +455,8 @@ export async function investigateCommandHandler(context: CommandContext): Promis
               trading_pair: t.trading_pair,
               account_name: t.account_name,
               created_at: t.created_at
-            }))
+            })),
+            messageDate
           );
           const found = orderDetails.filter(o => o.found);
           const notFound = orderDetails.filter(o => !o.found);
@@ -762,15 +880,50 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           if (msgErrors.length > 0 && !failurePoint?.includes('Trade Creation')) {
             findings.push(`  Found ${msgErrors.length} error log(s) for this message`);
           }
+
+          // Order-specific logs (cancellations, etc.) - surfaced when message logs exist
+        const orderLogsByOrderId = logglyData.orderLogsByOrderId as Record<string, { total_events: number; events: any[] }> | undefined;
+        if (orderLogsByOrderId && Object.keys(orderLogsByOrderId).length > 0) {
+          for (const [orderId, data] of Object.entries(orderLogsByOrderId)) {
+            if (data.total_events > 0) {
+              const cancelLogs = (data.events || []).filter(
+                (e: any) =>
+                  (e.event?.message ?? e.logmsg ?? '').includes('cancelled') ||
+                  (e.event?.message ?? e.logmsg ?? '').includes('cancelling') ||
+                  (e.event?.message ?? e.logmsg ?? '').includes('Order cancelled')
+              );
+              const ts = cancelLogs[0]?.event?.timestamp ?? cancelLogs[0]?.timestamp;
+              findings.push(`  Order ${orderId}: ${data.total_events} log(s)${cancelLogs.length > 0 ? ` — ${cancelLogs.length} cancellation(s) at ${ts || '(see logs)'}` : ''}`);
+            }
+          }
+        }
         } else {
           const params = logglyData.searchParams;
           findings.push('\n📋 Log confirmation: No logs found for this message');
           if (params) {
             findings.push(`   Query: ${params.query}`);
             findings.push(`   Window: ${params.from} → ${params.until}`);
-            recommendations.push('If logs exist: check field names (messageId vs message_id) or run: npm run query-loggly -- message ' + ctx.args.messageId + ' ' + (ctx.args.channel || ''));
+            recommendations.push('If logs exist: run npm run loggly-query-message -- ' + ctx.args.messageId + ' ' + (ctx.args.channel || '') + ' to try query variants (json.messageId, full-text, etc.)');
           } else {
             recommendations.push('Run npm run loggly-diagnose to verify connection; check time range covers when message was processed');
+          }
+          // Still show order logs if found (orderId search can find cancellations even when message search returns 0)
+          const orderLogsFallback = logglyData.orderLogsByOrderId as Record<string, { total_events: number; events: any[] }> | undefined;
+          const orderLogsCount = orderLogsFallback ? Object.values(orderLogsFallback).reduce((s, o) => s + o.total_events, 0) : 0;
+          if (orderLogsCount > 0 && orderLogsFallback) {
+            findings.push(`  Order logs (by orderId):`);
+            for (const [orderId, data] of Object.entries(orderLogsFallback)) {
+              if (data.total_events > 0) {
+                const cancelLogs = (data.events || []).filter(
+                  (e: any) =>
+                    (e.event?.message ?? e.logmsg ?? '').includes('cancelled') ||
+                    (e.event?.message ?? e.logmsg ?? '').includes('cancelling') ||
+                    (e.event?.message ?? e.logmsg ?? '').includes('Order cancelled')
+                );
+                const ts = cancelLogs[0]?.event?.timestamp ?? cancelLogs[0]?.timestamp;
+                findings.push(`  Order ${orderId}: ${data.total_events} log(s)${cancelLogs.length > 0 ? ` — ${cancelLogs.length} cancellation(s) at ${ts || '(see logs)'}` : ''}`);
+              }
+            }
           }
         }
       } else {
@@ -805,6 +958,67 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             }
           }
         });
+      }
+
+      // TP placement analysis: expected vs actual count and prices
+      const traceTrades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades || [];
+      if (traceTrades.length > 0) {
+        const dbOrdersByTradeId: Record<number, Array<{ order_type: string; price?: number; tp_index?: number }>> = {};
+        for (const t of traceTrades) {
+          if (t.id != null) {
+            try {
+              const orders = await ctx.db.getOrdersByTradeId(t.id);
+              dbOrdersByTradeId[t.id] = orders;
+            } catch {
+              dbOrdersByTradeId[t.id] = [];
+            }
+          }
+        }
+        const tpAnalysis = buildTpPlacementAnalysis(traceResult, dbOrdersByTradeId);
+        const hasTps = tpAnalysis.some((a) => a.expectedCount > 0);
+        if (hasTps) {
+          findings.push('\n📈 TP Placement:');
+          tpAnalysis.forEach((a, i) => {
+            const tradeNum = i + 1;
+            if (a.expectedCount > 0) {
+              const icon = a.actualCount >= a.expectedCount ? '✅' : '⚠️';
+              findings.push(`  ${icon} Trade ${tradeNum}: ${a.status}`);
+              if (a.actualCount < a.expectedCount && a.expectedPrices.length > 0) {
+                findings.push(`     Expected: ${a.expectedPrices.map((p) => p.toFixed(2)).join(', ')}`);
+              }
+            }
+          });
+        const missingTpTradeIds = tpAnalysis.filter((a) => a.expectedCount > 0 && a.actualCount < a.expectedCount).map((a) => a.tradeId);
+        if (missingTpTradeIds.length > 0) {
+          recommendations.push(`Run npm run fix-trade-tps <tradeId> (e.g. ${missingTpTradeIds[0]}) to place missing TP orders`);
+        }
+          // TP placement logs from Loggly
+          const tpPlacementLogs = logglyData?.tpPlacementLogs as { total_events: number; events: any[] } | undefined;
+          if (tpPlacementLogs && tpPlacementLogs.total_events > 0) {
+            findings.push(`  TP placement logs: ${tpPlacementLogs.total_events} found`);
+            const placementIndicators = tpPlacementLogs.events.filter(
+              (e: any) =>
+                (e.event?.message ?? e.logmsg ?? '').includes('placed') ||
+                (e.event?.message ?? e.logmsg ?? '').includes('Placing') ||
+                (e.event?.message ?? e.logmsg ?? '').includes('modifyPosition')
+            );
+            const failIndicators = tpPlacementLogs.events.filter(
+              (e: any) =>
+                (e.event?.message ?? e.logmsg ?? '').includes('Failed to place') ||
+                (e.event?.message ?? e.logmsg ?? '').includes('Error placing')
+            );
+            if (placementIndicators.length > 0) {
+              findings.push(`    Success/placement: ${placementIndicators.length}`);
+            }
+            if (failIndicators.length > 0) {
+              findings.push(`    ⚠️ Failures: ${failIndicators.length}`);
+              failIndicators.slice(0, 2).forEach((log: any, idx: number) => {
+                const msg = (log.event?.message ?? log.logmsg ?? '').substring(0, 120);
+                if (msg) findings.push(`      ${idx + 1}. ${msg}...`);
+              });
+            }
+          }
+        }
       }
 
       // Add gold/PAXG price comparison for XAUT/XAU trades

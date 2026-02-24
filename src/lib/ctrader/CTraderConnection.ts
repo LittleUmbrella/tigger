@@ -333,7 +333,12 @@ export class CTraderConnection {
         }
         if (payloadName === 'ProtoOAOrderErrorEvent') {
           const errMsg = response.description || response.errorCode || 'Order rejected';
+          const orderId = response.orderId;
+          const orderIdStr = orderId != null
+            ? (typeof orderId === 'object' && 'low' in orderId ? String((orderId as any).low) : String(orderId))
+            : undefined;
           logger.info('Received ProtoOAOrderErrorEvent', {
+            orderId: orderIdStr,
             errorCode: response.errorCode,
             description: response.description,
             exchange: 'ctrader'
