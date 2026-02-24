@@ -992,22 +992,39 @@ const executeTradeForAccount = async (
       });
     } else if (ctraderClient) {
       try {
-        logger.info('Placing cTrader limit order', {
-          channel,
-          symbol,
-          volume: qty,
-          tradeSide,
-          price: roundedEntryPrice,
-          accountName: accountName || 'default',
-          exchange: 'ctrader'
-        });
-        // Place limit order at entry price
-        orderId = await ctraderClient.placeLimitOrder({
-          symbol,
-          volume: qty,
-          tradeSide,
-          price: roundedEntryPrice
-        });
+        // TEMPORARY: Use actual market orders instead of converting to limit at current price
+        // (Comment out to restore: limit order at current price for predictable cost)
+        if (isMarketOrder) {
+          logger.info('Placing cTrader market order', {
+            channel,
+            symbol,
+            volume: qty,
+            tradeSide,
+            accountName: accountName || 'default',
+            exchange: 'ctrader'
+          });
+          orderId = await ctraderClient.placeMarketOrder({
+            symbol,
+            volume: qty,
+            tradeSide
+          });
+        } else {
+          logger.info('Placing cTrader limit order', {
+            channel,
+            symbol,
+            volume: qty,
+            tradeSide,
+            price: roundedEntryPrice,
+            accountName: accountName || 'default',
+            exchange: 'ctrader'
+          });
+          orderId = await ctraderClient.placeLimitOrder({
+            symbol,
+            volume: qty,
+            tradeSide,
+            price: roundedEntryPrice
+          });
+        }
         logger.info('cTrader order placed', {
           channel,
           accountName: accountName || 'default',
@@ -1052,7 +1069,7 @@ const executeTradeForAccount = async (
         exchange: 'ctrader',
         account_name: accountName || undefined,
         order_id: orderId,
-        entry_order_type: 'limit', // Always limit order (market orders converted to limit at current price)
+        entry_order_type: isMarketOrder ? 'market' : 'limit', // TEMPORARY: use actual market orders
         status: 'pending',
         stop_loss_breakeven: false,
         expires_at: expiresAt
@@ -1527,8 +1544,8 @@ const executeTradeForAccount = async (
           exchange: 'ctrader',
           account_name: accountName || undefined,
           order_id: orderId,
-          entry_order_type: 'limit',
-        status: 'pending',
+          entry_order_type: isMarketOrder ? 'market' : 'limit',
+          status: 'pending',
         stop_loss_breakeven: false,
         expires_at: expiresAt,
         created_at: nowUtc

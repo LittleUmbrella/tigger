@@ -22,7 +22,8 @@ import {
   updateTradeOnStopLossHit,
   updateTradeOnBreakevenFilled,
   cancelTrade,
-  sleep
+  sleep,
+  MONITOR_TRADE_TIMEOUT_MS
 } from './shared.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -1908,18 +1909,34 @@ export const startTradeMonitor = async (
     
     while (running) {
       try {
-        const trades = (await db.getActiveTrades()).filter(t => t.channel === channel);
+        const allTrades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'bybit');
         
-        for (const trade of trades) {
-          // Only monitor Bybit trades
-          if (trade.exchange !== 'bybit') {
-            continue;
-          }
-          
-          const accountBybitClient = getBybitClient 
+        // Process each trade in parallel with per-trade timeout - prevents one stuck trade from blocking others
+        const tradeTasks = allTrades.map((trade) => {
+          const accountBybitClient = getBybitClient
             ? getBybitClient(trade.account_name)
             : bybitClient;
-          await monitorTrade(channel, entryTimeoutMinutes, trade, db, accountBybitClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven);
+          return Promise.race([
+            monitorTrade(channel, entryTimeoutMinutes, trade, db, accountBybitClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven),
+            new Promise<void>((_, reject) =>
+              setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
+            )
+          ]);
+        });
+
+        const results = await Promise.allSettled(tradeTasks);
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          if (result.status === 'rejected') {
+            const trade = allTrades[i];
+            const isTimeout = result.reason instanceof Error && result.reason.message.includes('timeout');
+            logger.warn(isTimeout ? 'Monitor trade timed out - will retry next poll' : 'Monitor trade failed', {
+              tradeId: trade.id,
+              channel,
+              exchange: 'bybit',
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+            });
+          }
         }
 
         // Skip sleep in maximum speed mode

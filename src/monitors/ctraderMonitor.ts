@@ -21,7 +21,8 @@ import {
   updateTradeOnStopLossHit,
   updateTradeOnBreakevenFilled,
   cancelTrade,
-  sleep
+  sleep,
+  MONITOR_TRADE_TIMEOUT_MS
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
@@ -879,6 +880,32 @@ const placeTakeProfitOrders = async (
     // For Short (Sell) position, TP is Buy
     const tpSide = positionSide === 'BUY' ? 'SELL' : 'BUY';
 
+    // Set stop loss on position (initiator only sets it when entry filled at placement; limit orders fill async, so we set it here)
+    if (trade.stop_loss != null) {
+      try {
+        await ctraderClient.modifyPosition({
+          positionId: positionId?.toString() || '',
+          stopLoss: trade.stop_loss
+        });
+        logger.info('cTrader stop loss set on position', {
+          tradeId: trade.id,
+          symbol,
+          stopLoss: trade.stop_loss,
+          positionId: positionId?.toString(),
+          exchange: 'ctrader'
+        });
+      } catch (error) {
+        logger.warn('Failed to set stop loss on cTrader position', {
+          tradeId: trade.id,
+          symbol,
+          stopLoss: trade.stop_loss,
+          channel: trade.channel,
+          exchange: 'ctrader',
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
     // Get symbol info for precision (Gap #3)
     logger.debug('Getting symbol info for precision', {
       tradeId: trade.id,
@@ -1715,21 +1742,42 @@ export const startCTraderMonitor = async (
       try {
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'ctrader');
         
-        for (const trade of trades) {
+        // Process each trade in parallel with per-trade timeout - prevents one stuck trade from blocking others
+        const tradeTasks = trades.map(async (trade) => {
           const accountCTraderClient = getCTraderClient
             ? await getCTraderClient(trade.account_name)
             : ctraderClient;
-          await monitorTrade(
-            channel,
-            entryTimeoutMinutes,
-            trade,
-            db,
-            accountCTraderClient,
-            isSimulation,
-            priceProvider,
-            breakevenAfterTPs,
-            useLimitOrderForBreakeven
-          );
+          return Promise.race([
+            monitorTrade(
+              channel,
+              entryTimeoutMinutes,
+              trade,
+              db,
+              accountCTraderClient,
+              isSimulation,
+              priceProvider,
+              breakevenAfterTPs,
+              useLimitOrderForBreakeven
+            ),
+            new Promise<void>((_, reject) =>
+              setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
+            )
+          ]);
+        });
+
+        const results = await Promise.allSettled(tradeTasks);
+        for (let i = 0; i < results.length; i++) {
+          const result = results[i];
+          if (result.status === 'rejected') {
+            const trade = trades[i];
+            const isTimeout = result.reason instanceof Error && result.reason.message.includes('timeout');
+            logger.warn(isTimeout ? 'Monitor trade timed out - will retry next poll' : 'Monitor trade failed', {
+              tradeId: trade.id,
+              channel,
+              exchange: 'ctrader',
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+            });
+          }
         }
 
         if (!isMaxSpeed) {
