@@ -171,6 +171,19 @@
   ],
   "channels": [
     {
+      "channel": "2427485240",
+      "harvester": "main_harvester",
+      "parser": "vip_crypto_signals",
+      "breakevenAfterTPs": 2,
+      "entryTimeoutMinutes": 1440,
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "maxMessageStalenessMinutes": 5,
+      "baseLeverage": 20,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": ["hyrotrader"]
+    },
+    {
       "channel": "3272135406",
       "harvester": "ronnie_harvester",
       "parser": "ronnie_crypto_signals",
