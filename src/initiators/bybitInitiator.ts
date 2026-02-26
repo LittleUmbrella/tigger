@@ -1479,8 +1479,9 @@ const executeTradeForAccount = async (
       }
 
       // Use explicit UTC for created_at; DB CURRENT_TIMESTAMP can differ by timezone
+      // Derive expires_at from created_at to guarantee expires_at > created_at (avoids timezone bugs)
       const nowUtc = dayjs().toISOString();
-      const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
+      const expiresAt = dayjs(nowUtc).add(entryTimeoutMinutes, 'minutes').toISOString();
       try {
         tradeId = await db.insertTrade({
           message_id: message.message_id,
@@ -2223,7 +2224,7 @@ const executeTradeForAccount = async (
     // (For market orders, trade was inserted earlier to allow closing position if needed)
     if (!tradeId) {
       const nowUtc = dayjs().toISOString();
-      const expiresAt = dayjs().add(entryTimeoutMinutes, 'minutes').toISOString();
+      const expiresAt = dayjs(nowUtc).add(entryTimeoutMinutes, 'minutes').toISOString();
       tradeId = await db.insertTrade({
         message_id: message.message_id,
         channel: channel,

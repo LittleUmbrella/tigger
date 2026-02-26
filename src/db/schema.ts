@@ -1257,7 +1257,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           content TEXT NOT NULL,
           sender TEXT,
           date TEXT NOT NULL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
           parsed BOOLEAN NOT NULL DEFAULT FALSE,
           analyzed BOOLEAN NOT NULL DEFAULT FALSE,
           reply_to_message_id TEXT,
@@ -1332,7 +1332,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         }
       }
       try {
-        await client.query(`ALTER TABLE messages ADD COLUMN edited_at TIMESTAMP`);
+        await client.query(`ALTER TABLE messages ADD COLUMN edited_at TIMESTAMPTZ`);
       } catch (error: any) {
         if (!error.message?.includes('already exists')) {
           throw error;
@@ -1356,7 +1356,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           channel TEXT NOT NULL,
           content TEXT NOT NULL,
           version_number INTEGER NOT NULL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE,
           UNIQUE(message_id, version_number)
         )
@@ -1381,15 +1381,15 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           position_id TEXT,
           entry_order_type TEXT,
           status TEXT NOT NULL DEFAULT 'pending',
-          entry_filled_at TIMESTAMP,
+          entry_filled_at TIMESTAMPTZ,
           exit_price REAL,
-          exit_filled_at TIMESTAMP,
+          exit_filled_at TIMESTAMPTZ,
           pnl REAL,
           pnl_percentage REAL,
           stop_loss_breakeven BOOLEAN NOT NULL DEFAULT FALSE,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          expires_at TIMESTAMP NOT NULL
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          expires_at TIMESTAMPTZ NOT NULL
         )
       `);
       
@@ -1483,10 +1483,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           tp_index INTEGER,
           quantity REAL,
           status TEXT NOT NULL DEFAULT 'pending',
-          filled_at TIMESTAMP,
+          filled_at TIMESTAMPTZ,
           filled_price REAL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (trade_id) REFERENCES trades(id) ON DELETE CASCADE
         )
       `);
@@ -1500,9 +1500,9 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           passed BOOLEAN NOT NULL,
           violations TEXT NOT NULL,
           metrics TEXT NOT NULL,
-          start_date TIMESTAMP NOT NULL,
-          end_date TIMESTAMP NOT NULL,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+          start_date TIMESTAMPTZ NOT NULL,
+          end_date TIMESTAMPTZ NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
       `);
 
@@ -1515,13 +1515,43 @@ class PostgreSQLAdapter implements DatabaseAdapter {
           format_hash TEXT NOT NULL,
           classification TEXT NOT NULL,
           example_count INTEGER NOT NULL DEFAULT 1,
-          first_seen TIMESTAMP NOT NULL,
-          last_seen TIMESTAMP NOT NULL,
+          first_seen TIMESTAMPTZ NOT NULL,
+          last_seen TIMESTAMPTZ NOT NULL,
           extracted_fields TEXT,
-          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
           UNIQUE(channel, format_hash)
         )
       `);
+
+      // Migrate TIMESTAMP to TIMESTAMPTZ (existing databases - new installs use TIMESTAMPTZ above)
+      // Existing values assumed to be UTC (ISO strings we've been storing). Only migrate if column is timestamp without tz.
+      const timestampToTimestamptz = async (table: string, ...columns: string[]) => {
+        for (const col of columns) {
+          try {
+            const check = await client.query(`
+              SELECT data_type FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = $1 AND column_name = $2
+            `, [table, col]);
+            if (check.rows.length === 0 || check.rows[0].data_type !== 'timestamp without time zone') {
+              continue; // Column missing or already timestamptz
+            }
+            await client.query(`
+              ALTER TABLE ${table}
+              ALTER COLUMN ${col} TYPE TIMESTAMPTZ
+              USING ${col}::timestamp AT TIME ZONE 'UTC'
+            `);
+            logger.info(`Migrated ${table}.${col} to TIMESTAMPTZ`);
+          } catch (error: any) {
+            logger.warn(`Failed to migrate ${table}.${col} to TIMESTAMPTZ`, { error: error.message });
+          }
+        }
+      };
+      await timestampToTimestamptz('messages', 'created_at', 'edited_at');
+      await timestampToTimestamptz('message_versions', 'created_at');
+      await timestampToTimestamptz('trades', 'entry_filled_at', 'exit_filled_at', 'created_at', 'updated_at', 'expires_at');
+      await timestampToTimestamptz('orders', 'filled_at', 'created_at', 'updated_at');
+      await timestampToTimestamptz('evaluation_results', 'start_date', 'end_date', 'created_at');
+      await timestampToTimestamptz('signal_formats', 'first_seen', 'last_seen', 'created_at');
 
       // Create indexes
       await client.query(`

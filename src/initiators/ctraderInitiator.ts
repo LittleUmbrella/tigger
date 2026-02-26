@@ -1049,8 +1049,9 @@ const executeTradeForAccount = async (
     }
 
     // Use explicit UTC for created_at; DB CURRENT_TIMESTAMP can differ by timezone
+    // Derive expires_at from created_at to guarantee expires_at > created_at (avoids timezone bugs)
     const nowUtc = dayjs().toISOString();
-    const expiresAt = dayjs().add(entryTimeoutMinutes, 'minute').toISOString();
+    const expiresAt = dayjs(nowUtc).add(entryTimeoutMinutes, 'minutes').toISOString();
 
     // Insert trade record early so we can update it if needed
     try {
