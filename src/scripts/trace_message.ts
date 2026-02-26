@@ -171,13 +171,16 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
         messageDbId: message?.id
       });
     } else {
-      // Search all channels
-      const channels = ['2394142145', '3241720654', '2427485240', '3272135406', '2385521106', '1634731277', '3077664317', '3469900302'];
+      // Search all channels - derive from config to avoid missing newly added channels
+      const channelsFromConfig = config?.channels?.map((ch: { channel: string }) => String(ch.channel)) ?? [];
+      const channelsFromHarvesters = config?.harvesters?.map((h: { channel: string }) => String(h.channel)) ?? [];
+      const channels = [...new Set([...channelsFromConfig, ...channelsFromHarvesters])];
+      const channelsToSearch = channels.length > 0 ? channels : ['2394142145', '3241720654', '2427485240', '3272135406', '2385521106', '1634731277', '3077664317', '3469900302', '1441399338805891174'];
       logger.debug('traceMessage - searching all channels', {
         messageId,
-        channelsToSearch: channels
+        channelsToSearch
       });
-      for (const ch of channels) {
+      for (const ch of channelsToSearch) {
         message = await db.getMessageByMessageId(messageId, ch);
         if (message) {
           channel = ch;
@@ -188,10 +191,11 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
     }
 
     if (!message) {
+      const searchedChannels = channel ? [channel] : (config?.channels?.map((ch: { channel: string }) => String(ch.channel)) ?? config?.harvesters?.map((h: { channel: string }) => String(h.channel)) ?? []);
       logger.warn('traceMessage - message not found', {
         messageId,
         channel: channel || 'none',
-        searchedChannels: channel ? [channel] : ['2394142145', '3241720654', '2427485240']
+        searchedChannels: searchedChannels.length > 0 ? searchedChannels : ['(config unavailable)']
       });
       steps[0].status = 'failure';
       steps[0].error = 'Message not found in database';

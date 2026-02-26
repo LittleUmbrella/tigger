@@ -170,8 +170,8 @@ class InvestigationMCPServer {
       case 'trace':
         return {
           message: {
-            type: 'number',
-            description: 'Message ID to trace',
+            type: 'string',
+            description: 'Message ID to trace (use string for Discord snowflake IDs to avoid precision loss)',
           },
           channel: {
             type: 'string',
@@ -181,8 +181,8 @@ class InvestigationMCPServer {
       case 'investigate':
         return {
           message: {
-            type: 'number',
-            description: 'Message ID to investigate',
+            type: 'string',
+            description: 'Message ID to investigate (use string for Discord snowflake IDs to avoid precision loss)',
           },
           channel: {
             type: 'string',
@@ -199,8 +199,8 @@ class InvestigationMCPServer {
       case 'check-logs':
         return {
           message: {
-            type: 'number',
-            description: 'Message ID (if querying by message)',
+            type: 'string',
+            description: 'Message ID (if querying by message; use string for Discord snowflake IDs)',
           },
           channel: {
             type: 'string',
