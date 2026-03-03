@@ -389,7 +389,8 @@ export const startTradeOrchestrator = async (
               db,
               isSimulation,
               priceProvider,
-              getBybitClient: (accountName?: string) => createBybitClient(accountName)
+              getBybitClient: (accountName?: string) => createBybitClient(accountName),
+              getCtraderClient: (accountName?: string) => createCTraderClient(accountName)
             };
 
             await manager(managerContext);
@@ -450,7 +451,8 @@ export const startTradeOrchestrator = async (
                 db,
                 isSimulation,
                 priceProvider,
-                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
               } as ManagerContext);
             }
           }
@@ -465,7 +467,8 @@ export const startTradeOrchestrator = async (
                 db,
                 isSimulation,
                 priceProvider,
-                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
               } as ManagerContext);
             }
           }
@@ -480,7 +483,8 @@ export const startTradeOrchestrator = async (
                 db,
                 isSimulation,
                 priceProvider,
-                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
               } as ManagerContext);
             }
           }
@@ -543,7 +547,8 @@ export const startTradeOrchestrator = async (
               db,
               isSimulation,
               priceProvider,
-              getBybitClient: (accountName?: string) => createBybitClient(accountName)
+              getBybitClient: (accountName?: string) => createBybitClient(accountName),
+              getCtraderClient: (accountName?: string) => createCTraderClient(accountName)
             };
 
             await manager(managerContext);
@@ -618,7 +623,8 @@ export const startTradeOrchestrator = async (
                     db,
                     isSimulation,
                     priceProvider,
-                    getBybitClient: (accountName?: string) => createBybitClient(accountName)
+                    getBybitClient: (accountName?: string) => createBybitClient(accountName),
+                    getCtraderClient: (accountName?: string) => createCTraderClient(accountName)
                   };
 
                   await manager(managerContext);
@@ -663,7 +669,8 @@ export const startTradeOrchestrator = async (
                             db,
                             isSimulation,
                             priceProvider,
-                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                            getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
                           } as ManagerContext);
                         }
                       }
@@ -678,7 +685,8 @@ export const startTradeOrchestrator = async (
                             db,
                             isSimulation,
                             priceProvider,
-                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                            getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
                           } as ManagerContext);
                         }
                       }
@@ -693,7 +701,8 @@ export const startTradeOrchestrator = async (
                             db,
                             isSimulation,
                             priceProvider,
-                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name)
+                            getBybitClient: (accountName?: string) => createBybitClient(accountName || trade.account_name),
+                            getCtraderClient: (accountName?: string) => createCTraderClient(accountName || trade.account_name)
                           } as ManagerContext);
                         }
                       }
@@ -730,7 +739,8 @@ export const startTradeOrchestrator = async (
                   db,
                   isSimulation,
                   priceProvider,
-                  getBybitClient: (accountName?: string) => createBybitClient(accountName)
+                  getBybitClient: (accountName?: string) => createBybitClient(accountName),
+                  getCtraderClient: (accountName?: string) => createCTraderClient(accountName)
                 };
 
                 await manager(managerContext);

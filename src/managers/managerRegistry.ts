@@ -2,6 +2,7 @@ import { DatabaseManager, Message, Trade } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { RestClientV5 } from 'bybit-api';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
+import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /**
  * Parsed management command from a message
@@ -28,6 +29,7 @@ export interface ManagerContext {
   priceProvider?: HistoricalPriceProvider;
   bybitClient?: RestClientV5; // Deprecated: use getBybitClient instead
   getBybitClient?: (accountName?: string) => RestClientV5 | undefined; // Function to get client by account name
+  getCtraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>; // Function to get cTrader client by account name
 }
 
 /**

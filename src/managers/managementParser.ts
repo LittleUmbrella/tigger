@@ -1,7 +1,7 @@
 import { ParsedManagementCommand } from './managerRegistry.js';
 import { parseWithLLMFallback } from '../parsers/llmFallbackParser.js';
 import { Message, DatabaseManager } from '../db/schema.js';
-import { extractReplyContext, ReplyContext } from './replyContextExtractor.js';
+import { extractReplyContext } from './replyContextExtractor.js';
 
 /**
  * Parse a message to detect management commands
@@ -52,6 +52,52 @@ export const parseManagementCommand = async (
     normalized === 'close'
   ) {
     return { type: 'close_all_trades' };
+  }
+
+  // Close half / secure half (e.g., "Scalpers can secure half and set BE", "Take half and move SL to entry")
+  // Common in cTrader gold channels: close 50% of position, optionally move SL to entry
+  const halfMatch = (
+    normalized.includes('secure half') ||
+    normalized.includes('take half') ||
+    normalized.includes('close half') ||
+    normalized.includes('half out') ||
+    (normalized.includes('half') && (normalized.includes('secure') || normalized.includes('take') || normalized.includes('close')))
+  );
+  if (halfMatch) {
+    const moveSLToEntry =
+      normalized.includes('set be') || 
+      normalized.includes('set breakeven') || 
+      normalized.includes('with be') || 
+      normalized.includes('with breakeven') ||
+      normalized.includes('hold the rest with be') ||
+      normalized.includes('move sl') || 
+      normalized.includes('move stop loss') || 
+      normalized.includes('sl on entry') || 
+      normalized.includes('stop loss on entry');
+    
+    let tradingPair: string | undefined;
+    const pairMatch = normalized.match(/#?([a-z]{2,10})\/?usdt/i);
+    if (pairMatch) {
+      tradingPair = `${pairMatch[1].toUpperCase()}/USDT`;
+    } else if (message && db) {
+      const replyContext = await extractReplyContext(message, db);
+      if (replyContext.symbol) {
+        tradingPair = replyContext.symbol.includes('/') 
+          ? replyContext.symbol 
+          : `${replyContext.symbol.replace('USDT', '')}/USDT`;
+      }
+      // For gold channels: XAUUSD is the canonical symbol
+      if (!tradingPair && (normalized.includes('gold') || normalized.includes('xau'))) {
+        tradingPair = 'XAUUSD';
+      }
+    }
+    
+    return {
+      type: 'close_percentage',
+      percentage: 50,
+      tradingPair,
+      moveStopLossToEntry: moveSLToEntry
+    };
   }
 
   // Close percentage of position (e.g., "Close 25% Here And Move SL On Entry")

@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /**
  * Helper function to close a position
@@ -11,7 +12,8 @@ export async function closePosition(
   trade: Trade,
   db: DatabaseManager,
   isSimulation: boolean,
-  bybitClient?: RestClientV5
+  bybitClient?: RestClientV5,
+  ctraderClient?: CTraderClient
 ): Promise<void> {
   if (isSimulation) {
     // In simulation, just mark as closed
@@ -23,6 +25,27 @@ export async function closePosition(
       tradeId: trade.id,
       tradingPair: trade.trading_pair
     });
+  } else if (trade.exchange === 'ctrader' && ctraderClient && trade.position_id) {
+    try {
+      await ctraderClient.closePosition(trade.position_id);
+      logger.info('Position closed on cTrader', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        positionId: trade.position_id
+      });
+      await db.updateTrade(trade.id, {
+        status: 'closed',
+        exit_filled_at: dayjs().toISOString()
+      });
+    } catch (error) {
+      logger.error('Failed to close cTrader position', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        positionId: trade.position_id,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
   } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
     const symbol = trade.trading_pair.replace('/', '');
     

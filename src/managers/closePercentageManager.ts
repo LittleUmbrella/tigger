@@ -5,12 +5,13 @@ import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { Trade, DatabaseManager } from '../db/schema.js';
+import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /**
  * Manager to close a percentage of a position
  */
 export const closePercentageManager: ManagerFunction = async (context: ManagerContext): Promise<void> => {
-  const { channel, message, command, db, isSimulation, bybitClient } = context;
+  const { channel, message, command, db, isSimulation, getBybitClient, getCtraderClient } = context;
 
   if (!command.percentage || command.percentage <= 0 || command.percentage > 100) {
     logger.warn('closePercentageManager called with invalid percentage', {
@@ -72,13 +73,16 @@ export const closePercentageManager: ManagerFunction = async (context: ManagerCo
 
     for (const trade of tradesToProcess) {
       try {
+        const bybitClient = getBybitClient?.(trade.account_name);
+        const ctraderClient = trade.exchange === 'ctrader' ? await getCtraderClient?.(trade.account_name) : undefined;
         await closePercentageOfPosition(
           trade,
           command.percentage!,
           command.moveStopLossToEntry || false,
           db,
           isSimulation,
-          bybitClient
+          bybitClient,
+          ctraderClient
         );
       } catch (error) {
         logger.error('Error partially closing position', {
@@ -112,7 +116,8 @@ async function closePercentageOfPosition(
   moveStopLossToEntry: boolean,
   db: DatabaseManager,
   isSimulation: boolean,
-  bybitClient?: RestClientV5
+  bybitClient?: RestClientV5,
+  ctraderClient?: CTraderClient
 ): Promise<void> {
   if (isSimulation) {
     // In simulation, we can't actually reduce position size, so we'll just log it
@@ -226,6 +231,76 @@ async function closePercentageOfPosition(
           throw new Error(`Failed to partially close position: ${JSON.stringify(closeOrder)}`);
         }
       }
+    }
+  } else if (trade.exchange === 'ctrader' && ctraderClient && trade.position_id) {
+    // cTrader partial close: place market order in opposite direction
+    try {
+      const positions = await ctraderClient.getOpenPositions();
+      const positionIdNum = parseInt(trade.position_id, 10);
+      const position = positions.find(
+        (p: any) => (typeof p.positionId === 'number' ? p.positionId : p.id) === positionIdNum
+      );
+      if (!position) {
+        logger.warn('cTrader position not found for partial close', {
+          tradeId: trade.id,
+          positionId: trade.position_id
+        });
+        return;
+      }
+      const positionVolume = parseFloat(position.volume || position.quantity || '0');
+      if (positionVolume <= 0) return;
+
+      const symbol = trade.trading_pair.replace('/', '');
+      const symbolInfo = await ctraderClient.getSymbolInfo(symbol);
+      const lotSize = typeof symbolInfo?.lotSize === 'object' && symbolInfo.lotSize?.low != null
+        ? symbolInfo.lotSize.low
+        : symbolInfo?.lotSize ?? 100;
+      const positionLots = positionVolume / lotSize;
+      const closeVolumeLots = Math.max(0.01, (positionLots * percentage) / 100);
+      const tradeSide = (position.tradeSide || position.side || '').toUpperCase();
+      const closeSide = tradeSide === 'BUY' ? 'SELL' : 'BUY';
+
+      await ctraderClient.placeMarketOrder({
+        symbol,
+        volume: closeVolumeLots,
+        tradeSide: closeSide as 'BUY' | 'SELL'
+      });
+
+      logger.info('Partial position closed on cTrader', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        percentage,
+        closeVolumeLots
+      });
+
+      if (moveStopLossToEntry) {
+        try {
+          await ctraderClient.modifyPosition({
+            positionId: trade.position_id,
+            stopLoss: trade.entry_price
+          });
+          await db.updateTrade(trade.id, {
+            stop_loss: trade.entry_price,
+            stop_loss_breakeven: true
+          });
+          logger.info('Stop loss moved to entry on cTrader', {
+            tradeId: trade.id,
+            entryPrice: trade.entry_price
+          });
+        } catch (slError) {
+          logger.error('Error moving stop loss to entry on cTrader', {
+            tradeId: trade.id,
+            error: slError instanceof Error ? slError.message : String(slError)
+          });
+        }
+      }
+    } catch (error) {
+      logger.error('Failed to partially close cTrader position', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
     }
   }
 }

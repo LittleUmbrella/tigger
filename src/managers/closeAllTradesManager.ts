@@ -6,7 +6,7 @@ import { closePosition } from './positionUtils.js';
  * Manager to close all active trades
  */
 export const closeAllTradesManager: ManagerFunction = async (context: ManagerContext): Promise<void> => {
-  const { channel, message, db, isSimulation, bybitClient } = context;
+  const { channel, message, db, isSimulation, getBybitClient, getCtraderClient } = context;
 
   try {
     // Get all active trades for this channel
@@ -29,7 +29,9 @@ export const closeAllTradesManager: ManagerFunction = async (context: ManagerCon
 
     for (const trade of tradesToClose) {
       try {
-        await closePosition(trade, db, isSimulation, bybitClient);
+        const bybitClient = getBybitClient?.(trade.account_name);
+        const ctraderClient = trade.exchange === 'ctrader' ? await getCtraderClient?.(trade.account_name) : undefined;
+        await closePosition(trade, db, isSimulation, bybitClient, ctraderClient);
       } catch (error) {
         logger.error('Error closing position', {
           tradeId: trade.id,

@@ -10,7 +10,7 @@ import { getBybitField } from '../utils/bybitFieldHelper.js';
  * If message is a reply, can filter by symbol from the original signal
  */
 export const closeAllShortsManager: ManagerFunction = async (context: ManagerContext): Promise<void> => {
-  const { channel, message, db, isSimulation, bybitClient } = context;
+  const { channel, message, db, isSimulation, getBybitClient, getCtraderClient } = context;
 
   try {
     // Get all active trades for this channel
@@ -19,6 +19,11 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
       trade => trade.channel === channel && 
                trade.status === 'active' && 
                trade.position_id // Only close trades that have been filled
+    );
+
+    // For cTrader, filter by direction (short)
+    tradesToClose = tradesToClose.filter(
+      trade => trade.exchange !== 'ctrader' || trade.direction === 'short'
     );
 
     // If message is a reply, try to filter by symbol from reply context
@@ -37,10 +42,19 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
       }
     }
 
-    // If we have a Bybit client, filter to only short positions by checking position side
-    if (!isSimulation && bybitClient && tradesToClose.length > 0) {
+    // If we have clients, filter to only short positions (Bybit: check position side via API; cTrader: already filtered by direction)
+    if (!isSimulation && tradesToClose.length > 0) {
       const shortTrades: typeof tradesToClose = [];
       for (const trade of tradesToClose) {
+        if (trade.exchange === 'ctrader') {
+          shortTrades.push(trade);
+          continue;
+        }
+        const bybitClient = getBybitClient?.(trade.account_name);
+        if (!bybitClient) {
+          shortTrades.push(trade);
+          continue;
+        }
         try {
           const symbol = trade.trading_pair.replace('/', '');
           const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
@@ -83,7 +97,9 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
 
     for (const trade of tradesToClose) {
       try {
-        await closePosition(trade, db, isSimulation, bybitClient);
+        const btc = getBybitClient?.(trade.account_name);
+        const ctc = trade.exchange === 'ctrader' ? await getCtraderClient?.(trade.account_name) : undefined;
+        await closePosition(trade, db, isSimulation, btc, ctc);
       } catch (error) {
         logger.error('Error closing short position', {
           tradeId: trade.id,

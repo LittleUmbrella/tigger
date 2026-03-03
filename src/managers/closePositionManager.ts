@@ -7,7 +7,7 @@ import { extractReplyContext, findTradesByContext } from './replyContextExtracto
  * Manager to close a specific position by trading pair
  */
 export const closePositionManager: ManagerFunction = async (context: ManagerContext): Promise<void> => {
-  const { channel, message, command, db, isSimulation, bybitClient, getBybitClient } = context;
+  const { channel, message, command, db, isSimulation, getBybitClient, getCtraderClient } = context;
 
   let tradingPair = command.tradingPair;
 
@@ -55,11 +55,9 @@ export const closePositionManager: ManagerFunction = async (context: ManagerCont
 
     for (const trade of tradesToClose) {
       try {
-        // Get account-specific client
-        const accountClient = getBybitClient 
-          ? getBybitClient(trade.account_name)
-          : bybitClient; // Fallback to deprecated bybitClient
-        await closePosition(trade, db, isSimulation, accountClient);
+        const bybitClient = getBybitClient?.(trade.account_name);
+        const ctraderClient = trade.exchange === 'ctrader' ? await getCtraderClient?.(trade.account_name) : undefined;
+        await closePosition(trade, db, isSimulation, bybitClient, ctraderClient);
       } catch (error) {
         logger.error('Error closing position', {
           tradeId: trade.id,
