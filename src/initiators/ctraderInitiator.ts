@@ -583,7 +583,27 @@ const executeTradeForAccount = async (
     }
     
     // Calculate quantity with exchange-provided precision (using rounded entry price)
-    let qty = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
+    // qty from calculateQuantity is in BASE UNITS (e.g. oz for XAUUSD, EUR for EURUSD)
+    let qtyBase = calculateQuantity(positionSize, roundedEntryPrice, decimalPrecision);
+
+    // cTrader placeLimitOrder/placeMarketOrder expect volume in LOTS. Convert base units → lots.
+    // ProtoOASymbol lotSize is in "cents" (×100 convention); units per lot = lotSize/100.
+    // E.g. XAUUSD: 1 lot = 100 oz, lotSize raw = 10000 → contractSize = 100
+    const contractSize = lotSize != null && lotSize > 0 ? lotSize / 100 : 1;
+    let qty = lotSize != null && lotSize > 0 ? qtyBase / contractSize : qtyBase;
+
+    if (lotSize != null && lotSize > 0) {
+      logger.debug('Converted quantity from base units to lots (cTrader)', {
+        channel,
+        symbol,
+        qtyBase,
+        contractSize,
+        qtyLots: qty,
+        lotSize,
+        accountName: accountName || 'default',
+        exchange: 'ctrader'
+      });
+    }
     
     // Round quantity to nearest volume_step if specified (Gap #3)
     const effectiveVolumeStep = volumeStep !== undefined && volumeStep > 0 
@@ -629,8 +649,8 @@ const executeTradeForAccount = async (
       // Round down to nearest volume_step below maxOrderVolume
       qty = Math.floor(maxOrderVolume / effectiveVolumeStep) * effectiveVolumeStep;
       
-      // Recalculate position size based on capped quantity for accurate logging
-      const cappedPositionSize = qty * roundedEntryPrice;
+      // Recalculate position size based on capped quantity for accurate logging (qty is in lots)
+      const cappedPositionSize = qty * contractSize * roundedEntryPrice;
       
       logger.warn('Quantity exceeds maximum order size, capping to max', {
         channel,
@@ -991,6 +1011,13 @@ const executeTradeForAccount = async (
         entryPrice: roundedEntryPrice
       });
     } else if (ctraderClient) {
+      // Require lotSize for correct volume conversion (base units → lots)
+      if (lotSize == null || lotSize <= 0) {
+        throw new Error(
+          `Cannot place cTrader order: symbol ${symbol} lacks lotSize. ` +
+          'Volume must be converted from base units to lots; without lotSize the order would be incorrectly sized.'
+        );
+      }
       try {
         // TEMPORARY: Use actual market orders instead of converting to limit at current price
         // (Comment out to restore: limit order at current price for predictable cost)
@@ -1383,8 +1410,12 @@ const executeTradeForAccount = async (
           }
 
           // Distribute quantity evenly across remaining valid TPs
+          // Ensure units are consistent: use lots for distribution (volumeStep/min/max are in lots)
+          const totalQtyForTPs = actualPositionQty != null && lotSize != null && lotSize > 0
+            ? actualPositionQty / lotSize  // API units → lots (lotSize is raw, API volume = lots * lotSize)
+            : qty;  // qty is already in lots after our base-units conversion
           const tpQuantities = distributeQuantityAcrossTPs(
-            actualPositionQty || qty,
+            totalQtyForTPs,
             validTPPrices.length,
             decimalPrecision
           );
@@ -1393,7 +1424,7 @@ const executeTradeForAccount = async (
           const validTPOrders = validateAndRedistributeTPQuantities(
             tpQuantities,
             roundedTPPrices,
-            actualPositionQty || qty,
+            totalQtyForTPs,
             volumeStep,
             minOrderVolume,
             maxOrderVolume,
@@ -1408,7 +1439,7 @@ const executeTradeForAccount = async (
               tradeId,
               positionId,
               orderId,
-              qty: actualPositionQty || qty,
+              qtyLots: totalQtyForTPs,
               numTPs: order.takeProfits.length,
               minOrderVolume,
               volumeStep,
@@ -1426,10 +1457,9 @@ const executeTradeForAccount = async (
             });
           } else {
             // Place individual TP orders using placeLimitOrder
-            // cTrader placeLimitOrder expects volume in lots. When actualPositionQty is used (from
-            // getOpenPositions), quantities are in API units (cents). When qty is used, quantities are in lots.
-            const quantityInApiUnits = actualPositionQty !== undefined;
-            if (quantityInApiUnits && (lotSize == null || lotSize <= 0)) {
+            // cTrader placeLimitOrder expects volume in lots. totalQtyForTPs and thus tpOrd.quantity
+            // are always in lots (actualPositionQty was converted via /lotSize when used).
+            if (actualPositionQty != null && (lotSize == null || lotSize <= 0)) {
               logger.warn('Skipping TP placement: lotSize required for API unit conversion', {
                 channel,
                 symbol,
@@ -1443,8 +1473,7 @@ const executeTradeForAccount = async (
                 exchange: 'ctrader'
               });
             } else {
-            const volumeLotsForPlaceLimit = (tpOrd: { quantity: number }) =>
-              quantityInApiUnits ? tpOrd.quantity / lotSize! : tpOrd.quantity;
+            const volumeLotsForPlaceLimit = (tpOrd: { quantity: number }) => tpOrd.quantity;
 
             const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
             
