@@ -97,6 +97,7 @@ export const processUnparsedMessages = async (
   accounts?: AccountConfig[],
   startDate?: string,
   channelBaseLeverage?: number, // Per-channel override for baseLeverage
+  channelRiskPercentage?: number, // Per-channel override for risk percentage (overrides initiator config)
   maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
   propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
@@ -181,6 +182,7 @@ export const processUnparsedMessages = async (
     parserName,
     accounts,
     channelBaseLeverage,
+    channelRiskPercentage,
     initiatorFunction,
     initiatorName,
     accountFilters,
@@ -210,6 +212,7 @@ export const processMessages = async (
   parserName?: string,
   accounts?: AccountConfig[],
   channelBaseLeverage?: number,
+  channelRiskPercentage?: number,
   initiatorFunction?: (context: InitiatorContext) => Promise<void>,
   initiatorName?: string,
   accountFilters?: AccountFilter[],
@@ -272,18 +275,20 @@ export const processMessages = async (
           takeProfits: parsed.takeProfits?.length || 0,
           parserName: parserName || 'default'
         });
-        // Merge channel-specific baseLeverage with initiator config
-        // Channel-specific baseLeverage takes precedence over initiator config
+        // Merge channel-specific baseLeverage and riskPercentage with initiator config
+        // Channel-specific overrides take precedence over initiator config
         const mergedInitiatorConfig: InitiatorConfig = {
           ...initiatorConfig,
           baseLeverage: channelBaseLeverage !== undefined ? channelBaseLeverage : initiatorConfig.baseLeverage
         };
+
+        const riskPercentage = channelRiskPercentage ?? initiatorConfig.riskPercentage;
         
         // Create context for the initiator
         // Note: currentBalance is not passed here - quantities will be calculated later
         const context: InitiatorContext = {
           channel,
-          riskPercentage: initiatorConfig.riskPercentage,
+          riskPercentage,
           entryTimeoutMinutes,
           message,
           order: parsed,

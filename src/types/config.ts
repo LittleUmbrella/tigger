@@ -152,6 +152,7 @@ export interface ChannelSetConfig {
   monitor: 'bybit' | 'dex' | 'ctrader'; // Reference to monitor type
   breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
   entryTimeoutMinutes?: number; // Per-channel override for minutes to wait for entry before cancelling (overrides monitor config)
+  riskPercentage?: number; // Per-channel override for percentage of account to risk (overrides initiator config)
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)

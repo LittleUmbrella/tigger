@@ -905,6 +905,7 @@ export const startTradeOrchestrator = async (
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
+          channelConfig.riskPercentage, // Pass channel-specific risk percentage (overrides initiator)
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
           channelConfig.propFirms, // Pass prop firm configurations
@@ -960,6 +961,7 @@ export const startTradeOrchestrator = async (
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
+          channelConfig.riskPercentage, // Pass channel-specific risk percentage (overrides initiator)
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
           channelConfig.propFirms, // Pass prop firm configurations
