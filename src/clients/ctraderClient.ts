@@ -686,7 +686,8 @@ export class CTraderClient {
         const volume = p.tradeData?.volume;
         const vol = typeof volume === 'object' && volume?.low != null ? volume.low : volume;
         const tradeSide = p.tradeData?.tradeSide;
-        const side = typeof tradeSide === 'number' ? ['BUY', 'SELL'][tradeSide] ?? tradeSide : tradeSide;
+        // ProtoOATradeSide: BUY=1, SELL=2 (1-based enum). Do NOT use as 0-based array index.
+        const side = typeof tradeSide === 'number' ? (tradeSide === 1 ? 'BUY' : tradeSide === 2 ? 'SELL' : undefined) ?? tradeSide : tradeSide;
         return {
           ...p,
           symbolName: symbolName ?? p.symbolName,
