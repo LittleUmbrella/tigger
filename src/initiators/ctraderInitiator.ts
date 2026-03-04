@@ -1117,12 +1117,14 @@ const executeTradeForAccount = async (
     // Note: For limit orders, we can't verify until position exists, so we'll set it separately if needed
     if (order.stopLoss && order.stopLoss > 0 && !isSimulation && ctraderClient) {
       // Check if entry order has already filled (market orders or fast-filling limit orders)
+      // Resolve position by orderId via deals (exact match) - avoids wrong position when multiple exist per symbol
       let entryFilled = false;
       try {
+        const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(orderId);
         const openPositions = await ctraderClient.getOpenPositions();
-        const positionForSymbol = openPositions.find((p: any) => 
-          (p.symbolName || p.symbol) === symbol
-        );
+        const positionForSymbol = resolvedPositionId
+          ? openPositions.find((p: any) => String(p.positionId ?? p.id) === String(resolvedPositionId))
+          : openPositions.find((p: any) => (p.symbolName || p.symbol) === symbol);
         entryFilled = !!positionForSymbol;
       } catch (error) {
         logger.debug('Could not check position status for stop loss verification', {
@@ -1136,11 +1138,12 @@ const executeTradeForAccount = async (
       // Only try to set stop loss if entry has filled (position exists)
       if (entryFilled) {
         try {
+          const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(orderId);
           const openPositions = await ctraderClient.getOpenPositions();
-          const positionForSymbol = openPositions.find((p: any) => 
-            (p.symbolName || p.symbol) === symbol
-          );
-          
+          const positionForSymbol = resolvedPositionId
+            ? openPositions.find((p: any) => String(p.positionId ?? p.id) === String(resolvedPositionId))
+            : openPositions.find((p: any) => (p.symbolName || p.symbol) === symbol);
+
           if (positionForSymbol) {
             const positionId = positionForSymbol.positionId || positionForSymbol.id;
             
@@ -1224,16 +1227,18 @@ const executeTradeForAccount = async (
       let positionId: string | undefined;
       
       try {
+        // Resolve position by orderId via deals (exact match) - avoids wrong position when multiple exist per symbol
+        const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(orderId);
         const openPositions = await ctraderClient.getOpenPositions();
-        const positionForSymbol = openPositions.find((p: any) => 
-          (p.symbolName || p.symbol) === symbol
-        );
-        
+        const positionForSymbol = resolvedPositionId
+          ? openPositions.find((p: any) => String(p.positionId ?? p.id) === String(resolvedPositionId))
+          : openPositions.find((p: any) => (p.symbolName || p.symbol) === symbol);
+
         if (positionForSymbol) {
           positionId = positionForSymbol.positionId || positionForSymbol.id;
           const tradeSide = positionForSymbol.tradeSide || positionForSymbol.side || '';
           positionSide = (tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long') ? 'BUY' : 'SELL';
-          
+
           // Get actual entry price and position quantity
           const avgPrice = parseFloat(positionForSymbol.avgPrice || positionForSymbol.averagePrice || '0');
           const volume = Math.abs(parseFloat(positionForSymbol.volume || positionForSymbol.quantity || '0'));
@@ -1395,19 +1400,20 @@ const executeTradeForAccount = async (
             validTPPrices: roundedTPPrices
           });
         
-          // Verify position side matches expected side
+          // Verify position side matches expected side; use expected side for TP when mismatch (avoid wrong-side TPs)
           const expectedPositionSide = order.signalType === 'long' ? 'BUY' : 'SELL';
           if (positionSide !== expectedPositionSide) {
-            logger.error('Position side mismatch', {
+            logger.error('Position side mismatch, using expected side for TP orders', {
               channel,
               symbol,
               accountName: accountName || 'default',
               orderId,
               expectedPositionSide,
               actualPositionSide: positionSide,
-              note: 'TP orders may fail due to side mismatch'
+              note: 'TP side derived from order.signalType to avoid increasing position'
             });
           }
+          const effectivePositionSide = positionSide === expectedPositionSide ? positionSide : expectedPositionSide;
 
           // Distribute quantity evenly across remaining valid TPs
           // Ensure units are consistent: use lots for distribution (volumeStep/min/max are in lots)
@@ -1479,17 +1485,18 @@ const executeTradeForAccount = async (
             
             for (const tpOrder of validTPOrders) {
               try {
-                // Determine opposite side for TP orders
+                // Determine opposite side for TP orders (use effectivePositionSide - falls back to expected when mismatch)
                 // For a Long position (BUY side), TP is SELL
                 // For a Short position (SELL side), TP is BUY
-                const tpSide = positionSide === 'BUY' ? 'SELL' : 'BUY';
+                const tpSide = effectivePositionSide === 'BUY' ? 'SELL' : 'BUY';
                 const volumeLots = volumeLotsForPlaceLimit(tpOrder);
                 
                 const tpOrderId = await ctraderClient.placeLimitOrder({
                   symbol,
                   volume: volumeLots,
                   tradeSide: tpSide,
-                  price: tpOrder.price
+                  price: tpOrder.price,
+                  positionId // Link to position (reduce-only-like guard - order modifies this position, not a new one)
                 });
                 
                 tpOrderIds.push({

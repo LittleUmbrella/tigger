@@ -788,7 +788,7 @@ const placeTakeProfitOrders = async (
           exchange: 'ctrader'
         });
 
-        // If we have a position_id, try to find the specific position
+        // Resolve position by position_id or order_id (order_id → deal → positionId avoids wrong position when multiple per symbol)
         if (trade.position_id) {
           position = positionResponse.find((p: any) => {
             const positionId = p.positionId || p.id;
@@ -796,8 +796,20 @@ const placeTakeProfitOrders = async (
             return positionSymbol === symbol && positionId?.toString() === trade.position_id;
           });
         }
-        
-        // If not found by position_id, find any position with non-zero size
+        if (!position && trade.order_id) {
+          const fillTime = trade.entry_filled_at || trade.created_at;
+          const fromTs = fillTime ? new Date(fillTime).getTime() - 60000 : undefined;
+          const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
+            trade.order_id,
+            fromTs,
+            Date.now()
+          );
+          if (resolvedPositionId) {
+            position = positionResponse.find((p: any) =>
+              String(p.positionId ?? p.id) === String(resolvedPositionId)
+            );
+          }
+        }
         if (!position) {
           const positions = positionResponse.filter((p: any) => {
             const positionSymbol = p.symbolName || p.symbol;
@@ -874,11 +886,23 @@ const placeTakeProfitOrders = async (
         exchange: 'ctrader'
       });
     }
-    
+    const expectedPositionSide = trade.direction === 'long' ? 'BUY' : 'SELL';
+    if (positionSide !== expectedPositionSide) {
+      logger.error('Position side mismatch, using expected side for TP orders', {
+        tradeId: trade.id,
+        symbol,
+        expectedPositionSide,
+        actualPositionSide: positionSide,
+        note: 'TP side derived from trade.direction to avoid increasing position',
+        exchange: 'ctrader'
+      });
+    }
+    const effectivePositionSide = positionSide === expectedPositionSide ? positionSide : expectedPositionSide;
+
     // TP side is always opposite of position side
     // For Long (Buy) position, TP is Sell
     // For Short (Sell) position, TP is Buy
-    const tpSide = positionSide === 'BUY' ? 'SELL' : 'BUY';
+    const tpSide = effectivePositionSide === 'BUY' ? 'SELL' : 'BUY';
 
     // Set stop loss on position (initiator only sets it when entry filled at placement; limit orders fill async, so we set it here)
     if (trade.stop_loss != null) {
@@ -1081,7 +1105,8 @@ const placeTakeProfitOrders = async (
             symbol,
             volume: volumeLots,
             tradeSide: tpSide,
-            price: tpPrice
+            price: tpPrice,
+            positionId: positionId?.toString() // Link to position (reduce-only-like guard - order modifies this position, not a new one)
           });
           
           logger.info('cTrader take profit limit order placed', {

@@ -568,13 +568,17 @@ export class CTraderClient {
   }
 
   /**
-   * Place a limit order
+   * Place a limit order.
+   * When positionId is provided, the order is linked to that position (closing/reduce behaviour when side is opposite).
+   * Use positionId for TP orders as a guard - ensures we modify our position, not open a new one.
    */
   async placeLimitOrder(params: {
     symbol: string;
     volume: number;
     tradeSide: 'BUY' | 'SELL';
     price: number;
+    /** Optional. Link order to position (cTrader "modify position") - use for TP orders as reduce-only-like guard */
+    positionId?: string;
   }): Promise<string> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
@@ -603,7 +607,7 @@ export class CTraderClient {
         accountId: this.config.accountId,
         exchange: 'ctrader'
       });
-      const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
+      const payload: Record<string, unknown> = {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         symbolId,
         orderType: 'LIMIT',
@@ -611,7 +615,11 @@ export class CTraderClient {
         volume: volumeInApiUnits,
         limitPrice: params.price,
         timeInForce: 'GOOD_TILL_CANCEL' // Keep order on book until filled or manually cancelled (default may vary by broker)
-      });
+      };
+      if (params.positionId != null && params.positionId !== '') {
+        payload.positionId = parseInt(params.positionId, 10);
+      }
+      const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
 
       const orderId = response?.orderId || response?.order?.orderId;
       if (!orderId) {
@@ -624,6 +632,7 @@ export class CTraderClient {
         tradeSide: params.tradeSide,
         volume: params.volume,
         price: params.price,
+        positionId: params.positionId ?? undefined,
         accountId: this.config.accountId,
         exchange: 'ctrader'
       });
@@ -756,9 +765,11 @@ export class CTraderClient {
       const deals = response?.deal || [];
       return deals.map((d: any) => {
         const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+        const positionId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
         return {
           ...d,
           orderId: orderId != null ? String(orderId) : d.orderId,
+          positionId: positionId != null ? String(positionId) : d.positionId,
           dealStatus: d.dealStatus ?? d.deal_status,
           executionPrice: d.executionPrice ?? d.execution_price
         };
@@ -771,6 +782,25 @@ export class CTraderClient {
       });
       throw error;
     }
+  }
+
+  /**
+   * Resolve positionId from an entry orderId via deal history.
+   * When an entry order fills, it creates a deal; the deal links orderId → positionId.
+   * Use this to find the exact position created by our order (avoids symbol-based find
+   * which can return the wrong position when multiple positions exist for the same symbol).
+   */
+  async getPositionIdByEntryOrderId(
+    orderId: string,
+    fromTimestamp?: number,
+    toTimestamp?: number
+  ): Promise<string | null> {
+    const to = toTimestamp ?? Date.now();
+    const from = fromTimestamp ?? to - 5 * 60 * 1000; // default: last 5 min
+    const deals = await this.getDealList(from, to);
+    const deal = deals.find((d: any) => String(d.orderId) === String(orderId));
+    const posId = deal?.positionId;
+    return posId != null ? String(posId) : null;
   }
 
   /**
