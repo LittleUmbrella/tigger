@@ -4,44 +4,43 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 
 /**
- * Parser for cTrader gold trading signals with two formats:
+ * Parser for cTrader gold trading signals. Supports multiple formats:
+ *
+ * Asset: gold, XAU, XAUT, or XAUUSD (case-insensitive)
+ * SL/TP: space or colon separator (e.g. "SL 5184" or "SL:5184", "TP 5203" or "TP:5203")
  *
  * When "now" precedes the entry range (e.g. "gold buy Now!! - 5054"), the signal
  * is treated as a market order and the entry price range is ignored.
  *
  * Format 1:
  * gold buy Now!! - 5054
- * 
  * SL 5052
- * 
  * TP 5066
  * TP 5076
- * Tp 5086
- * 
+ *
  * Format 2:
  * gold buy Now!!@5055 - 5051
- * 
  * SL 5049
- * 
  * TP 5066
  * TP 5076
- * Tp 5086
+ *
+ * Format 3 (compact, colon separators):
+ * XAUUSD BUY NOW @5193 - 5187 SL:5184 TP:5203 TP:5210 TP:5218
  */
 export const ctraderGoldParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     // Normalize content - remove extra whitespace but preserve line breaks
     const normalizedContent = content.trim();
     
-    // Extract trading pair - look for "gold" (case-insensitive)
-    // Translate "gold" to "XAU" (gold IS XAU), but keep as XAUUSD for cTrader (don't translate to crypto XAUT/USDT)
-    const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT)\s+/i);
+    // Extract trading pair - look for "gold", "XAU", "XAUT", or "XAUUSD" (case-insensitive)
+    // Translate "gold" to "XAU", but keep as XAUUSD for cTrader (don't translate to crypto XAUT/USDT)
+    const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
     if (!tradingPairMatch) return null;
     
-    // Translate gold to XAU, then format as XAUUSD for cTrader
-    // cTrader uses formats like "XAUUSD" (no slash, no USDT, not XAUT)
+    // Translate gold/XAU/XAUT/XAUUSD to XAUUSD for cTrader
     const assetName = tradingPairMatch[1].toUpperCase();
-    const tradingPair = assetName === 'GOLD' || assetName === 'XAU' || assetName === 'XAUT'
-      ? 'XAUUSD'  // cTrader native format: XAU (not XAUT) + USD (not USDT)
+    const tradingPair = assetName === 'GOLD' || assetName === 'XAU' || assetName === 'XAUT' || assetName === 'XAUUSD'
+      ? 'XAUUSD'  // cTrader native format
       : `${assetName}USD`;
     
     // Extract signal type - "buy" = long, "sell" = short
@@ -91,7 +90,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     // Extract stop loss - look for "SL" followed by number (case-insensitive)
     // Only extract if not already found in Format 2
     if (stopLoss === undefined) {
-      const stopLossMatch = normalizedContent.match(/S[Ll]\s+([\d.]+)/i);
+      const stopLossMatch = normalizedContent.match(/S[Ll][\s:]+([\d.]+)/i);
       if (!stopLossMatch) return null;
       
       const stopLossStr = stopLossMatch[1];
@@ -105,7 +104,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     // Extract take profits - look for "TP" followed by number (case-insensitive)
     // Match all TP lines: TP 5066, TP 5076, Tp 5086, etc.
     const takeProfits: number[] = [];
-    const tpPattern = /T[Pp]\s+([\d.]+)/gi;
+    const tpPattern = /T[Pp][\s:]+([\d.]+)/gi;
     let tpMatch;
     
     while ((tpMatch = tpPattern.exec(normalizedContent)) !== null) {
