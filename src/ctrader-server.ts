@@ -11,6 +11,84 @@ const PATH = '/callback';  // Must match the path in your redirect URI
 const CLIENT_ID = process.env.CTRADER_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.CTRADER_CLIENT_SECRET || '';
 
+type AccountDetail = {
+  ctidTraderAccountId: number;
+  accountNumber?: number;
+  brokerName?: string;
+  brokerTitle?: string;
+  depositCurrency?: string;
+  balance?: number;
+  moneyDigits?: number;
+  live?: boolean;
+  accountStatus?: string;
+  traderRegistrationTimestamp?: number;
+  traderAccountType?: string;
+  leverage?: number;
+};
+
+/**
+ * Fetch accounts for an access token (returns ctidTraderAccountId values).
+ * These are the correct IDs for CTRADER_ACCOUNT_ID - NOT the broker account number.
+ */
+async function getAccessTokenAccounts(accessToken: string): Promise<AccountDetail[]> {
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      {
+        hostname: 'api.spotware.com',
+        path: `/connect/tradingaccounts?access_token=${accessToken}`,
+        method: 'GET',
+        headers: { Accept: 'application/json' }
+      },
+      (res) => {
+        let data = '';
+        res.on('data', (chunk) => { data += chunk; });
+        res.on('end', () => {
+          try {
+            const parsed = JSON.parse(data);
+            const raw = Array.isArray(parsed) ? parsed : parsed?.data ?? [];
+            const accounts: AccountDetail[] = raw
+              .filter((a: any) => (a.ctidTraderAccountId ?? a.accountId) != null)
+              .map((a: any) => ({
+                ctidTraderAccountId: a.ctidTraderAccountId ?? a.accountId,
+                accountNumber: a.accountNumber,
+                brokerName: a.brokerName ?? a.broker_name,
+                brokerTitle: a.brokerTitle ?? a.broker_title,
+                depositCurrency: a.depositCurrency ?? a.deposit_currency,
+                balance: a.balance,
+                moneyDigits: a.moneyDigits ?? a.money_digits ?? 2,
+                live: a.live,
+                accountStatus: a.accountStatus ?? a.account_status,
+                traderRegistrationTimestamp: a.traderRegistrationTimestamp ?? a.trader_registration_timestamp,
+                traderAccountType: a.traderAccountType ?? a.trader_account_type,
+                leverage: a.leverage ?? a.leverageInCents / 100
+              }));
+            resolve(accounts);
+          } catch {
+            resolve([]);
+          }
+        });
+      }
+    );
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+function formatBalance(balance: number | undefined, moneyDigits: number = 2): string {
+  if (balance == null) return '—';
+  const divisor = Math.pow(10, moneyDigits);
+  return (balance / divisor).toLocaleString(undefined, { minimumFractionDigits: moneyDigits });
+}
+
+function formatRegistrationDate(ts: number | undefined): string {
+  if (ts == null) return '—';
+  try {
+    return new Date(ts).toLocaleDateString(undefined, { dateStyle: 'medium' });
+  } catch {
+    return String(ts);
+  }
+}
+
 /**
  * Exchange authorization code for access token
  */
@@ -120,16 +198,38 @@ const server = http.createServer(async (req: http.IncomingMessage, res: http.Ser
       try {
         console.log('Exchanging authorization code for access token...');
         const tokenResponse = await exchangeCodeForToken(authCode);
-        
+        const accessToken = tokenResponse.access_token ?? tokenResponse.accessToken;
+
         console.log('\n✅ Token exchange successful!');
         console.log('\n📋 Add these to your .env file:');
-        console.log(`CTRADER_ACCESS_TOKEN=${tokenResponse.access_token}`);
-        if (tokenResponse.refresh_token) {
-          console.log(`CTRADER_REFRESH_TOKEN=${tokenResponse.refresh_token}`);
+        console.log(`CTRADER_ACCESS_TOKEN=${accessToken}`);
+        if (tokenResponse.refresh_token ?? tokenResponse.refreshToken) {
+          console.log(`CTRADER_REFRESH_TOKEN=${tokenResponse.refresh_token ?? tokenResponse.refreshToken}`);
         }
-        if (tokenResponse.account_id) {
+
+        // Fetch account list to show the correct CTRADER_ACCOUNT_ID (ctidTraderAccountId).
+        // These are NOT the same as the broker account number in the Connect UI.
+        const accounts = await getAccessTokenAccounts(accessToken);
+        if (accounts.length > 0) {
+          console.log('\n📋 Available accounts (use one of these for CTRADER_ACCOUNT_ID):\n');
+          accounts.forEach((acc, i) => {
+            const currency = acc.depositCurrency ?? 'USD';
+            const balance = formatBalance(acc.balance, acc.moneyDigits);
+            const env = acc.live ? 'LIVE' : 'DEMO';
+            const broker = acc.brokerTitle ?? acc.brokerName ?? '—';
+            const regDate = formatRegistrationDate(acc.traderRegistrationTimestamp);
+
+            console.log(`   ${i + 1}. CTRADER_ACCOUNT_ID=${acc.ctidTraderAccountId}`);
+            console.log(`      Broker #: ${acc.accountNumber ?? '—'}  |  ${broker}  |  ${env}`);
+            console.log(`      Balance: ${currency} ${balance}  |  Created: ${regDate}  |  Status: ${acc.accountStatus ?? '—'}`);
+            if (acc.leverage) console.log(`      Leverage: 1:${acc.leverage}  |  Type: ${acc.traderAccountType ?? '—'}`);
+            console.log('');
+          });
+          console.log('   ⚠️  Use ctidTraderAccountId (above) — NOT the broker account number');
+        } else if (tokenResponse.account_id) {
           console.log(`CTRADER_ACCOUNT_ID=${tokenResponse.account_id}`);
         }
+
         console.log('\nToken response:', JSON.stringify(tokenResponse, null, 2));
 
         res.writeHead(200, { 'Content-Type': 'text/html' });
