@@ -3,15 +3,26 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { protobufLongToNumber } from '../utils/protobufLong.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /** Order types that are linked to a position and must be cancelled when position closes */
 const POSITION_LINKED_ORDER_TYPES = ['stop_loss', 'take_profit', 'breakeven_limit'] as const;
 
+function extractPositionIdFromOrder(o: { positionId?: unknown; position_id?: unknown }): string | undefined {
+  const raw = o.positionId ?? o.position_id;
+  if (raw == null) return undefined;
+  const num = protobufLongToNumber(raw);
+  return num != null ? String(num) : String(raw);
+}
+
 /**
  * Cancel all pending TP/SL/breakeven orders for a cTrader trade.
  * cTrader does not auto-cancel these when the position closes, so we must cancel them
  * to avoid orphaned orders that could execute and open unintended positions.
+ *
+ * Also reconciles with exchange: fetches open orders by positionId and cancels any
+ * linked to our position, including orders we never persisted to DB.
  */
 export async function cancelCTraderPendingOrders(
   trade: Trade,
@@ -25,23 +36,52 @@ export async function cancelCTraderPendingOrders(
          (POSITION_LINKED_ORDER_TYPES as readonly string[]).includes(o.order_type)
   );
 
-  for (const order of pendingToCancel) {
+  const orderIdsToCancel = new Set<string>(pendingToCancel.map(o => String(o.order_id!)));
+
+  // Reconcile with exchange: catch orders we placed but never saved to DB
+  if (trade.position_id) {
     try {
-      await ctraderClient.cancelOrder(order.order_id!);
-      await db.updateOrder(order.id, { status: 'cancelled' });
+      const openOrders = await ctraderClient.getOpenOrders();
+      for (const o of openOrders) {
+        const orderPositionId = extractPositionIdFromOrder(o);
+        if (orderPositionId === trade.position_id) {
+          const oid = o.orderId ?? o.id;
+          const orderIdStr = oid != null ? String(oid) : '';
+          if (orderIdStr) orderIdsToCancel.add(orderIdStr);
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to fetch exchange orders for reconciliation (will cancel DB orders only)', {
+        tradeId: trade.id,
+        positionId: trade.position_id,
+        error: error instanceof Error ? error.message : String(error),
+        exchange: 'ctrader'
+      });
+    }
+  }
+
+  const dbOrderByExchangeId = new Map(pendingToCancel.map(o => [String(o.order_id!), o]));
+
+  for (const orderId of orderIdsToCancel) {
+    try {
+      await ctraderClient.cancelOrder(orderId);
+      const dbOrder = dbOrderByExchangeId.get(orderId);
+      if (dbOrder) {
+        await db.updateOrder(dbOrder.id, { status: 'cancelled' });
+      }
       logger.info('Cancelled cTrader order linked to position', {
         tradeId: trade.id,
-        orderId: order.order_id,
-        orderType: order.order_type,
+        orderId,
+        orderType: dbOrder?.order_type,
         positionId: trade.position_id,
+        fromDb: !!dbOrder,
         exchange: 'ctrader'
       });
     } catch (error) {
       // Order may already be cancelled/filled on exchange; log and continue
       logger.warn('Failed to cancel cTrader order (may already be closed)', {
         tradeId: trade.id,
-        orderId: order.order_id,
-        orderType: order.order_type,
+        orderId,
         error: error instanceof Error ? error.message : String(error),
         exchange: 'ctrader'
       });
