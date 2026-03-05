@@ -9,6 +9,17 @@ import type { CTraderClient } from '../clients/ctraderClient.js';
 /** Order types that are linked to a position and must be cancelled when position closes */
 const POSITION_LINKED_ORDER_TYPES = ['stop_loss', 'take_profit', 'breakeven_limit'] as const;
 
+/** Max concurrent API/DB operations to avoid connection limits */
+const CANCELLATION_CHUNK_SIZE = 20;
+
+function chunk<T>(arr: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) {
+    result.push(arr.slice(i, i + size));
+  }
+  return result;
+}
+
 function extractPositionIdFromOrder(o: { positionId?: unknown; position_id?: unknown }): string | undefined {
   const raw = o.positionId ?? o.position_id;
   if (raw == null) return undefined;
@@ -73,30 +84,36 @@ export async function cancelCTraderPendingOrders(
   const toUpdateOnly = [...orderIdsToCancel].filter(id => !openOrderIds.has(id));
   const toCancel = [...orderIdsToCancel].filter(id => openOrderIds.has(id));
 
-  await Promise.all(
-    toUpdateOnly.map(async (orderId) => {
-      const dbOrder = dbOrderByExchangeId.get(orderId);
-      if (dbOrder) {
-        await db.updateOrder(dbOrder.id, { status: 'cancelled' });
-        logger.debug('Marked cTrader order cancelled in DB (already gone on exchange)', {
-          tradeId: trade.id,
-          orderId,
-          exchange: 'ctrader'
-        });
-      }
-    })
-  );
+  for (const batch of chunk(toUpdateOnly, CANCELLATION_CHUNK_SIZE)) {
+    await Promise.all(
+      batch.map(async (orderId) => {
+        const dbOrder = dbOrderByExchangeId.get(orderId);
+        if (dbOrder) {
+          await db.updateOrder(dbOrder.id, { status: 'cancelled' });
+          logger.debug('Marked cTrader order cancelled in DB (already gone on exchange)', {
+            tradeId: trade.id,
+            orderId,
+            exchange: 'ctrader'
+          });
+        }
+      })
+    );
+  }
 
-  const cancelResults = await Promise.all(
-    toCancel.map(async (orderId) => {
-      try {
-        await ctraderClient.cancelOrder(orderId);
-        return { orderId, success: true as const };
-      } catch (err) {
-        return { orderId, success: false as const, error: err };
-      }
-    })
-  );
+  const cancelResults: { orderId: string; success: boolean; error?: unknown }[] = [];
+  for (const batch of chunk(toCancel, CANCELLATION_CHUNK_SIZE)) {
+    const batchResults = await Promise.all(
+      batch.map(async (orderId) => {
+        try {
+          await ctraderClient.cancelOrder(orderId);
+          return { orderId, success: true as const };
+        } catch (err) {
+          return { orderId, success: false as const, error: err };
+        }
+      })
+    );
+    cancelResults.push(...batchResults);
+  }
 
   for (const result of cancelResults) {
     const { orderId, success } = result;
