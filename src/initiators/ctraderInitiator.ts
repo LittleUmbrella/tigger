@@ -1534,7 +1534,7 @@ const executeTradeForAccount = async (
               }
             }
             
-            // Store TP orders in database
+            // Store TP orders in database and persist position_id so monitor can detect position close
             if (tradeId) {
               for (const tpOrder of tpOrderIds) {
                 try {
@@ -1556,6 +1556,11 @@ const executeTradeForAccount = async (
                   });
                 }
               }
+              await db.updateTrade(tradeId, {
+                status: 'active',
+                entry_filled_at: dayjs().toISOString(),
+                position_id: String(positionId)
+              });
             }
             }
           }

@@ -301,15 +301,25 @@ const checkEntryFilled = async (
   }
 };
 
+/** Extract positionId from an order (handles protobuf Long) */
+const extractPositionIdFromOrder = (o: any): string | undefined => {
+  const raw = o.positionId ?? o.position_id;
+  if (raw == null) return undefined;
+  const num = protobufLongToNumber(raw);
+  return num != null ? String(num) : String(raw);
+};
+
 /**
  * Check if position is closed for cTrader
  * Implements retry logic and detailed logging (Gaps #4, #6)
+ * When position_id is missing, derives it from our pending orders on the exchange - detects orphans
  */
 const checkPositionClosed = async (
   trade: Trade,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider
+  priceProvider?: HistoricalPriceProvider,
+  db?: DatabaseManager
 ): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
   try {
     logger.debug('Checking if cTrader position is closed', {
@@ -475,6 +485,52 @@ const checkPositionClosed = async (
           exchange: 'ctrader'
         });
       }
+    } else if (ctraderClient && !trade.position_id && db && trade.entry_filled_at) {
+      // Fallback: derive position from our pending orders on exchange - detects orphans when position_id was never set
+      const symbol = normalizeCTraderSymbol(trade.trading_pair);
+      const pendingOrders = await db.getOrdersByTradeId(trade.id);
+      const pendingWithOrderId = pendingOrders.filter(o => o.status === 'pending' && o.order_id);
+      if (pendingWithOrderId.length === 0) return { closed: false };
+
+      const [openOrders, positions] = await Promise.all([
+        ctraderClient.getOpenOrders(),
+        ctraderClient.getOpenPositions()
+      ]);
+      const ourOrderIds = new Set(pendingWithOrderId.map(o => String(o.order_id)));
+      const matchingExchangeOrders = openOrders.filter((o: any) => {
+        const oid = String(o.orderId ?? o.id ?? '');
+        return ourOrderIds.has(oid);
+      });
+      if (matchingExchangeOrders.length === 0) return { closed: false }; // Our orders not on exchange (filled/cancelled)
+
+      const positionIds = new Set<string>();
+      for (const o of matchingExchangeOrders) {
+        const pid = extractPositionIdFromOrder(o);
+        if (pid) positionIds.add(pid);
+      }
+      if (positionIds.size === 0) return { closed: false };
+
+      const openPositionIds = new Set(
+        positions.map((p: any) => {
+          const id = p.positionId ?? p.id;
+          return id != null ? String(protobufLongToNumber(id) ?? id) : '';
+        }).filter(Boolean)
+      );
+      const ourPositionsExist = [...positionIds].some(pid => openPositionIds.has(pid));
+      if (!ourPositionsExist) {
+        logger.info('cTrader position closed (derived from orphaned orders)', {
+          tradeId: trade.id,
+          symbol,
+          derivedPositionIds: [...positionIds],
+          note: 'Our orders on exchange but their positions closed - cTrader does not auto-cancel',
+          exchange: 'ctrader'
+        });
+        return { closed: true };
+      }
+      // Persist learned position_id for future runs
+      const firstPosId = [...positionIds][0];
+      await db.updateTrade(trade.id, { position_id: firstPosId });
+      trade.position_id = firstPosId;
     } else {
       logger.debug('Cannot check position close - missing client or position ID', {
         tradeId: trade.id,
@@ -1601,8 +1657,8 @@ const monitorTrade = async (
         }
       }
       
-      // Check if position is closed
-      const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
+      // Check if position is closed (pass db for fallback when position_id missing - detects orphans)
+      const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider, db);
       if (positionResult.closed) {
         logger.info('cTrader position closed', {
           tradeId: trade.id,
@@ -1684,7 +1740,7 @@ const monitorTrade = async (
           exchange: 'ctrader'
         });
         
-        const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
+        const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider, db);
         if (stopLossResult.closed) {
           if (ctraderClient) {
             await cancelCTraderPendingOrders(trade, db, ctraderClient);

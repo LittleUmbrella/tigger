@@ -653,6 +653,19 @@ export class CTraderClient {
   }
 
   /**
+   * Get raw reconcile response (positions + orders in one call).
+   * Useful for debugging - use getOpenPositions/getOpenOrders for normal usage.
+   */
+  async getReconcile(): Promise<{ position?: any[]; order?: any[]; [key: string]: any }> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+    return this.connection.sendCommand('ProtoOAReconcileReq', {
+      ctidTraderAccountId: parseInt(this.config.accountId!, 10)
+    });
+  }
+
+  /**
    * Get open positions (uses ProtoOAReconcileReq; positions have tradeData.symbolId, we enrich with symbolName)
    */
   async getOpenPositions(): Promise<any[]> {

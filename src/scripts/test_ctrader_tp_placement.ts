@@ -203,7 +203,8 @@ const main = async () => {
           symbol: posSymbol,
           volume: volumeLots,
           tradeSide: tpSide,
-          price: tp.price
+          price: tp.price,
+          positionId: String(posId) // Link to position so order auto-cancels when position closes
         });
         console.log(`  ✅ TP ${tp.index} order placed: ${orderId}`);
       }
