@@ -38,10 +38,11 @@ export async function cancelCTraderPendingOrders(
 
   const orderIdsToCancel = new Set<string>(pendingToCancel.map(o => String(o.order_id!)));
 
-  // Reconcile with exchange: catch orders we placed but never saved to DB
-  if (trade.position_id) {
-    try {
-      const openOrders = await ctraderClient.getOpenOrders();
+  let openOrders: { orderId?: unknown; id?: unknown; positionId?: unknown; position_id?: unknown }[] = [];
+  try {
+    openOrders = await ctraderClient.getOpenOrders();
+    // Reconcile: add orders on exchange linked to our position that we never saved to DB
+    if (trade.position_id) {
       for (const o of openOrders) {
         const orderPositionId = extractPositionIdFromOrder(o);
         if (orderPositionId === trade.position_id) {
@@ -50,25 +51,58 @@ export async function cancelCTraderPendingOrders(
           if (orderIdStr) orderIdsToCancel.add(orderIdStr);
         }
       }
-    } catch (error) {
-      logger.warn('Failed to fetch exchange orders for reconciliation (will cancel DB orders only)', {
-        tradeId: trade.id,
-        positionId: trade.position_id,
-        error: error instanceof Error ? error.message : String(error),
-        exchange: 'ctrader'
-      });
     }
+  } catch (error) {
+    logger.warn('Failed to fetch exchange orders for reconciliation (will cancel DB orders only)', {
+      tradeId: trade.id,
+      positionId: trade.position_id,
+      error: error instanceof Error ? error.message : String(error),
+      exchange: 'ctrader'
+    });
   }
+
+  const openOrderIds = new Set(
+    openOrders.map(o => {
+      const oid = o.orderId ?? o.id;
+      return oid != null ? String(oid) : '';
+    }).filter(Boolean)
+  );
 
   const dbOrderByExchangeId = new Map(pendingToCancel.map(o => [String(o.order_id!), o]));
 
-  for (const orderId of orderIdsToCancel) {
-    try {
-      await ctraderClient.cancelOrder(orderId);
+  const toUpdateOnly = [...orderIdsToCancel].filter(id => !openOrderIds.has(id));
+  const toCancel = [...orderIdsToCancel].filter(id => openOrderIds.has(id));
+
+  await Promise.all(
+    toUpdateOnly.map(async (orderId) => {
       const dbOrder = dbOrderByExchangeId.get(orderId);
       if (dbOrder) {
         await db.updateOrder(dbOrder.id, { status: 'cancelled' });
+        logger.debug('Marked cTrader order cancelled in DB (already gone on exchange)', {
+          tradeId: trade.id,
+          orderId,
+          exchange: 'ctrader'
+        });
       }
+    })
+  );
+
+  const cancelResults = await Promise.all(
+    toCancel.map(async (orderId) => {
+      try {
+        await ctraderClient.cancelOrder(orderId);
+        return { orderId, success: true as const };
+      } catch (err) {
+        return { orderId, success: false as const, error: err };
+      }
+    })
+  );
+
+  for (const result of cancelResults) {
+    const { orderId, success } = result;
+    const dbOrder = dbOrderByExchangeId.get(orderId);
+    if (success) {
+      if (dbOrder) await db.updateOrder(dbOrder.id, { status: 'cancelled' });
       logger.info('Cancelled cTrader order linked to position', {
         tradeId: trade.id,
         orderId,
@@ -77,12 +111,12 @@ export async function cancelCTraderPendingOrders(
         fromDb: !!dbOrder,
         exchange: 'ctrader'
       });
-    } catch (error) {
-      // Order may already be cancelled/filled on exchange; log and continue
+    } else {
+      const err = result.error;
       logger.warn('Failed to cancel cTrader order (may already be closed)', {
         tradeId: trade.id,
         orderId,
-        error: error instanceof Error ? error.message : String(error),
+        error: err instanceof Error ? err.message : String(err),
         exchange: 'ctrader'
       });
     }
