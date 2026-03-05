@@ -5,6 +5,50 @@ import { RestClientV5 } from 'bybit-api';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
+/** Order types that are linked to a position and must be cancelled when position closes */
+const POSITION_LINKED_ORDER_TYPES = ['stop_loss', 'take_profit', 'breakeven_limit'] as const;
+
+/**
+ * Cancel all pending TP/SL/breakeven orders for a cTrader trade.
+ * cTrader does not auto-cancel these when the position closes, so we must cancel them
+ * to avoid orphaned orders that could execute and open unintended positions.
+ */
+export async function cancelCTraderPendingOrders(
+  trade: Trade,
+  db: DatabaseManager,
+  ctraderClient: CTraderClient
+): Promise<void> {
+  const orders = await db.getOrdersByTradeId(trade.id);
+  const pendingToCancel = orders.filter(
+    o => o.status === 'pending' &&
+         o.order_id &&
+         (POSITION_LINKED_ORDER_TYPES as readonly string[]).includes(o.order_type)
+  );
+
+  for (const order of pendingToCancel) {
+    try {
+      await ctraderClient.cancelOrder(order.order_id!);
+      await db.updateOrder(order.id, { status: 'cancelled' });
+      logger.info('Cancelled cTrader order linked to position', {
+        tradeId: trade.id,
+        orderId: order.order_id,
+        orderType: order.order_type,
+        positionId: trade.position_id,
+        exchange: 'ctrader'
+      });
+    } catch (error) {
+      // Order may already be cancelled/filled on exchange; log and continue
+      logger.warn('Failed to cancel cTrader order (may already be closed)', {
+        tradeId: trade.id,
+        orderId: order.order_id,
+        orderType: order.order_type,
+        error: error instanceof Error ? error.message : String(error),
+        exchange: 'ctrader'
+      });
+    }
+  }
+}
+
 /**
  * Helper function to close a position
  */
@@ -27,6 +71,8 @@ export async function closePosition(
     });
   } else if (trade.exchange === 'ctrader' && ctraderClient && trade.position_id) {
     try {
+      // Cancel TP/SL/breakeven orders first - cTrader does not auto-cancel them when position closes
+      await cancelCTraderPendingOrders(trade, db, ctraderClient);
       await ctraderClient.closePosition(trade.position_id);
       logger.info('Position closed on cTrader', {
         tradeId: trade.id,

@@ -25,6 +25,7 @@ import {
   MONITOR_TRADE_TIMEOUT_MS
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
+import { cancelCTraderPendingOrders } from '../managers/positionUtils.js';
 
 /**
  * Get current price from cTrader
@@ -1609,7 +1610,10 @@ const monitorTrade = async (
           pnl: positionResult.pnl,
           exchange: 'ctrader'
         });
-        
+        // Cancel any pending TP/SL/breakeven orders - cTrader does not auto-cancel them when position closes
+        if (ctraderClient) {
+          await cancelCTraderPendingOrders(trade, db, ctraderClient);
+        }
         await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
         return;
       }
@@ -1682,6 +1686,9 @@ const monitorTrade = async (
         
         const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
         if (stopLossResult.closed) {
+          if (ctraderClient) {
+            await cancelCTraderPendingOrders(trade, db, ctraderClient);
+          }
           await updateTradeOnStopLossHit(trade, db, stopLossResult.exitPrice, stopLossResult.pnl);
         } else {
           await db.updateTrade(trade.id, { status: 'stopped' });
