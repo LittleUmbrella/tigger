@@ -678,11 +678,11 @@ const checkOrderFilled = async (
         orderId: order.id,
         tradeId: trade.id,
         symbol,
-        openOrdersCount: openOrders.length,
+        openOrdersCount: ordersToCheck.length,
         exchange: 'ctrader'
       });
       
-      const foundOrder = openOrders.find((o: any) => {
+      const foundOrder = ordersToCheck.find((o: any) => {
         const oId = o.orderId || o.id;
         const matches = oId?.toString() === order.order_id;
         
@@ -1801,7 +1801,7 @@ const monitorTrade = async (
   } finally {
     const totalElapsedMs = Date.now() - monitorStart;
     const sumOfPhasesMs = Object.values(timings).reduce((a, b) => a + b, 0);
-    logger.trace('cTrader monitor trade timings', {
+    logger.log('trace', 'cTrader monitor trade timings', {
       tradeId: trade.id,
       channel,
       exchange: 'ctrader',
