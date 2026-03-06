@@ -210,7 +210,7 @@ const main = async () => {
     for (const trade of activeTrades) {
       const tradeOrders = await db.getOrdersByTradeId(trade.id);
       const pendingOrders = tradeOrders.filter(o => o.status === 'pending' && o.order_id);
-      console.log(`  trade ${trade.id} | ${trade.trading_pair} | position_id: ${trade.position_id ?? '(not set)'} | pending orders: ${pendingOrders.length}`);
+      console.log(`  trade ${trade.id} | ${trade.trading_pair} | channel: ${trade.channel} | account: ${trade.account_name ?? '(default)'} | position_id: ${trade.position_id ?? '(not set)'} | pending orders: ${pendingOrders.length}`);
 
       for (const ord of pendingOrders) {
         const exchangeOrder = orders.find((o: any) => extractOrderId(o) === String(ord.order_id));

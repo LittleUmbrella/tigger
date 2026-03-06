@@ -584,13 +584,15 @@ const cancelOrder = async (
 /**
  * Check if order is filled for cTrader
  * Implements advanced order querying with detailed logging (Gaps #5, #6)
+ * @param openOrders - Optional pre-fetched open orders to avoid repeated reconcile calls (each getOpenOrders = full ProtoOAReconcileReq)
  */
 const checkOrderFilled = async (
   order: Order,
   trade: Trade,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider
+  priceProvider?: HistoricalPriceProvider,
+  openOrders?: any[]
 ): Promise<{ filled: boolean; filledPrice?: number }> => {
   try {
     logger.debug('Checking if cTrader order is filled', {
@@ -658,16 +660,19 @@ const checkOrderFilled = async (
     } else if (ctraderClient && order.order_id) {
       const symbol = normalizeCTraderSymbol(trade.trading_pair);
       
-      logger.debug('Querying cTrader open orders', {
-        orderId: order.id,
-        orderType: order.order_type,
-        storedOrderId: order.order_id,
-        tradeId: trade.id,
-        symbol,
-        exchange: 'ctrader'
-      });
-      
-      const openOrders = await ctraderClient.getOpenOrders();
+      // Use pre-fetched open orders when provided to avoid N reconcile calls per trade
+      let ordersToCheck = openOrders;
+      if (ordersToCheck === undefined) {
+        logger.debug('Querying cTrader open orders', {
+          orderId: order.id,
+          orderType: order.order_type,
+          storedOrderId: order.order_id,
+          tradeId: trade.id,
+          symbol,
+          exchange: 'ctrader'
+        });
+        ordersToCheck = await ctraderClient.getOpenOrders();
+      }
       
       logger.debug('Open orders retrieved', {
         orderId: order.id,
@@ -1361,6 +1366,8 @@ const placeBreakevenLimitOrder = async (
     // Round quantity (Gap #3)
     const quantity = roundQuantity(positionVolume, quantityPrecision, false);
 
+    const breakevenPositionId = (position.positionId || position.id)?.toString() || trade.position_id;
+
     logger.info('Placing breakeven limit order', {
       tradeId: trade.id,
       symbol,
@@ -1368,6 +1375,7 @@ const placeBreakevenLimitOrder = async (
       quantity,
       side: breakevenSide,
       positionVolume,
+      positionId: breakevenPositionId,
       exchange: 'ctrader'
     });
 
@@ -1375,7 +1383,8 @@ const placeBreakevenLimitOrder = async (
       symbol,
       volume: quantity,
       tradeSide: breakevenSide,
-      price: entryPrice
+      price: entryPrice,
+      positionId: breakevenPositionId
     });
 
     if (orderId) {
@@ -1429,6 +1438,10 @@ const monitorTrade = async (
   breakevenAfterTPs: number,
   useLimitOrderForBreakeven: boolean = true
 ): Promise<void> => {
+  const timings: Record<string, number> = {};
+  let t0 = Date.now();
+  const monitorStart = Date.now();
+
   try {
     logger.info('Monitoring cTrader trade', {
       tradeId: trade.id,
@@ -1441,7 +1454,9 @@ const monitorTrade = async (
     });
 
     // Check if trade has expired
+    t0 = Date.now();
     if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
+      timings.checkTradeExpired = Date.now() - t0;
       logger.info('cTrader trade expired - cancelling order', {
         tradeId: trade.id,
         orderId: trade.order_id,
@@ -1456,8 +1471,10 @@ const monitorTrade = async (
       await cancelTrade(trade, db);
       return;
     }
+    timings.checkTradeExpired = Date.now() - t0;
 
     // For pending trades, check if position already exists
+    t0 = Date.now();
     if (trade.status === 'pending' && !isSimulation && ctraderClient) {
       try {
         const positions = await ctraderClient.getOpenPositions();
@@ -1502,8 +1519,10 @@ const monitorTrade = async (
         });
       }
     }
+    timings.pendingPositionCheck = Date.now() - t0;
 
     // Get current price
+    t0 = Date.now();
     const currentPrice = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
     if (!currentPrice) {
       logger.warn('Could not get current price for cTrader trade', {
@@ -1513,6 +1532,7 @@ const monitorTrade = async (
       });
       return;
     }
+    timings.getCurrentPrice = Date.now() - t0;
 
     // Check if entry price was hit before stop loss or take profit (for pending trades)
     if (trade.status === 'pending') {
@@ -1610,9 +1630,25 @@ const monitorTrade = async (
 
       // Check SL/TP orders for fills
       const pendingOrders = orders.filter(o => o.status === 'pending');
+      // Fetch open orders ONCE and reuse - avoid N reconcile calls (was causing 60s timeout for trades with multiple orders)
+      let cachedOpenOrders: any[] | undefined;
+      t0 = Date.now();
+      if (pendingOrders.length > 0 && ctraderClient) {
+        try {
+          cachedOpenOrders = await ctraderClient.getOpenOrders();
+        } catch (err) {
+          logger.warn('Failed to fetch open orders for fill check, will fetch per-order', {
+            tradeId: trade.id,
+            error: err instanceof Error ? err.message : String(err),
+            exchange: 'ctrader'
+          });
+        }
+      }
+      timings.fetchOpenOrders = Date.now() - t0;
 
+      t0 = Date.now();
       for (const order of pendingOrders) {
-        const orderResult = await checkOrderFilled(order, trade, ctraderClient, isSimulation, priceProvider);
+        const orderResult = await checkOrderFilled(order, trade, ctraderClient, isSimulation, priceProvider, cachedOpenOrders);
         if (orderResult.filled) {
           if (order.order_type === 'take_profit') {
             logger.info('cTrader take profit order filled', {
@@ -1656,9 +1692,12 @@ const monitorTrade = async (
           }
         }
       }
-      
+      timings.checkOrderFillsLoop = Date.now() - t0;
+
       // Check if position is closed (pass db for fallback when position_id missing - detects orphans)
+      t0 = Date.now();
       const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider, db);
+      timings.checkPositionClosed = Date.now() - t0;
       if (positionResult.closed) {
         logger.info('cTrader position closed', {
           tradeId: trade.id,
@@ -1668,7 +1707,9 @@ const monitorTrade = async (
         });
         // Cancel any pending TP/SL/breakeven orders - cTrader does not auto-cancel them when position closes
         if (ctraderClient) {
+          t0 = Date.now();
           await cancelCTraderPendingOrders(trade, db, ctraderClient);
+          timings.cancelPendingOrders = Date.now() - t0;
         }
         await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
         return;
@@ -1757,6 +1798,17 @@ const monitorTrade = async (
       exchange: 'ctrader',
       error: error instanceof Error ? error.message : String(error)
     });
+  } finally {
+    const totalElapsedMs = Date.now() - monitorStart;
+    const sumOfPhasesMs = Object.values(timings).reduce((a, b) => a + b, 0);
+    logger.trace('cTrader monitor trade timings', {
+      tradeId: trade.id,
+      channel,
+      exchange: 'ctrader',
+      totalElapsedMs,
+      sumOfPhasesMs,
+      timings
+    });
   }
 };
 
@@ -1835,6 +1887,14 @@ export const startCTraderMonitor = async (
           const accountCTraderClient = getCTraderClient
             ? await getCTraderClient(trade.account_name)
             : ctraderClient;
+          if (!accountCTraderClient) {
+            logger.warn('No cTrader client for trade - cannot check position or cancel orders', {
+              tradeId: trade.id,
+              channel,
+              accountName: trade.account_name ?? '(none)',
+              exchange: 'ctrader'
+            });
+          }
           return Promise.race([
             monitorTrade(
               channel,

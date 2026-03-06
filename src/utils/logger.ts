@@ -140,7 +140,9 @@ if (!process.env.LOGGLY_TOKEN || !process.env.LOGGLY_SUBDOMAIN) {
 }
 
 // Create logger with error handling to ensure logs are never lost
+// Custom levels: trace is below debug for very verbose diagnostic output
 export const logger = winston.createLogger({
+  levels: { ...winston.config.npm.levels, trace: 7 },
   level: process.env.LOG_LEVEL || 'info',
   format: format.combine(
     redactFormat(),
