@@ -542,6 +542,14 @@ const executeTradeForAccount = async (
     }
     const finalEntryPrice: number = entryPrice;
 
+    // Enforce SL/TP requirement before placing any order
+    if (!order.stopLoss || order.stopLoss <= 0) {
+      throw new Error(`Cannot place entry: stop loss is required (got ${order.stopLoss})`);
+    }
+    if (!order.takeProfits?.length) {
+      throw new Error(`Cannot place entry: at least one take profit is required`);
+    }
+
     // Validate trade prices before proceeding (safety net - parsers should have validated already)
     // Only validate strictly when using the original parsed entry price.
     // For market orders, skip strict validation since TP/SL were parsed relative to the original signal entry,
@@ -1004,6 +1012,16 @@ const executeTradeForAccount = async (
           originalTPs: order.takeProfits,
           deduplicatedTPs: roundedTPPrices
         });
+      }
+    }
+
+    // Add best TP to order for market orders (from current price calculation)
+    if (isMarketOrder && roundedTPPrices && roundedTPPrices.length > 0 && !isSimulation) {
+      const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
+      const isLong = order.signalType === 'long';
+      const tpValid = isLong ? bestTpPrice > roundedEntryPrice : bestTpPrice < roundedEntryPrice;
+      if (tpValid) {
+        orderParams.takeProfit = bestTpPrice.toString();
       }
     }
 
@@ -1965,6 +1983,53 @@ const executeTradeForAccount = async (
               }
             }
 
+            // Set SL and best TP on position via setTradingStop (monitor replaces these; idempotent)
+            const tpCount = roundedTPPrices.length;
+            const bestTpOrder = validTPOrders.find(tp => tp.index === tpCount);
+            const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices[tpCount - 1];
+            try {
+              const tradingStopParams: {
+                category: 'linear';
+                symbol: string;
+                positionIdx: 0 | 1 | 2;
+                tpslMode: 'Full';
+                stopLoss?: string;
+                takeProfit?: string;
+              } = {
+                category: 'linear',
+                symbol: symbol,
+                positionIdx: 0 as 0 | 1 | 2,
+                tpslMode: 'Full'
+              };
+              if (roundedStopLoss && roundedStopLoss > 0) {
+                tradingStopParams.stopLoss = roundedStopLoss.toString();
+              }
+              if (bestTpPrice != null && bestTpPrice > 0) {
+                tradingStopParams.takeProfit = bestTpPrice.toString();
+              }
+              if (tradingStopParams.stopLoss != null || tradingStopParams.takeProfit != null) {
+                await bybitClient.setTradingStop(tradingStopParams);
+                logger.info('Bybit position SL and best TP set via setTradingStop', {
+                  channel,
+                  symbol,
+                  accountName: accountName || 'default',
+                  stopLoss: tradingStopParams.stopLoss,
+                  bestTpPrice: tradingStopParams.takeProfit,
+                  tradeId,
+                  exchange: 'bybit'
+                });
+              }
+            } catch (error) {
+              logger.warn('Failed to set SL or best TP on position, monitor will retry', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                tradeId,
+                exchange: 'bybit',
+                ...serializeError(error)
+              });
+            }
+
             if (validTPOrders.length === 0) {
               logger.error('No valid TP orders to place - all quantities are zero or below minimum', {
                 channel,
@@ -1986,9 +2051,22 @@ const executeTradeForAccount = async (
             // For a Short position (Sell side), TP is Buy
             const tpSide = positionSide === 'Buy' ? 'Sell' : 'Buy';
 
-            // Prepare batch order requests using only valid TP orders
+            // Place limit orders only for non-best TPs (best TP is on position via setTradingStop)
+            const nonBestTPOrders = validTPOrders.filter(tp => tp.index !== tpCount);
+
+            // If only one TP (best on position), no limit orders to place
+            if (nonBestTPOrders.length === 0) {
+              logger.info('Single TP set on position, no limit orders to place', {
+                channel,
+                symbol,
+                tradeId,
+                bestTpPrice,
+                exchange: 'bybit'
+              });
+            } else {
+            // Prepare batch order requests using only non-best valid TP orders
             // Always use reduceOnly=true since we have a confirmed position
-            const batchOrders = validTPOrders.map((tpOrder) => ({
+            const batchOrders = nonBestTPOrders.map((tpOrder) => ({
             category: 'linear' as const,
             symbol: symbol,
             side: tpSide as 'Buy' | 'Sell',
@@ -2011,10 +2089,10 @@ const executeTradeForAccount = async (
             expectedTPs: order.takeProfits.length,
             batchOrders: JSON.stringify(batchOrders, null, 2),
             batchOrdersFormatted: batchOrders.map((order, i) => ({
-              index: validTPOrders[i].index,
+              index: nonBestTPOrders[i].index,
               ...order,
-                tpPrice: validTPOrders[i].price,
-                tpQty: validTPOrders[i].quantity
+                tpPrice: nonBestTPOrders[i].price,
+                tpQty: nonBestTPOrders[i].quantity
               }))
             });
 
@@ -2041,19 +2119,19 @@ const executeTradeForAccount = async (
                 // Collect order IDs from batch response
                 batchResponse.result.list.forEach((result: any, i: number) => {
                   const orderId = getBybitField<string>(result, 'orderId', 'order_id');
-                  if (orderId && i < validTPOrders.length) {
+                  if (orderId && i < nonBestTPOrders.length) {
                     tpOrderIds.push({
-                      index: validTPOrders[i].index - 1, // Convert to 0-based for array compatibility
+                      index: nonBestTPOrders[i].index - 1, // Convert to 0-based for array compatibility
                       orderId: orderId,
-                      price: validTPOrders[i].price,
-                      quantity: validTPOrders[i].quantity,
-                      tpIndex: validTPOrders[i].index // Store 1-based TP index for database
+                      price: nonBestTPOrders[i].price,
+                      quantity: nonBestTPOrders[i].quantity,
+                      tpIndex: nonBestTPOrders[i].index // Store 1-based TP index for database
                     });
                   }
                 });
                 logger.info('Take profit orders placed via batch', {
                   symbol,
-                  numTPs: validTPOrders.length,
+                  numTPs: nonBestTPOrders.length,
                   expectedTPs: order.takeProfits.length,
                   orderIds: tpOrderIds.map(tp => tp.orderId)
                 });
@@ -2078,8 +2156,8 @@ const executeTradeForAccount = async (
             let tpSuccessCount = 0;
             const tpErrors: Array<{ index: number; error: string }> = [];
 
-            for (let i = 0; i < validTPOrders.length; i++) {
-              const tpOrder = validTPOrders[i];
+            for (let i = 0; i < nonBestTPOrders.length; i++) {
+              const tpOrder = nonBestTPOrders[i];
 
               try {
                 // Log individual TP order parameters before sending
@@ -2146,7 +2224,7 @@ const executeTradeForAccount = async (
             }
 
             // If all TP orders failed, consider cancelling entry order
-            if (tpSuccessCount === 0 && validTPOrders.length > 0) {
+            if (tpSuccessCount === 0 && nonBestTPOrders.length > 0) {
               logger.error('All take profit orders failed', {
                 symbol,
                 orderId,
@@ -2179,17 +2257,18 @@ const executeTradeForAccount = async (
                   error: cancelError instanceof Error ? cancelError.message : String(cancelError)
                 });
               }
-            } else if (tpSuccessCount < validTPOrders.length) {
+            } else if (tpSuccessCount < nonBestTPOrders.length) {
               logger.warn('Some take profit orders failed', {
                 symbol,
                 orderId,
                 successful: tpSuccessCount,
-                attempted: validTPOrders.length,
+                attempted: nonBestTPOrders.length,
                 expected: order.takeProfits.length,
                 errors: tpErrors
               });
             }
             }
+            } // End of else (nonBestTPOrders.length > 0)
           } // End of if (shouldPlaceTPOrders) block
         } else {
           logger.info('Limit order placed but no position detected yet, TP orders will be placed by monitor', {

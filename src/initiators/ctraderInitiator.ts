@@ -419,6 +419,14 @@ const executeTradeForAccount = async (
     }
     const finalEntryPrice: number = entryPrice;
 
+    // Enforce SL/TP requirement before placing any order
+    if (!order.stopLoss || order.stopLoss <= 0) {
+      throw new Error(`Cannot place entry: stop loss is required (got ${order.stopLoss})`);
+    }
+    if (!order.takeProfits?.length) {
+      throw new Error(`Cannot place entry: at least one take profit is required`);
+    }
+
     // Validate trade prices
     if (!isUsingMarketPrice) {
       if (!validateTradePrices(
@@ -874,6 +882,9 @@ const executeTradeForAccount = async (
     // Declare tradeId early so it's available throughout the function
     let tradeId: number | undefined;
     
+    // Current price for market order SL/TP (set on order) - used for calculation from current price
+    let currentPriceForMarketOrder: number | null = null;
+    
     // Check if current market price is already past stop loss before placing order (Gap #6)
     if (roundedStopLoss && roundedStopLoss > 0 && !isSimulation && ctraderClient) {
       try {
@@ -884,6 +895,7 @@ const executeTradeForAccount = async (
           exchange: 'ctrader'
         });
         const currentPrice = await ctraderClient.getCurrentPrice(symbol);
+        currentPriceForMarketOrder = currentPrice;
         logger.info('Current price received', {
           channel,
           symbol,
@@ -997,6 +1009,24 @@ const executeTradeForAccount = async (
     // If position limit errors occur, they will be handled by the exchange's error response
     // (Gap #5: Not applicable - cTrader architecture differs from Bybit)
     
+    // For market orders: fetch current price if needed for initial SL and best TP on order
+    if (isMarketOrder && !isSimulation && ctraderClient && (roundedStopLoss || roundedTPPrices?.length)) {
+      if (currentPriceForMarketOrder === null) {
+        try {
+          const priceSide: 'buy' | 'sell' = order.signalType === 'long' ? 'buy' : 'sell';
+          currentPriceForMarketOrder = await ctraderClient.getCurrentPrice(symbol, priceSide);
+        } catch (error) {
+          logger.warn('Failed to fetch current price for market order SL/TP, will set via monitor', {
+            channel,
+            symbol,
+            accountName: accountName || 'default',
+            exchange: 'ctrader',
+            ...serializeError(error)
+          });
+        }
+      }
+    }
+    
     // Place order
     let orderId: string;
     if (isSimulation) {
@@ -1022,18 +1052,43 @@ const executeTradeForAccount = async (
         // TEMPORARY: Use actual market orders instead of converting to limit at current price
         // (Comment out to restore: limit order at current price for predictable cost)
         if (isMarketOrder) {
+          // Compute initial SL and best TP from current price for market order (set on order when supported)
+          let initialSl: number | undefined;
+          let initialBestTp: number | undefined;
+          if (currentPriceForMarketOrder !== null && currentPriceForMarketOrder > 0) {
+            const cp = currentPriceForMarketOrder;
+            const isLong = order.signalType === 'long';
+            if (roundedStopLoss && roundedStopLoss > 0) {
+              const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
+              if (slValid) {
+                initialSl = roundedStopLoss;
+              }
+            }
+            if (roundedTPPrices && roundedTPPrices.length > 0) {
+              // Best TP = last/furthest TP (closes remainder when hit)
+              const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
+              const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
+              if (tpValid) {
+                initialBestTp = bestTpPrice;
+              }
+            }
+          }
           logger.info('Placing cTrader market order', {
             channel,
             symbol,
             volume: qty,
             tradeSide,
+            ...(initialSl != null && { initialSl }),
+            ...(initialBestTp != null && { initialBestTp }),
             accountName: accountName || 'default',
             exchange: 'ctrader'
           });
           orderId = await ctraderClient.placeMarketOrder({
             symbol,
             volume: qty,
-            tradeSide
+            tradeSide,
+            ...(initialSl != null && { stopLoss: initialSl }),
+            ...(initialBestTp != null && { takeProfit: initialBestTp })
           });
         } else {
           logger.info('Placing cTrader limit order', {
@@ -1462,7 +1517,46 @@ const executeTradeForAccount = async (
               exchange: 'ctrader'
             });
           } else {
-            // Place individual TP orders using placeLimitOrder
+            // Set SL and best TP on position via modifyPosition (monitor replaces these; idempotent)
+            const tpCount = roundedTPPrices?.length ?? 0;
+            const bestTpOrder = validTPOrders.find(tp => tp.index === tpCount);
+            const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices?.[tpCount - 1];
+            try {
+              const modifyPayload: { positionId: string; stopLoss?: number; takeProfit?: number } = {
+                positionId: positionId!
+              };
+              if (roundedStopLoss && roundedStopLoss > 0) {
+                modifyPayload.stopLoss = roundedStopLoss;
+              }
+              if (bestTpPrice != null && bestTpPrice > 0) {
+                modifyPayload.takeProfit = bestTpPrice;
+              }
+              if (modifyPayload.stopLoss != null || modifyPayload.takeProfit != null) {
+                await ctraderClient.modifyPosition(modifyPayload);
+                logger.info('cTrader position SL and best TP set via modifyPosition', {
+                  channel,
+                  symbol,
+                  accountName: accountName || 'default',
+                  stopLoss: modifyPayload.stopLoss,
+                  bestTpPrice: modifyPayload.takeProfit,
+                  positionId,
+                  tradeId,
+                  exchange: 'ctrader'
+                });
+              }
+            } catch (error) {
+              logger.warn('Failed to set SL or best TP on position, monitor will retry', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                positionId,
+                tradeId,
+                exchange: 'ctrader',
+                ...serializeError(error)
+              });
+            }
+
+            // Place limit orders only for non-best TPs (best TP is on position)
             // cTrader placeLimitOrder expects volume in lots. totalQtyForTPs and thus tpOrd.quantity
             // are always in lots (actualPositionQty was converted via /lotSize when used).
             if (actualPositionQty != null && (lotSize == null || lotSize <= 0)) {
@@ -1484,6 +1578,10 @@ const executeTradeForAccount = async (
             const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
             
             for (const tpOrder of validTPOrders) {
+              if (tpOrder.index === tpCount) {
+                // Best TP - already set on position, skip separate order
+                continue;
+              }
               try {
                 // Determine opposite side for TP orders (use effectivePositionSide - falls back to expected when mismatch)
                 // For a Long position (BUY side), TP is SELL
