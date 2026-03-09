@@ -23,7 +23,8 @@ import {
   updateTradeOnBreakevenFilled,
   cancelTrade,
   sleep,
-  MONITOR_TRADE_TIMEOUT_MS
+  MONITOR_TRADE_TIMEOUT_MS,
+  TP_PLACEMENT_TIMEOUT_MS
 } from './shared.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -761,14 +762,18 @@ const placeTakeProfitOrders = async (
       return;
     }
 
-    // Check if TP orders already exist - only skip when we have ALL expected TPs
-    // Partial placement (e.g. TP1 placed, TP2 failed) must retry on next monitor cycle
+    // Check if TP orders already exist. Best TP is set on position (not in DB); non-best TPs are limit orders.
+    // Skip when we have all non-best limit orders (n-1 for n TPs), or all TPs for single-TP case.
     let existingOrders = await db.getOrdersByTradeId(trade.id);
     const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
-    if (existingTPOrders.length >= takeProfits.length) {
-      logger.debug('All take profit orders already exist, skipping placement', {
+    const nonBestCount = Math.max(0, takeProfits.length - 1);
+    if (takeProfits.length === 1) {
+      // Single TP: set on position only; no DB orders. Don't skip - always run to set SL and best TP.
+    } else if (existingTPOrders.length >= nonBestCount) {
+      logger.debug('All non-best take profit orders already exist, skipping placement', {
         tradeId: trade.id,
         existingTPCount: existingTPOrders.length,
+        nonBestCount,
         expectedTPCount: takeProfits.length
       });
       return;
@@ -888,6 +893,36 @@ const placeTakeProfitOrders = async (
       }
     }
 
+    // Set stop loss on position early for faster protection (later setTradingStop will reset it with best TP)
+    if (trade.stop_loss != null) {
+      try {
+        const stopLossParams = {
+          category: 'linear' as const,
+          symbol: symbol,
+          stopLoss: trade.stop_loss.toString(),
+          positionIdx,
+          tpslMode: 'Full' as const
+        };
+        await bybitClient.setTradingStop(stopLossParams);
+        logger.info('Bybit stop loss set on position', {
+          tradeId: trade.id,
+          symbol,
+          stopLoss: trade.stop_loss,
+          positionIdx,
+          exchange: 'bybit'
+        });
+      } catch (error) {
+        logger.warn('Failed to set stop loss on Bybit position', {
+          tradeId: trade.id,
+          symbol,
+          stopLoss: trade.stop_loss,
+          channel: trade.channel,
+          exchange: 'bybit',
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+
     // Get symbol info for precision and qtyStep
     const symbolInfo = await getSymbolInfo(bybitClient, symbol);
     let decimalPrecision = 2;
@@ -1000,7 +1035,54 @@ const placeTakeProfitOrders = async (
       return;
     }
 
-    // Place TP orders
+    // Best TP = last/furthest TP - set on position via setTradingStop (closes remainder when hit).
+    // Monitor replaces SL and TP on position so they are always correct.
+    const bestTpOrder = validTPOrders.find(tp => tp.index === takeProfits.length);
+    const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices[roundedTPPrices.length - 1];
+    try {
+      const tradingStopParams: {
+        category: 'linear';
+        symbol: string;
+        positionIdx: 0 | 1 | 2;
+        tpslMode: 'Full';
+        stopLoss?: string;
+        takeProfit?: string;
+      } = {
+        category: 'linear',
+        symbol: symbol,
+        positionIdx,
+        tpslMode: 'Full'
+      };
+      if (trade.stop_loss != null) {
+        tradingStopParams.stopLoss = trade.stop_loss.toString();
+      }
+      if (bestTpPrice != null && bestTpPrice > 0) {
+        tradingStopParams.takeProfit = bestTpPrice.toString();
+      }
+      if (tradingStopParams.stopLoss != null || tradingStopParams.takeProfit != null) {
+        await bybitClient.setTradingStop(tradingStopParams);
+        logger.info('Bybit position SL and best TP set via setTradingStop', {
+          tradeId: trade.id,
+          symbol,
+          stopLoss: tradingStopParams.stopLoss,
+          bestTpPrice: tradingStopParams.takeProfit,
+          positionIdx,
+          exchange: 'bybit'
+        });
+      }
+    } catch (error) {
+      logger.warn('Failed to set stop loss or best TP on Bybit position', {
+        tradeId: trade.id,
+        symbol,
+        stopLoss: trade.stop_loss,
+        bestTpPrice,
+        channel: trade.channel,
+        exchange: 'bybit',
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+
+    // Place limit orders only for non-best TPs (best TP is on position)
     const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
     
     // Reuse existingOrders from earlier check (re-query if needed for fresh data)
@@ -1062,6 +1144,10 @@ const placeTakeProfitOrders = async (
     }
 
     for (const tpOrder of validTPOrders) {
+      if (tpOrder.index === takeProfits.length) {
+        // Best TP - already set on position, skip separate order
+        continue;
+      }
       // Check if TP order with this index already exists in database
       if (existingTPOrdersByIndex.has(tpOrder.index)) {
         const existingTPOrder = existingOrders.find(
@@ -1500,7 +1586,18 @@ const monitorTrade = async (
             await updateEntryOrderToFilled(trade, db, fillTime);
 
             // Place take profit orders now that entry has filled
-            await placeTakeProfitOrders(trade, bybitClient, db);
+            await Promise.race([
+              placeTakeProfitOrders(trade, bybitClient, db),
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
+            ]).catch(err => {
+              logger.warn('TP placement timed out or failed - will retry next poll', {
+                tradeId: trade.id,
+                channel: trade.channel,
+                exchange: 'bybit',
+                error: err instanceof Error ? err.message : String(err)
+              });
+            });
             // Continue to monitor active trade below
           } else if (trade.order_id) {
             // No position found, but check order history to see if entry was filled
@@ -1697,7 +1794,18 @@ const monitorTrade = async (
         await updateEntryOrderToFilled(trade, db, fillTime);
 
         // Place take profit orders now that entry has filled
-        await placeTakeProfitOrders(trade, bybitClient, db);
+        await Promise.race([
+          placeTakeProfitOrders(trade, bybitClient, db),
+          new Promise<void>((_, reject) =>
+            setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
+        ]).catch(err => {
+          logger.warn('TP placement timed out or failed - will retry next poll', {
+            tradeId: trade.id,
+            channel: trade.channel,
+            exchange: 'bybit',
+            error: err instanceof Error ? err.message : String(err)
+          });
+        });
       }
     }
 
@@ -1711,14 +1819,27 @@ const monitorTrade = async (
         const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
         if (takeProfits.length > 0) {
           const tpCount = orders.filter((o) => o.order_type === 'take_profit').length;
-          if (tpCount < takeProfits.length) {
-            logger.info('Retrying TP placement - active trade has fewer TPs than expected', {
+          const nonBestCount = Math.max(0, takeProfits.length - 1);
+          if (tpCount < nonBestCount) {
+            logger.info('Retrying TP placement - active trade has fewer non-best TPs than expected', {
               tradeId: trade.id,
               tpCount,
-              expectedCount: takeProfits.length,
+              nonBestCount,
+              expectedTotal: takeProfits.length,
               exchange: 'bybit'
             });
-            await placeTakeProfitOrders(trade, bybitClient, db);
+            await Promise.race([
+              placeTakeProfitOrders(trade, bybitClient, db),
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
+            ]).catch(err => {
+              logger.warn('TP placement timed out or failed - will retry next poll', {
+                tradeId: trade.id,
+                channel: trade.channel,
+                exchange: 'bybit',
+                error: err instanceof Error ? err.message : String(err)
+              });
+            });
           }
         }
       }

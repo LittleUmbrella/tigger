@@ -510,12 +510,18 @@ export class CTraderClient {
   }
 
   /**
-   * Place a market order
+   * Place a market order.
+   * Optionally set initial stopLoss and takeProfit on the order (best TP).
+   * Some brokers support SL/TP on MARKET orders; if not, use modifyPosition after fill.
    */
   async placeMarketOrder(params: {
     symbol: string;
     volume: number;
     tradeSide: 'BUY' | 'SELL';
+    /** Optional. Initial stop loss price (from current price calculation) */
+    stopLoss?: number;
+    /** Optional. Best TP price (from current price calculation) - closes remainder when hit */
+    takeProfit?: number;
   }): Promise<string> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
@@ -533,13 +539,24 @@ export class CTraderClient {
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
-      const response = await this.connection.sendCommand('ProtoOANewOrderReq', {
+      const payload: Record<string, unknown> = {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         symbolId,
         orderType: 'MARKET',
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
         volume: volumeInApiUnits
-      });
+      };
+      if (params.stopLoss != null && params.stopLoss > 0) {
+        payload.stopLoss = params.stopLoss;
+      } else if (params.stopLoss != null) {
+        logger.debug('Not adding stopLoss to market order', { stopLoss: params.stopLoss, reason: 'invalid or zero' });
+      }
+      if (params.takeProfit != null && params.takeProfit > 0) {
+        payload.takeProfit = params.takeProfit;
+      } else if (params.takeProfit != null) {
+        logger.debug('Not adding takeProfit to market order', { takeProfit: params.takeProfit, reason: 'invalid or zero' });
+      }
+      const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
 
       const orderId = response?.orderId || response?.order?.orderId;
       if (!orderId) {
@@ -550,7 +567,9 @@ export class CTraderClient {
         orderId,
         symbol: params.symbol,
         tradeSide: params.tradeSide,
-        volume: params.volume
+        volume: params.volume,
+        ...(params.stopLoss != null && { stopLoss: params.stopLoss }),
+        ...(params.takeProfit != null && { takeProfit: params.takeProfit })
       });
 
       return orderId.toString();

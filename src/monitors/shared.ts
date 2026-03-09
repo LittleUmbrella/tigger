@@ -234,7 +234,10 @@ export const cancelTrade = async (
 };
 
 /** Per-trade timeout to prevent one stuck trade from blocking others in the monitor loop */
-export const MONITOR_TRADE_TIMEOUT_MS = 60_000; // 60 seconds
+export const MONITOR_TRADE_TIMEOUT_MS = 120_000; // 120 seconds (was 60s; increased to avoid TP placement timeouts)
+
+/** TP placement sub-timeout - if TP placement exceeds this, we continue and retry next poll */
+export const TP_PLACEMENT_TIMEOUT_MS = 60_000; // 60 seconds
 
 /**
  * Sleep utility function
