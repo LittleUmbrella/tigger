@@ -21,6 +21,7 @@
     "test-ctrader-balance": "tsx src/scripts/test_ctrader_balance.ts",
     "test-ctrader-positions": "tsx src/scripts/test_ctrader_positions.ts",
     "ctrader-order-link-research": "tsx src/scripts/ctrader_order_position_link_research.ts",
+    "ctrader-orders-today": "tsx src/scripts/ctrader_orders_today.ts",
     "test-ctrader-tp": "tsx src/scripts/test_ctrader_tp_placement.ts",
     "cancel-ctrader-order": "tsx src/scripts/cancel_ctrader_order.ts",
     "open-ctrader-trade": "tsx src/scripts/open_ctrader_trade.ts",
