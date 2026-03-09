@@ -1,13 +1,12 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
-import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
 
 /**
  * Manager to update stop loss of an existing trade
  */
 export const updateStopLossManager: ManagerFunction = async (context: ManagerContext): Promise<void> => {
-  const { channel, message, db, isSimulation, bybitClient } = context;
+  const { channel, message, db, isSimulation, getBybitClient, getCtraderClient } = context;
   const newOrder = (context.command as any).newOrder as ParsedOrder;
   const trade = (context.command as any).trade;
 
@@ -39,11 +38,14 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
         oldStopLoss: trade.stop_loss,
         newStopLoss: newOrder.stopLoss
       });
-    } else if (trade.exchange === 'bybit' && bybitClient) {
-      // Update stop loss on exchange
-      // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
+    } else if (trade.exchange === 'bybit') {
+      const bybitClient = getBybitClient?.(trade.account_name);
+      if (!bybitClient) {
+        logger.warn('Stop loss update skipped - no Bybit client', { tradeId: trade.id });
+        return;
+      }
+      // Update stop loss on exchange - only for open positions
       if (trade.position_id) {
-        // Position is open, update stop loss directly
         await bybitClient.setTradingStop({
           category: 'linear',
           symbol: symbol,
@@ -86,6 +88,34 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
         oldStopLoss: trade.stop_loss,
         newStopLoss: newOrder.stopLoss,
         hasPosition: !!trade.position_id
+      });
+    } else if (trade.exchange === 'ctrader') {
+      const ctraderClient = await getCtraderClient?.(trade.account_name);
+      if (!ctraderClient) {
+        logger.warn('Stop loss update skipped - no cTrader client', { tradeId: trade.id });
+        return;
+      }
+      if (!trade.position_id) {
+        logger.warn('Stop loss update skipped - no position_id for cTrader trade', {
+          tradeId: trade.id,
+          status: trade.status
+        });
+        return;
+      }
+      await ctraderClient.modifyPosition({
+        positionId: trade.position_id,
+        stopLoss: newOrder.stopLoss
+      });
+      await db.updateTrade(trade.id, {
+        stop_loss: newOrder.stopLoss,
+        stop_loss_breakeven: false
+      });
+      logger.info('Stop loss updated', {
+        tradeId: trade.id,
+        oldStopLoss: trade.stop_loss,
+        newStopLoss: newOrder.stopLoss,
+        exchange: 'ctrader',
+        hasPosition: true
       });
     }
   } catch (error) {
