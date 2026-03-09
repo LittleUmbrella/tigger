@@ -28,6 +28,107 @@ import {
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { cancelCTraderPendingOrders } from '../managers/positionUtils.js';
 
+/** Per-account tracking: positionId -> firstSeenAt (ms) for orphan grace period */
+const orphanFirstSeenByAccount = new Map<string, Map<string, number>>();
+/** Last orphan check per account (ms) - throttle to every 5 min */
+const lastOrphanCheckByAccount = new Map<string, number>();
+const ORPHAN_CHECK_THROTTLE_MS = 5 * 60 * 1000;
+
+/**
+ * Check for orphan cTrader positions (no matching trade) and close them after grace period.
+ * Only runs when closeOrphanPositions is enabled. Scoped per account.
+ */
+const checkAndCloseOrphanPositions = async (
+  db: DatabaseManager,
+  getCTraderClient: (accountName?: string) => Promise<CTraderClient | undefined>,
+  closeOrphanPositions: boolean,
+  graceMinutes: number
+): Promise<void> => {
+  if (!closeOrphanPositions) return;
+
+  const ourTrades = (await db.getActiveTrades()).filter(t => t.exchange === 'ctrader');
+  if (ourTrades.length === 0) return; // No active trades - skip to avoid closing manual positions
+
+  const byAccount = new Map<string, Trade[]>();
+  for (const t of ourTrades) {
+    const acc = t.account_name ?? 'ctrader_demo';
+    if (!byAccount.has(acc)) byAccount.set(acc, []);
+    byAccount.get(acc)!.push(t);
+  }
+
+  const graceMs = graceMinutes * 60 * 1000;
+  const now = Date.now();
+
+  for (const [accountName, trades] of byAccount) {
+    if (now - (lastOrphanCheckByAccount.get(accountName) ?? 0) < ORPHAN_CHECK_THROTTLE_MS) continue;
+    lastOrphanCheckByAccount.set(accountName, now);
+
+    const ourPositionIds = new Set(
+      trades
+        .map(t => t.position_id)
+        .filter((id): id is string => id != null && id !== '')
+    );
+
+    const client = await getCTraderClient(accountName);
+    if (!client) continue;
+
+    try {
+      const positions = await client.getOpenPositions();
+      const candidates = orphanFirstSeenByAccount.get(accountName) ?? new Map();
+      let sawNewOrphans = false;
+
+      for (const p of positions) {
+        const posId = typeof p.positionId === 'object' && p.positionId?.low != null
+          ? String(protobufLongToNumber(p.positionId) ?? '')
+          : String(p.positionId ?? p.id ?? '');
+        if (!posId) continue;
+        if (ourPositionIds.has(posId)) {
+          candidates.delete(posId);
+          continue;
+        }
+
+        const firstSeen = candidates.get(posId) ?? now;
+        if (!candidates.has(posId)) {
+          candidates.set(posId, firstSeen);
+          sawNewOrphans = true;
+        }
+
+        if (now - firstSeen < graceMs) continue;
+
+        const symbol = p.symbolName ?? p.symbol ?? '?';
+        const vol = p.volume ?? p.quantity ?? 0;
+        logger.info('Closing orphan cTrader position (no matching trade)', {
+          positionId: posId,
+          symbol,
+          volume: vol,
+          accountName,
+          exchange: 'ctrader'
+        });
+        try {
+          await client.closePosition(posId);
+          candidates.delete(posId);
+        } catch (err) {
+          logger.warn('Failed to close orphan position', {
+            positionId: posId,
+            error: err instanceof Error ? err.message : String(err),
+            exchange: 'ctrader'
+          });
+        }
+      }
+
+      if (sawNewOrphans || candidates.size > 0) {
+        orphanFirstSeenByAccount.set(accountName, candidates);
+      }
+    } catch (err) {
+      logger.warn('Orphan position check failed', {
+        accountName,
+        error: err instanceof Error ? err.message : String(err),
+        exchange: 'ctrader'
+      });
+    }
+  }
+};
+
 /**
  * Get current price from cTrader
  */
@@ -1956,12 +2057,24 @@ export const startCTraderMonitor = async (
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1;
   const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? true;
+  const closeOrphanPositions = monitorConfig.closeOrphanPositions ?? false;
+  const closeOrphanPositionsGraceMinutes = monitorConfig.closeOrphanPositionsGraceMinutes ?? 2;
 
   const monitorLoop = async (): Promise<void> => {
     const isMaxSpeed = speedMultiplier !== undefined && (speedMultiplier === 0 || speedMultiplier === Infinity || !isFinite(speedMultiplier));
     
     while (running) {
       try {
+        if (closeOrphanPositions) {
+          const getClient = getCTraderClient ?? (async () => ctraderClient);
+          await checkAndCloseOrphanPositions(
+            db,
+            getClient,
+            closeOrphanPositions,
+            closeOrphanPositionsGraceMinutes
+          );
+        }
+
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'ctrader');
         
         // Process each trade in parallel with per-trade timeout - prevents one stuck trade from blocking others

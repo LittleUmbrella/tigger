@@ -111,6 +111,10 @@ export interface MonitorConfig {
   ctraderUseTickData?: boolean;
   /** cTrader only: map canonical symbols to broker-specific names (e.g. {"XAUUSD": "GOLD"} if broker uses GOLD) */
   ctraderSymbolMap?: Record<string, string>;
+  /** cTrader only: close positions that have no matching entry order in our DB (default: false). Safety net for bugs that open positions without tracking. */
+  closeOrphanPositions?: boolean;
+  /** cTrader only: minutes an orphan must persist before we close it - avoids race with position_id assignment (default: 2) */
+  closeOrphanPositionsGraceMinutes?: number;
 }
 
 export interface AccountFilterRule {
