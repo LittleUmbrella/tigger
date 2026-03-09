@@ -546,46 +546,66 @@ const checkPositionClosed = async (
         
         // If position doesn't exist or size is 0, it's closed
         if (!position || parseFloat(getBybitField<string>(position, 'size') || '0') === 0) {
-          // Get closed PNL from position history
+          // Get closed PNL from position history - aggregate all partial closes for this position
+          // (TPs + SL/breakeven create multiple records; we need weighted avg exit and total PnL)
           const positionHistory = await bybitClient.getClosedPnL({
             category: 'linear',
             symbol: symbol,
-            limit: 10
-          });
-          
-          if (positionHistory.retCode === 0 && positionHistory.result && positionHistory.result.list) {
-            // Find the most recent closed position for this symbol
-            const closedPosition = positionHistory.result.list.find((p: any) => 
-              p.symbol === symbol
-            );
-            
-            if (closedPosition) {
-              const exitPrice = parseFloat(getBybitField<string>(closedPosition, 'avgExitPrice', 'avg_exit_price') || '0');
-              const pnl = parseFloat(getBybitField<string>(closedPosition, 'closedPnl', 'closed_pnl') || '0');
-              return { closed: true, exitPrice, pnl };
-            }
-          }
-          
-          // Fallback: try to get from execution/trade history
-          const tradeHistory = await bybitClient.getExecutionList({
-            category: 'linear',
-            symbol: symbol,
+            startTime: trade.entry_filled_at ? new Date(trade.entry_filled_at).getTime() : undefined,
+            endTime: Date.now(),
             limit: 50
           });
           
+          if (positionHistory.retCode === 0 && positionHistory.result && positionHistory.result.list) {
+            const list = (positionHistory.result as any).list as any[];
+            const symbolRecords = list.filter((p: any) => p.symbol === symbol);
+            if (symbolRecords.length > 0) {
+              const positionSize = trade.quantity ? Math.abs(trade.quantity) : 0;
+              const tolerance = 0.001;
+              const sorted = symbolRecords.sort(
+                (a, b) =>
+                  parseFloat(getBybitField<string>(a, 'updatedTime', 'updated_time') || '0') -
+                  parseFloat(getBybitField<string>(b, 'updatedTime', 'updated_time') || '0')
+              );
+              let accSize = 0;
+              let totalPnl = 0;
+              let lastRecord: any = null;
+              const targetSize = positionSize > 0 ? positionSize : Infinity;
+              for (const r of sorted) {
+                const closedSize = parseFloat(getBybitField<string>(r, 'closedSize', 'closed_size') || '0');
+                const closedPnl = parseFloat(getBybitField<string>(r, 'closedPnl', 'closed_pnl') || '0');
+                accSize += closedSize;
+                totalPnl += closedPnl;
+                lastRecord = r;
+                if (positionSize > 0 && accSize >= targetSize - tolerance) break;
+              }
+              // Use the final close's price (e.g. breakeven at 67800) - not weighted average
+              const exitPrice = lastRecord
+                ? parseFloat(getBybitField<string>(lastRecord, 'avgExitPrice', 'avg_exit_price') || '0')
+                : (sorted[0] ? parseFloat(getBybitField<string>(sorted[0], 'avgExitPrice', 'avg_exit_price') || '0') : 0);
+              return { closed: true, exitPrice, pnl: totalPnl };
+            }
+          }
+          
+          // Fallback: try to get from execution/trade history (when closed PnL aggregation above failed)
+          const tradeHistory = await bybitClient.getExecutionList({
+            category: 'linear',
+            symbol: symbol,
+            startTime: trade.entry_filled_at ? new Date(trade.entry_filled_at).getTime() : undefined,
+            endTime: Date.now(),
+            limit: 100
+          });
+          
           if (tradeHistory.retCode === 0 && tradeHistory.result && tradeHistory.result.list) {
-            // Find trades that closed the position (opposite side trades)
-            // For a long position, we look for sell trades
-            // For a short position, we look for buy trades
-            const closingTrades = tradeHistory.result.list.filter((t: any) => {
+            const list = (tradeHistory.result as any).list as any[];
+            const closingTrades = list.filter((t: any) => {
               const tradeTime = parseFloat(getBybitField<string>(t, 'execTime', 'exec_time') || '0');
               const entryTime = trade.entry_filled_at ? new Date(trade.entry_filled_at).getTime() : 0;
               return tradeTime > entryTime;
             });
             
             if (closingTrades.length > 0) {
-              // Get average exit price from closing trades
-              const totalQty = closingTrades.reduce((sum: number, t: any) => 
+              const totalQty = closingTrades.reduce((sum: number, t: any) =>
                 sum + parseFloat(getBybitField<string>(t, 'execQty', 'exec_qty') || '0'), 0);
               const weightedPrice = closingTrades.reduce((sum: number, t: any) => {
                 const qty = parseFloat(getBybitField<string>(t, 'execQty', 'exec_qty') || '0');
@@ -594,29 +614,6 @@ const checkPositionClosed = async (
               }, 0);
               const firstExecPrice = getBybitField<string>(closingTrades[0], 'execPrice', 'exec_price');
               const exitPrice = totalQty > 0 ? weightedPrice / totalQty : parseFloat(firstExecPrice || '0');
-              
-              // Try to get actual PNL from position history one more time with more parameters
-              const detailedHistory = await bybitClient.getClosedPnL({
-                category: 'linear',
-                symbol: symbol,
-                limit: 20
-              });
-              
-              if (detailedHistory.retCode === 0 && detailedHistory.result && detailedHistory.result.list) {
-            const recentClosed = detailedHistory.result.list.find((p: any) => 
-              p.symbol === symbol && parseFloat(getBybitField<string>(p, 'closedPnl', 'closed_pnl') || '0') !== 0
-            );
-                if (recentClosed) {
-                  return { 
-                    closed: true, 
-                    exitPrice: parseFloat(getBybitField<string>(recentClosed, 'avgExitPrice', 'avg_exit_price') || exitPrice.toString()),
-                    pnl: parseFloat(getBybitField<string>(recentClosed, 'closedPnl', 'closed_pnl') || '0')
-                  };
-                }
-              }
-              
-              // If we can't get actual PNL, calculate approximate based on price difference
-              // This is a fallback - actual PNL should come from Bybit API
               return { closed: true, exitPrice };
             }
           }
