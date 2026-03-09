@@ -233,13 +233,17 @@ async function closePercentageOfPosition(
       }
     }
   } else if (trade.exchange === 'ctrader' && ctraderClient && trade.position_id) {
-    // cTrader partial close: place market order in opposite direction
+    // cTrader partial close: use ProtoOAClosePositionReq (proper close API, never opens new positions)
     try {
       const positions = await ctraderClient.getOpenPositions();
+      const { protobufLongToNumber } = await import('../utils/protobufLong.js');
       const positionIdNum = parseInt(trade.position_id, 10);
-      const position = positions.find(
-        (p: any) => (typeof p.positionId === 'number' ? p.positionId : p.id) === positionIdNum
-      );
+      const position = positions.find((p: any) => {
+        const pid = typeof p.positionId === 'object' && p.positionId?.low != null
+          ? protobufLongToNumber(p.positionId)
+          : p.positionId ?? p.id;
+        return pid != null && (typeof pid === 'number' ? pid : parseInt(String(pid), 10)) === positionIdNum;
+      });
       if (!position) {
         logger.warn('cTrader position not found for partial close', {
           tradeId: trade.id,
@@ -247,7 +251,10 @@ async function closePercentageOfPosition(
         });
         return;
       }
-      const positionVolume = parseFloat(position.volume || position.quantity || '0');
+      const vol = position.volume ?? position.quantity;
+      const positionVolume = typeof vol === 'object' && vol?.low != null
+        ? protobufLongToNumber(vol) ?? 0
+        : parseFloat(String(vol || '0'));
       if (positionVolume <= 0) return;
 
       const symbol = trade.trading_pair.replace('/', '');
@@ -257,14 +264,8 @@ async function closePercentageOfPosition(
         : symbolInfo?.lotSize ?? 100;
       const positionLots = positionVolume / lotSize;
       const closeVolumeLots = Math.max(0.01, (positionLots * percentage) / 100);
-      const tradeSide = (position.tradeSide || position.side || '').toUpperCase();
-      const closeSide = tradeSide === 'BUY' ? 'SELL' : 'BUY';
 
-      await ctraderClient.placeMarketOrder({
-        symbol,
-        volume: closeVolumeLots,
-        tradeSide: closeSide as 'BUY' | 'SELL'
-      });
+      await ctraderClient.closePosition(trade.position_id, closeVolumeLots, symbol);
 
       logger.info('Partial position closed on cTrader', {
         tradeId: trade.id,

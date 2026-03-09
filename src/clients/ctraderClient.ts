@@ -948,21 +948,58 @@ export class CTraderClient {
   }
 
   /**
-   * Close position
+   * Close position (full or partial).
+   * Uses ProtoOAClosePositionReq - the proper API for closing, never opens new positions.
+   * @param positionId - Position to close
+   * @param volumeLots - Optional. If provided with symbol, does partial close. If omitted, fetches position and closes all.
+   * @param symbol - Required when volumeLots provided (for volume conversion to API units)
    */
-  async closePosition(positionId: string): Promise<void> {
+  async closePosition(positionId: string, volumeLots?: number, symbol?: string): Promise<void> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
 
+    const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+
     try {
+      let volumeInApiUnits: number;
+
+      if (volumeLots != null && symbol != null) {
+        const symbolInfo = await this.getSymbolInfo(symbol);
+        const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
+          ? symbolInfo.lotSize.low
+          : symbolInfo.lotSize ?? 100;
+        const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
+          ? symbolInfo.stepVolume.low
+          : symbolInfo.stepVolume ?? lotSize;
+        volumeInApiUnits = Math.max(1, Math.floor((volumeLots * lotSize) / stepVolume) * stepVolume);
+      } else {
+        const positions = await this.getOpenPositions();
+        const position = positions.find((p: any) => {
+          const pid = typeof p.positionId === 'object' && p.positionId?.low != null
+            ? protobufLongToNumber(p.positionId)
+            : p.positionId ?? p.id;
+          return pid != null && String(pid) === String(positionId);
+        });
+        if (!position) {
+          throw new Error(`Position ${positionId} not found for full close`);
+        }
+        const vol = position.volume ?? position.quantity;
+        volumeInApiUnits = typeof vol === 'object' && vol?.low != null ? protobufLongToNumber(vol) ?? 0 : Number(vol) ?? 0;
+        if (volumeInApiUnits <= 0) {
+          throw new Error(`Position ${positionId} has no volume to close`);
+        }
+      }
+
       await this.connection.sendCommand('ProtoOAClosePositionReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-        positionId: parseInt(positionId, 10)
+        positionId: parseInt(positionId, 10),
+        volume: volumeInApiUnits
       });
 
       logger.info('Position closed on cTrader', {
         positionId,
+        volumeInApiUnits: volumeLots != null ? `${volumeLots} lots` : 'full',
         accountId: this.config.accountId,
         exchange: 'ctrader'
       });
