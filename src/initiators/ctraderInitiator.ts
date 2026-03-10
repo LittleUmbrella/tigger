@@ -699,6 +699,16 @@ const executeTradeForAccount = async (
 
     const qtyString = formatQuantity(qty, decimalPrecision);
     
+    const marginRequired = positionSize / effectiveLeverage;
+    logger.info('Pre-trade margin context (for investigation, not cTrader params)', {
+      channel,
+      messageId: message.message_id,
+      symbol,
+      accountName: accountName || 'default',
+      balance,
+      positionSize,
+      marginRequired
+    });
     logger.info('Calculated trade parameters', {
       channel,
       symbol,
