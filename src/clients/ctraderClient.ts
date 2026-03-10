@@ -511,17 +511,17 @@ export class CTraderClient {
 
   /**
    * Place a market order.
-   * Optionally set initial stopLoss and takeProfit on the order (best TP).
-   * Some brokers support SL/TP on MARKET orders; if not, use modifyPosition after fill.
+   * Optionally set SL/TP on the order. For MARKET orders, cTrader only accepts RELATIVE values
+   * (relativeStopLoss/relativeTakeProfit), not absolute prices. Pass relative when useRelativeSlTp is true.
    */
   async placeMarketOrder(params: {
     symbol: string;
     volume: number;
     tradeSide: 'BUY' | 'SELL';
-    /** Optional. Initial stop loss price (from current price calculation) */
-    stopLoss?: number;
-    /** Optional. Best TP price (from current price calculation) - closes remainder when hit */
-    takeProfit?: number;
+    /** Optional. Relative SL in 1/100000 of price unit. For BUY: sl = entry - relative; for SELL: sl = entry + relative */
+    relativeStopLoss?: number;
+    /** Optional. Relative TP in 1/100000 of price unit. For BUY: tp = entry + relative; for SELL: tp = entry - relative */
+    relativeTakeProfit?: number;
   }): Promise<string> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
@@ -546,15 +546,12 @@ export class CTraderClient {
         tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
         volume: volumeInApiUnits
       };
-      if (params.stopLoss != null && params.stopLoss > 0) {
-        payload.stopLoss = params.stopLoss;
-      } else if (params.stopLoss != null) {
-        logger.debug('Not adding stopLoss to market order', { stopLoss: params.stopLoss, reason: 'invalid or zero' });
+      // cTrader MARKET orders only accept relative SL/TP (absolute values are rejected)
+      if (params.relativeStopLoss != null && params.relativeStopLoss > 0) {
+        payload.relativeStopLoss = params.relativeStopLoss;
       }
-      if (params.takeProfit != null && params.takeProfit > 0) {
-        payload.takeProfit = params.takeProfit;
-      } else if (params.takeProfit != null) {
-        logger.debug('Not adding takeProfit to market order', { takeProfit: params.takeProfit, reason: 'invalid or zero' });
+      if (params.relativeTakeProfit != null && params.relativeTakeProfit > 0) {
+        payload.relativeTakeProfit = params.relativeTakeProfit;
       }
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
 
@@ -568,8 +565,8 @@ export class CTraderClient {
         symbol: params.symbol,
         tradeSide: params.tradeSide,
         volume: params.volume,
-        ...(params.stopLoss != null && { stopLoss: params.stopLoss }),
-        ...(params.takeProfit != null && { takeProfit: params.takeProfit })
+        ...(params.relativeStopLoss != null && { relativeStopLoss: params.relativeStopLoss }),
+        ...(params.relativeTakeProfit != null && { relativeTakeProfit: params.relativeTakeProfit })
       });
 
       return orderId.toString();

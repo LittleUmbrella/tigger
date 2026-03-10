@@ -25,6 +25,8 @@ export interface InitiatorContext {
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   forcePlaceTrade?: boolean; // If true, bypass existing-trade check (for manual retries when DB has stale data)
   slAdjustmentTolerancePercent?: number; // Per-channel: when price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
+  /** cTrader only: When true, convert market orders to limit at current price. When false, use market with relative SL/TP (default: true) */
+  useLimitOrderForEntry?: boolean;
 }
 
 /**

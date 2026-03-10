@@ -161,6 +161,8 @@ export interface ChannelSetConfig {
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
   useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
+  /** cTrader only: When true, convert market orders to limit at current price (like Bybit). When false, use actual market orders with relative SL/TP (default: true) */
+  useLimitOrderForEntry?: boolean;
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection
   /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */

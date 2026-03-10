@@ -102,7 +102,8 @@ export const processUnparsedMessages = async (
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
   propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
   tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
-  slAdjustmentTolerancePercent?: number // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
+  slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
+  useLimitOrderForEntry?: boolean // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -188,7 +189,8 @@ export const processUnparsedMessages = async (
     accountFilters,
     propFirms,
     tradeObfuscation,
-    slAdjustmentTolerancePercent
+    slAdjustmentTolerancePercent,
+    useLimitOrderForEntry
   );
   
   logger.debug('Finished processing messages', {
@@ -218,7 +220,8 @@ export const processMessages = async (
   accountFilters?: AccountFilter[],
   propFirms?: (string | CustomPropFirmConfig)[],
   tradeObfuscation?: TradeObfuscationConfig,
-  slAdjustmentTolerancePercent?: number
+  slAdjustmentTolerancePercent?: number,
+  useLimitOrderForEntry?: boolean
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -299,7 +302,8 @@ export const processMessages = async (
           accounts,
           accountFilters,
           propFirms,
-          slAdjustmentTolerancePercent
+          slAdjustmentTolerancePercent,
+          useLimitOrderForEntry
         };
 
         try {

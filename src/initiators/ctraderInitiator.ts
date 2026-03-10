@@ -163,12 +163,18 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
 /**
  * Execute a trade for a single account
  */
+/** Convert price difference to cTrader relative value (1/100000 of price unit). Rounds to symbol digits first. */
+const toRelativeSlTp = (priceDiff: number, pricePrecision: number): number => {
+  const rounded = Math.round(priceDiff * Math.pow(10, pricePrecision)) / Math.pow(10, pricePrecision);
+  return Math.round(rounded * 100000);
+};
+
 const executeTradeForAccount = async (
   context: InitiatorContext,
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry } = context;
 
   let ctraderClient: CTraderClient | undefined = undefined;
 
@@ -1049,37 +1055,58 @@ const executeTradeForAccount = async (
         );
       }
       try {
-        // TEMPORARY: Use actual market orders instead of converting to limit at current price
-        // (Comment out to restore: limit order at current price for predictable cost)
-        if (isMarketOrder) {
-          // Compute initial SL and best TP from current price for market order (set on order when supported)
-          let initialSl: number | undefined;
-          let initialBestTp: number | undefined;
-          if (currentPriceForMarketOrder !== null && currentPriceForMarketOrder > 0) {
-            const cp = currentPriceForMarketOrder;
-            const isLong = order.signalType === 'long';
-            if (roundedStopLoss && roundedStopLoss > 0) {
-              const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
-              if (slValid) {
-                initialSl = roundedStopLoss;
-              }
-            }
-            if (roundedTPPrices && roundedTPPrices.length > 0) {
-              // Best TP = last/furthest TP (closes remainder when hit)
-              const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
-              const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
-              if (tpValid) {
-                initialBestTp = bestTpPrice;
-              }
-            }
-          }
-          logger.info('Placing cTrader market order', {
+        // useLimitOrderForEntry: true (default) = convert market to limit at current price (like Bybit)
+        // useLimitOrderForEntry: false = use actual market order with relative SL/TP (cTrader rejects absolute on MARKET)
+        const useLimit = useLimitOrderForEntry !== false;
+        if (isMarketOrder && useLimit) {
+          // Convert market to limit at current price for predictable cost and SL/TP support
+          const limitPrice = currentPriceForMarketOrder ?? roundedEntryPrice;
+          logger.info('Placing cTrader limit order (market converted)', {
             channel,
             symbol,
             volume: qty,
             tradeSide,
-            ...(initialSl != null && { initialSl }),
-            ...(initialBestTp != null && { initialBestTp }),
+            price: limitPrice,
+            accountName: accountName || 'default',
+            exchange: 'ctrader'
+          });
+          orderId = await ctraderClient.placeLimitOrder({
+            symbol,
+            volume: qty,
+            tradeSide,
+            price: limitPrice
+          });
+        } else if (isMarketOrder && !useLimit) {
+          // Actual market order: must use relative SL/TP (absolute rejected by cTrader)
+          let relativeSl: number | undefined;
+          let relativeTp: number | undefined;
+          if (currentPriceForMarketOrder !== null && currentPriceForMarketOrder > 0) {
+            const cp = currentPriceForMarketOrder;
+            const isLong = order.signalType === 'long';
+            const digits = pricePrecision ?? getDecimalPrecision(cp);
+            if (roundedStopLoss && roundedStopLoss > 0) {
+              const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
+              if (slValid) {
+                const slDiff = isLong ? cp - roundedStopLoss : roundedStopLoss - cp;
+                relativeSl = toRelativeSlTp(slDiff, digits);
+              }
+            }
+            if (roundedTPPrices && roundedTPPrices.length > 0) {
+              const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
+              const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
+              if (tpValid) {
+                const tpDiff = isLong ? bestTpPrice - cp : cp - bestTpPrice;
+                relativeTp = toRelativeSlTp(tpDiff, digits);
+              }
+            }
+          }
+          logger.info('Placing cTrader market order with relative SL/TP', {
+            channel,
+            symbol,
+            volume: qty,
+            tradeSide,
+            ...(relativeSl != null && { relativeStopLoss: relativeSl }),
+            ...(relativeTp != null && { relativeTakeProfit: relativeTp }),
             accountName: accountName || 'default',
             exchange: 'ctrader'
           });
@@ -1087,8 +1114,8 @@ const executeTradeForAccount = async (
             symbol,
             volume: qty,
             tradeSide,
-            ...(initialSl != null && { stopLoss: initialSl }),
-            ...(initialBestTp != null && { takeProfit: initialBestTp })
+            ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+            ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
           });
         } else {
           logger.info('Placing cTrader limit order', {
@@ -1152,7 +1179,7 @@ const executeTradeForAccount = async (
         exchange: 'ctrader',
         account_name: accountName || undefined,
         order_id: orderId,
-        entry_order_type: isMarketOrder ? 'market' : 'limit', // TEMPORARY: use actual market orders
+        entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
         status: 'pending',
         stop_loss_breakeven: false,
         expires_at: expiresAt
@@ -1684,7 +1711,7 @@ const executeTradeForAccount = async (
           exchange: 'ctrader',
           account_name: accountName || undefined,
           order_id: orderId,
-          entry_order_type: isMarketOrder ? 'market' : 'limit',
+          entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
           status: 'pending',
         stop_loss_breakeven: false,
         expires_at: expiresAt,
