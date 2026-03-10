@@ -37,6 +37,7 @@
     "fix-trade-tps": "tsx src/scripts/fix_trade_tps.ts",
     "analyze-tp-sl": "tsx src/scripts/analyze_tp_sl_order.ts",
     "verify-parser": "tsx src/scripts/verify_parser.ts",
+    "extract-trade-from-image": "tsx src/scripts/extract_trade_from_image.ts",
     "validate-symbol": "tsx src/scripts/validate_symbol.ts --",
     "test": "vitest run",
     "test:watch": "vitest",

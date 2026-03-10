@@ -14,6 +14,7 @@ import { bigParser } from './bigParser.js';
 import { goldScalpsParser } from './goldScalpsParser.js';
 import { starFormatParser } from './starFormatParser.js';
 import { ctraderGoldParser } from './ctraderGoldParser.js';
+import { fxcmChartParser } from './fxcmChartParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 // Register the default parser
@@ -27,6 +28,7 @@ registerParser('big', bigParser);
 registerParser('gold_scalps', goldScalpsParser);
 registerParser('star_format', starFormatParser);
 registerParser('ctrader_gold', ctraderGoldParser);
+registerParser('fxcm_chart', fxcmChartParser);
 
 /**
  * Parse a message using the specified parser name
