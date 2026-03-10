@@ -1088,27 +1088,42 @@ const executeTradeForAccount = async (
           });
         } else if (isMarketOrder && !useLimit) {
           // Actual market order: must use relative SL/TP (absolute rejected by cTrader)
+          // Require current price - do not place without SL/TP; monitor fallback is unsafe
+          if (currentPriceForMarketOrder == null || currentPriceForMarketOrder <= 0) {
+            throw new Error(
+              `Cannot place cTrader market order: could not fetch current price for ${symbol}. ` +
+              'Need current price to set relative SL/TP on order. Refusing to place unprotected position.'
+            );
+          }
+          const cp = currentPriceForMarketOrder;
+          const isLong = order.signalType === 'long';
+          const digits = pricePrecision ?? getDecimalPrecision(cp);
           let relativeSl: number | undefined;
           let relativeTp: number | undefined;
-          if (currentPriceForMarketOrder !== null && currentPriceForMarketOrder > 0) {
-            const cp = currentPriceForMarketOrder;
-            const isLong = order.signalType === 'long';
-            const digits = pricePrecision ?? getDecimalPrecision(cp);
-            if (roundedStopLoss && roundedStopLoss > 0) {
-              const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
-              if (slValid) {
-                const slDiff = isLong ? cp - roundedStopLoss : roundedStopLoss - cp;
-                relativeSl = toRelativeSlTp(slDiff, digits);
-              }
+          if (roundedStopLoss && roundedStopLoss > 0) {
+            const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
+            if (slValid) {
+              const slDiff = isLong ? cp - roundedStopLoss : roundedStopLoss - cp;
+              relativeSl = toRelativeSlTp(slDiff, digits);
             }
-            if (roundedTPPrices && roundedTPPrices.length > 0) {
-              const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
-              const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
-              if (tpValid) {
-                const tpDiff = isLong ? bestTpPrice - cp : cp - bestTpPrice;
-                relativeTp = toRelativeSlTp(tpDiff, digits);
-              }
+          }
+          if (roundedTPPrices && roundedTPPrices.length > 0) {
+            const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
+            const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
+            if (tpValid) {
+              const tpDiff = isLong ? bestTpPrice - cp : cp - bestTpPrice;
+              relativeTp = toRelativeSlTp(tpDiff, digits);
             }
+          }
+          if (relativeSl == null && roundedStopLoss && roundedStopLoss > 0) {
+            throw new Error(
+              `Cannot place cTrader market order: stop loss ${roundedStopLoss} invalid relative to current price ${cp} for ${order.signalType}`
+            );
+          }
+          if (relativeTp == null && roundedTPPrices && roundedTPPrices.length > 0) {
+            throw new Error(
+              `Cannot place cTrader market order: take profit invalid relative to current price ${cp} for ${order.signalType}`
+            );
           }
           logger.info('Placing cTrader market order with relative SL/TP', {
             channel,
