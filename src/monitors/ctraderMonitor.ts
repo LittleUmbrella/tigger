@@ -697,6 +697,11 @@ const checkOrderFilled = async (
   openOrders?: any[]
 ): Promise<{ filled: boolean; filledPrice?: number }> => {
   try {
+    // Position TP marker is on the position, not a separate order - fill is detected when position closes
+    if (order.order_id === 'ctrader_position_tp') {
+      return { filled: false };
+    }
+
     logger.debug('Checking if cTrader order is filled', {
       orderId: order.id,
       orderType: order.order_type,
@@ -1280,6 +1285,28 @@ const placeTakeProfitOrders = async (
       });
     }
 
+    // When validation consolidated to only the best TP (all non-best rounded to 0), insert a marker
+    // so the retry logic knows we're done and stops retrying every poll.
+    if (validTPOrders.length === 1 && validTPOrders[0].index === takeProfits.length) {
+      const existingPositionTp = existingTPOrders.find((o) => o.order_id === 'ctrader_position_tp');
+      if (!existingPositionTp) {
+        await db.insertOrder({
+          trade_id: trade.id,
+          order_type: 'take_profit',
+          order_id: 'ctrader_position_tp',
+          price: bestTpPrice,
+          quantity: positionVolume / lotSize,
+          tp_index: takeProfits.length,
+          status: 'pending'
+        });
+        logger.info('Inserted position TP marker - validation consolidated all TPs to best (on position)', {
+          tradeId: trade.id,
+          symbol,
+          exchange: 'ctrader'
+        });
+      }
+    }
+
     // Place limit orders only for non-best TPs (indices 1..n-1). Best TP is on position.
     for (const tpOrder of validTPOrders) {
       if (tpOrder.index === takeProfits.length) {
@@ -1763,15 +1790,22 @@ const monitorTrade = async (
 
       // Retry TP placement if entry filled but we have fewer TPs than expected
       // Handles: initial placement failed, partial placement failed, monitor was down when entry filled
+      // cTrader: best TP is on position (not in DB); only non-best TPs are limit orders in DB.
+      // When validation consolidates to 1 TP (all non-best round to 0), we insert a position-TP marker.
       if (trade.entry_filled_at && ctraderClient) {
         const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
         if (takeProfits.length > 0) {
-          const tpCount = orders.filter((o) => o.order_type === 'take_profit').length;
-          if (tpCount < takeProfits.length) {
+          const tpOrders = orders.filter((o) => o.order_type === 'take_profit');
+          const tpCount = tpOrders.length;
+          const nonBestCount = Math.max(0, takeProfits.length - 1);
+          const hasPositionTpMarker = tpOrders.some((o) => o.order_id === 'ctrader_position_tp');
+          const expectedMet = tpCount >= nonBestCount || (tpCount >= 1 && hasPositionTpMarker);
+          if (!expectedMet) {
             logger.info('Retrying TP placement - active trade has fewer TPs than expected', {
               tradeId: trade.id,
               tpCount,
-              expectedCount: takeProfits.length,
+              expectedCount: nonBestCount,
+              hasPositionTpMarker,
               exchange: 'ctrader'
             });
             await Promise.race([
