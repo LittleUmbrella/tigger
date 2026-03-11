@@ -1,19 +1,23 @@
 #!/usr/bin/env tsx
 /**
  * Investigate why a trade was closed - queries Bybit API for execution/closed PnL history
- * Usage: npx tsx src/scripts/investigate_trade_close.ts 215
+ * Usage: npx tsx src/scripts/investigate_trade_close.ts 228
+ * Uses trade's entry_filled_at for time range.
  */
-import 'dotenv/config';
-import { RestClientV5 } from 'bybit-api';
-import { DatabaseManager } from '../db/schema.js';
+import dotenv from 'dotenv';
 import fs from 'fs-extra';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { RestClientV5 } from 'bybit-api';
+import { DatabaseManager } from '../db/schema.js';
 import { BotConfig } from '../types/config.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
+const envPath = path.join(projectRoot, '.env-investigation');
+if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
+else dotenv.config();
 
 const normalizeSymbol = (p: string) => p.replace('/', '').toUpperCase().replace(/USDC?$/, 'USDT');
 
@@ -61,99 +65,100 @@ async function main() {
   const orders = await db.getOrdersByTradeId(tradeId);
   const tpOrders = orders.filter((o) => o.order_type === 'take_profit' && o.order_id);
 
-  console.log(`\n=== Trade ${tradeId} (${accountName}) - Bybit investigation ===\n`);
+  console.log(`\n=== Trade ${tradeId} (${accountName}) ${symbol} - Bybit investigation ===`);
+  console.log(`Entry: ${trade.entry_price} filled at ${trade.entry_filled_at}\n`);
 
-  // 1. Closed PnL - which order closed the position and when
-  const startMs = new Date('2026-03-07T15:00:00Z').getTime();
-  const endMs = new Date('2026-03-08T12:00:00Z').getTime();
+  const entryTime = trade.entry_filled_at ? new Date(trade.entry_filled_at).getTime() : 0;
+  const startMs = entryTime > 0 ? entryTime - 60_000 : Date.now() - 24 * 60 * 60 * 1000;
+  const endMs = Date.now();
+
+  // 1. Closed PnL - all closes for this symbol in time range (chronological)
   try {
     const closedPnL = await client.getClosedPnL({
       category: 'linear',
       symbol,
-      startTime: startMs,
-      endTime: endMs,
       limit: 50,
+      ...(startMs > 0 && { startTime: startMs }),
+      ...(endMs > 0 && { endTime: endMs }),
     });
     if (closedPnL.retCode === 0 && closedPnL.result?.list?.length) {
-      const list = closedPnL.result.list as any[];
+      const list = (closedPnL.result.list as any[])
+        .filter((r) => parseFloat(r.createdTime || '0') >= entryTime)
+        .sort((a, b) => parseFloat(a.updatedTime || '0') - parseFloat(b.updatedTime || '0'));
+      const entryTolerance = trade.entry_price * 0.02;
+      const nearEntry = (p: number) => Math.abs(p - trade.entry_price) < entryTolerance;
       const relevant = list.filter(
-        (r) =>
-          parseFloat(r.avgEntryPrice || '0') > 67000 &&
-          parseFloat(r.avgEntryPrice || '0') < 69000 &&
-          r.side === 'Sell'
+        (r) => nearEntry(parseFloat(r.avgEntryPrice || '0')) || list.length <= 10
       );
-      console.log('Closed PnL records (BTC short, entry ~67800):');
-      for (const r of relevant) {
+      const show = relevant.length > 0 ? relevant : list.slice(0, 15);
+      console.log(`Closed PnL records (entry ~${trade.entry_price}, ${show.length} records):\n`);
+      for (const r of show) {
+        const ourOrder = [trade.order_id, ...tpOrders.map((o) => o.order_id)].includes(
+          getBybitField<string>(r, 'orderId', 'order_id') || ''
+        );
         console.log({
-          orderId: r.orderId,
-          orderType: r.orderType,
-          execType: r.execType,
-          side: r.side,
-          qty: r.qty,
-          closedSize: r.closedSize,
-          avgEntryPrice: r.avgEntryPrice,
-          avgExitPrice: r.avgExitPrice,
-          closedPnl: r.closedPnl,
+          orderId: getBybitField<string>(r, 'orderId', 'order_id'),
+          orderType: getBybitField<string>(r, 'orderType', 'order_type'),
+          execType: getBybitField<string>(r, 'execType', 'exec_type'),
+          side: getBybitField<string>(r, 'side'),
+          closedSize: getBybitField<string>(r, 'closedSize', 'closed_size'),
+          avgExitPrice: getBybitField<string>(r, 'avgExitPrice', 'avg_exit_price'),
           createdTime: r.createdTime ? new Date(parseInt(r.createdTime, 10)).toISOString() : null,
-          updatedTime: r.updatedTime ? new Date(parseInt(r.updatedTime, 10)).toISOString() : null,
-        });
-      }
-      if (relevant.length === 0) {
-        console.log('(No matching records - showing all BTC closed PnL)');
-        list.slice(0, 5).forEach((r) => {
-          console.log({
-            orderId: r.orderId,
-            execType: r.execType,
-            closedSize: r.closedSize,
-            avgExitPrice: r.avgExitPrice,
-            updatedTime: r.updatedTime ? new Date(parseInt(r.updatedTime, 10)).toISOString() : null,
-          });
+          ourOrder: ourOrder ? 'YES' : '*** EXTERNAL ***',
         });
       }
     } else {
-      console.log('Closed PnL: no results or error', closedPnL.retMsg);
+      console.log('Closed PnL: no results or error', (closedPnL as any).retMsg);
     }
   } catch (e) {
     console.error('Closed PnL error:', e);
   }
 
-  // 2. Execution list - individual fills
-  console.log('\n--- Execution list (trades) ---');
+  // 2. Execution list - ALL closing executions (to detect market orders or external closes)
+  console.log('\n--- Execution list (all closing trades, chronological) ---');
   try {
     const execList = await client.getExecutionList({
       category: 'linear',
       symbol,
-      startTime: startMs,
-      endTime: endMs,
       limit: 100,
+      ...(startMs > 0 && { startTime: startMs }),
+      ...(endMs > 0 && { endTime: endMs }),
     });
     if (execList.retCode === 0 && execList.result?.list?.length) {
-      const list = (execList.result as any).list;
-      // Filter for executions that could be our TPs (Buy side to close short)
-      const buyExecs = list.filter((e: any) => e.side === 'Buy' && e.execType === 'Trade');
-      const byOrderId = new Map<string, any[]>();
-      for (const e of buyExecs) {
+      const rawList = ((execList.result as any).list as any[]) || [];
+      const list = rawList
+        .filter((e: any) => {
+          const et = parseFloat(getBybitField<string>(e, 'execTime', 'exec_time') || '0');
+          return entryTime <= 0 || et >= entryTime;
+        })
+        .sort((a: any, b: any) => parseFloat(getBybitField<string>(a, 'execTime', 'exec_time') || '0') - parseFloat(getBybitField<string>(b, 'execTime', 'exec_time') || '0'));
+      const ourOrderIds = new Set([trade.order_id, ...tpOrders.map((o) => o.order_id)].filter(Boolean));
+      let totalOur = 0;
+      let totalAll = 0;
+      for (const e of list) {
         const oid = getBybitField<string>(e, 'orderId', 'order_id') || '';
-        if (!byOrderId.has(oid)) byOrderId.set(oid, []);
-        byOrderId.get(oid)!.push(e);
-      }
-      const ourOrderIds = new Set([trade.order_id, ...tpOrders.map((o) => o.order_id)]);
-      let totalClosed = 0;
-      for (const [oid, execs] of byOrderId) {
-        if (!ourOrderIds.has(oid)) continue;
-        const sumQty = execs.reduce((s, x) => s + parseFloat(x.execQty || '0'), 0);
-        totalClosed += sumQty;
+        const execQty = parseFloat(getBybitField<string>(e, 'execQty', 'exec_qty') || '0');
+        const execPrice = getBybitField<string>(e, 'execPrice', 'exec_price');
+        const orderType = getBybitField<string>(e, 'orderType', 'order_type');
+        const execType = getBybitField<string>(e, 'execType', 'exec_type');
+        const side = getBybitField<string>(e, 'side');
+        const execTime = getBybitField<string>(e, 'execTime', 'exec_time');
+        totalAll += execQty;
+        if (ourOrderIds.has(oid)) totalOur += execQty;
         const tpOrder = tpOrders.find((o) => o.order_id === oid);
+        const source = ourOrderIds.has(oid) ? `TP${tpOrder?.tp_index ?? 'entry'}` : '*** EXTERNAL ***';
         console.log({
-          orderId: oid,
-          tpIndex: tpOrder?.tp_index,
-          execCount: execs.length,
-          totalExecQty: sumQty,
-          execPrice: execs[0] ? getBybitField<string>(execs[0], 'execPrice', 'exec_price') : null,
-          execTime: execs[0]?.['execTime'] ? new Date(parseInt(execs[0]['execTime'], 10)).toISOString() : null,
+          orderId: oid.slice(0, 8) + '...',
+          orderType,
+          execType,
+          side,
+          execQty,
+          execPrice,
+          execTime: execTime ? new Date(parseInt(execTime, 10)).toISOString() : null,
+          source,
         });
       }
-      console.log('Total closed from our orders:', totalClosed, '| Position size:', trade.quantity);
+      console.log(`\nTotal executed: ${totalAll} | From our orders: ${totalOur} | Position size: ${trade.quantity}`);
     } else {
       console.log('Execution list: no results');
     }
@@ -163,6 +168,7 @@ async function main() {
 
   // 3. Order history - status of each TP
   console.log('\n--- TP order status (from order history) ---');
+  const cancelledWithoutFill: string[] = [];
   for (const o of tpOrders) {
     try {
       const hist = await client.getHistoricOrders({
@@ -177,12 +183,22 @@ async function main() {
         const cumExec = getBybitField<string>(ord, 'cumExecQty', 'cum_exec_qty');
         const cancelType = getBybitField<string>(ord, 'cancelType', 'cancel_type');
         console.log(`  TP${o.tp_index} (${o.price}): orderStatus=${status}, cumExecQty=${cumExec}, cancelType=${cancelType || 'N/A'}`);
+        if (status === 'Cancelled' && cancelType === 'CancelByReduceOnly' && parseFloat(cumExec || '0') === 0) {
+          cancelledWithoutFill.push(`TP${o.tp_index}`);
+        }
       } else {
         console.log(`  TP${o.tp_index}: not found in history`);
       }
     } catch (e) {
       console.log(`  TP${o.tp_index}: error -`, (e as Error).message);
     }
+  }
+
+  if (cancelledWithoutFill.length > 0) {
+    console.log('\n*** INTERPRETATION ***');
+    console.log(`TPs ${cancelledWithoutFill.join(', ')} were cancelled with CancelByReduceOnly (0 filled).`);
+    console.log('This means the position was FULLY CLOSED by something else before those TPs could fill.');
+    console.log('The remainder was closed by: stop loss, position TP, breakeven limit, or a market order.');
   }
 
   await db.close();

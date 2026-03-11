@@ -1376,8 +1376,9 @@ const placeTakeProfitOrders = async (
 };
 
 /**
- * Place breakeven limit order for cTrader
- * Implements proper breakeven limit order placement (Gap #1)
+ * Place breakeven stop-limit order for cTrader.
+ * Uses stopPrice so the order activates only when price retraces to entry (not immediately).
+ * A regular limit at entry would fill immediately when price is above/below entry.
  */
 const placeBreakevenLimitOrder = async (
   trade: Trade,
@@ -1524,7 +1525,7 @@ const placeBreakevenLimitOrder = async (
 
     const breakevenPositionId = (position.positionId || position.id)?.toString() || trade.position_id;
 
-    logger.info('Placing breakeven limit order', {
+    logger.info('Placing breakeven stop-limit order', {
       tradeId: trade.id,
       symbol,
       entryPrice,
@@ -1535,11 +1536,12 @@ const placeBreakevenLimitOrder = async (
       exchange: 'ctrader'
     });
 
-    const orderId = await ctraderClient.placeLimitOrder({
+    const orderId = await ctraderClient.placeStopLimitOrder({
       symbol,
       volume: quantity,
       tradeSide: breakevenSide,
-      price: entryPrice,
+      limitPrice: entryPrice,
+      stopPrice: entryPrice,
       positionId: breakevenPositionId
     });
 
@@ -1554,7 +1556,7 @@ const placeBreakevenLimitOrder = async (
         status: 'pending'
       });
 
-      logger.info('Breakeven limit order placed successfully', {
+      logger.info('Breakeven stop-limit order placed successfully', {
         tradeId: trade.id,
         symbol,
         orderId,
@@ -1563,7 +1565,7 @@ const placeBreakevenLimitOrder = async (
         exchange: 'ctrader'
       });
     } else {
-      logger.error('Failed to place breakeven limit order - no order ID returned', {
+      logger.error('Failed to place breakeven stop-limit order - no order ID returned', {
         tradeId: trade.id,
         symbol,
         entryPrice,
@@ -1572,7 +1574,7 @@ const placeBreakevenLimitOrder = async (
       });
     }
   } catch (error) {
-    logger.error('Failed to place breakeven limit order', {
+    logger.error('Failed to place breakeven stop-limit order', {
       tradeId: trade.id,
       error: error instanceof Error ? error.message : String(error),
       exchange: 'ctrader'
@@ -1592,7 +1594,7 @@ const monitorTrade = async (
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
   breakevenAfterTPs: number,
-  useLimitOrderForBreakeven: boolean = true
+  useLimitOrderForBreakeven: boolean = false
 ): Promise<void> => {
   const timings: Record<string, number> = {};
   let t0 = Date.now();
@@ -2090,7 +2092,7 @@ export const startCTraderMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1;
-  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? true;
+  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false;
   const closeOrphanPositions = monitorConfig.closeOrphanPositions ?? false;
   const closeOrphanPositionsGraceMinutes = monitorConfig.closeOrphanPositionsGraceMinutes ?? 2;
 

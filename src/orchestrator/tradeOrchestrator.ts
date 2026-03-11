@@ -308,7 +308,7 @@ export const startTradeOrchestrator = async (
         ...monitor,
         breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs,
         entryTimeoutMinutes: channelConfig.entryTimeoutMinutes ?? monitor.entryTimeoutMinutes,
-        useLimitOrderForBreakeven: channelConfig.useLimitOrderForBreakeven ?? monitor.useLimitOrderForBreakeven ?? true
+        useLimitOrderForBreakeven: channelConfig.useLimitOrderForBreakeven ?? monitor.useLimitOrderForBreakeven ?? false
       };
 
       // Start monitor for this channel based on monitor type

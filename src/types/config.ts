@@ -106,7 +106,7 @@ export interface MonitorConfig {
   pollInterval?: number; // milliseconds
   entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
-  useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
+  useLimitOrderForBreakeven?: boolean; // Use stop-limit at entry instead of moving stop loss (default: false). When true, uses stop-limit so order activates only when price retraces to entry
   /** cTrader only: use tick data instead of M1 candles for evaluation (more precise, more API calls) */
   ctraderUseTickData?: boolean;
   /** cTrader only: map canonical symbols to broker-specific names (e.g. {"XAUUSD": "GOLD"} if broker uses GOLD) */
@@ -160,7 +160,7 @@ export interface ChannelSetConfig {
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
-  useLimitOrderForBreakeven?: boolean; // Use limit order at entry price instead of moving stop loss to breakeven (default: true)
+  useLimitOrderForBreakeven?: boolean; // Use stop-limit at entry instead of moving stop loss (default: false). When true, uses stop-limit so order activates only when price retraces to entry
   /** cTrader only: When true, convert market orders to limit at current price (like Bybit). When false, use actual market orders with relative SL/TP (default: true) */
   useLimitOrderForEntry?: boolean;
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against

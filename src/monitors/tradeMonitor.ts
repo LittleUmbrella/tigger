@@ -571,19 +571,29 @@ const checkPositionClosed = async (
               let accSize = 0;
               let totalPnl = 0;
               let lastRecord: any = null;
+              let weightedPriceSum = 0;
+              let weightedQtySum = 0;
               const targetSize = positionSize > 0 ? positionSize : Infinity;
               for (const r of sorted) {
                 const closedSize = parseFloat(getBybitField<string>(r, 'closedSize', 'closed_size') || '0');
                 const closedPnl = parseFloat(getBybitField<string>(r, 'closedPnl', 'closed_pnl') || '0');
+                const avgExitPrice = parseFloat(getBybitField<string>(r, 'avgExitPrice', 'avg_exit_price') || '0');
                 accSize += closedSize;
                 totalPnl += closedPnl;
                 lastRecord = r;
+                // Only include in weighted average if we have exact quantity filled and valid price
+                if (closedSize > 0 && avgExitPrice > 0) {
+                  weightedPriceSum += closedSize * avgExitPrice;
+                  weightedQtySum += closedSize;
+                }
                 if (positionSize > 0 && accSize >= targetSize - tolerance) break;
               }
-              // Use the final close's price (e.g. breakeven at 67800) - not weighted average
-              const exitPrice = lastRecord
-                ? parseFloat(getBybitField<string>(lastRecord, 'avgExitPrice', 'avg_exit_price') || '0')
-                : (sorted[0] ? parseFloat(getBybitField<string>(sorted[0], 'avgExitPrice', 'avg_exit_price') || '0') : 0);
+              const exitPrice =
+                weightedQtySum > 0
+                  ? weightedPriceSum / weightedQtySum
+                  : lastRecord
+                    ? parseFloat(getBybitField<string>(lastRecord, 'avgExitPrice', 'avg_exit_price') || '0')
+                    : (sorted[0] ? parseFloat(getBybitField<string>(sorted[0], 'avgExitPrice', 'avg_exit_price') || '0') : 0);
               return { closed: true, exitPrice, pnl: totalPnl };
             }
           }
@@ -1270,8 +1280,10 @@ const placeTakeProfitOrders = async (
 };
 
 /**
- * Place a limit order at entry price to close the trade at breakeven
- * This is used instead of moving the stop loss when useLimitOrderForBreakeven is enabled
+ * Place a stop-limit order at entry price to close the trade at breakeven.
+ * Uses triggerPrice so the order activates only when price retraces to entry (not immediately).
+ * A regular limit at entry would fill immediately when price is above entry.
+ * This is used instead of moving the stop loss when useLimitOrderForBreakeven is enabled.
  */
 const placeBreakevenLimitOrder = async (
   trade: Trade,
@@ -1372,6 +1384,8 @@ const placeBreakevenLimitOrder = async (
     // Format quantity
     const quantityStr = formatQuantity(positionSize, decimalPrecision);
 
+    // Stop-limit: trigger when price retraces to entry. Long: trigger when price falls (2); Short: trigger when price rises (1).
+    const triggerDirection = isLong ? 2 : 1; // 1=rises to trigger, 2=falls to trigger
     const breakevenOrderParams = {
       category: 'linear' as const,
       symbol: symbol,
@@ -1379,13 +1393,15 @@ const placeBreakevenLimitOrder = async (
       orderType: 'Limit' as const,
       qty: quantityStr,
       price: entryPrice.toString(),
+      triggerPrice: entryPrice.toString(),
+      triggerDirection: triggerDirection as 1 | 2,
       timeInForce: 'GTC' as const,
       reduceOnly: true,
       closeOnTrigger: false,
       positionIdx: positionIdx,
     };
 
-    logger.info('Placing breakeven limit order', {
+    logger.info('Placing breakeven stop-limit order', {
       tradeId: trade.id,
       symbol,
       entryPrice,
@@ -1409,7 +1425,7 @@ const placeBreakevenLimitOrder = async (
         status: 'pending'
       });
 
-      logger.info('Breakeven limit order placed successfully', {
+      logger.info('Breakeven stop-limit order placed successfully', {
         tradeId: trade.id,
         symbol,
         orderId,
@@ -1417,7 +1433,7 @@ const placeBreakevenLimitOrder = async (
         quantity: quantityStr
       });
     } else {
-      logger.error('Failed to place breakeven limit order', {
+      logger.error('Failed to place breakeven stop-limit order', {
         tradeId: trade.id,
         symbol,
         parameters: breakevenOrderParams,
@@ -1425,7 +1441,7 @@ const placeBreakevenLimitOrder = async (
       });
     }
   } catch (error) {
-    logger.error('Error placing breakeven limit order', {
+    logger.error('Error placing breakeven stop-limit order', {
       tradeId: trade.id,
       error: error instanceof Error ? error.message : String(error)
     });
@@ -1522,7 +1538,7 @@ const monitorTrade = async (
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
   breakevenAfterTPs: number,
-  useLimitOrderForBreakeven: boolean = true
+  useLimitOrderForBreakeven: boolean = false
 ): Promise<void> => {
   try {
     // Log trade status at start for debugging
@@ -2019,7 +2035,7 @@ export const startTradeMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
-  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? true; // Default to true (new behavior)
+  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false; // Default false: limit at entry fills immediately when price above entry
 
   const monitorLoop = async (): Promise<void> => {
     // Check if we're in maximum speed mode (no delays)

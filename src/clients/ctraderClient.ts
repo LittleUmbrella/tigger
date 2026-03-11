@@ -669,6 +669,83 @@ export class CTraderClient {
   }
 
   /**
+   * Place a stop-limit order. Activates when price reaches stopPrice, then executes as limit at limitPrice.
+   * Use for breakeven: stops only when price retraces to entry, unlike a plain limit which fills immediately.
+   */
+  async placeStopLimitOrder(params: {
+    symbol: string;
+    volume: number;
+    tradeSide: 'BUY' | 'SELL';
+    limitPrice: number;
+    stopPrice: number;
+    /** Link order to position (closing/reduce behaviour when side is opposite) */
+    positionId?: string;
+  }): Promise<string> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    try {
+      const symbolInfo = await this.getSymbolInfo(params.symbol);
+      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
+        ? symbolInfo.lotSize.low
+        : symbolInfo.lotSize ?? 100;
+      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
+        ? symbolInfo.stepVolume.low
+        : symbolInfo.stepVolume ?? lotSize;
+      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+        ? symbolInfo.symbolId.low
+        : symbolInfo.symbolId;
+      const payload: Record<string, unknown> = {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        symbolId,
+        orderType: 'STOP_LIMIT',
+        tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
+        volume: volumeInApiUnits,
+        limitPrice: params.limitPrice,
+        stopPrice: params.stopPrice,
+        timeInForce: 'GOOD_TILL_CANCEL'
+      };
+      if (params.positionId != null && params.positionId !== '') {
+        payload.positionId = parseInt(params.positionId, 10);
+      }
+      const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
+
+      const orderId = response?.orderId || response?.order?.orderId;
+      if (!orderId) {
+        throw new Error('No order ID returned from cTrader');
+      }
+
+      logger.info('Stop-limit order placed on cTrader', {
+        orderId,
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        limitPrice: params.limitPrice,
+        stopPrice: params.stopPrice,
+        positionId: params.positionId ?? undefined,
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
+      });
+
+      return orderId.toString();
+    } catch (error) {
+      logger.error('Failed to place stop-limit order', {
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        limitPrice: params.limitPrice,
+        stopPrice: params.stopPrice,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Get raw reconcile response (positions + orders in one call).
    * Useful for debugging - use getOpenPositions/getOpenOrders for normal usage.
    */

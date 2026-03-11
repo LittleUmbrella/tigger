@@ -112,7 +112,7 @@ function parseStructuredText(text: string): ParsedOrder | null {
   if (takeProfits.length === 0) {
     const goldPriceMatches = text.match(/\b([4-5]\d{3}\.\d{2})\b/g);
     if (goldPriceMatches) {
-      const nums = goldPriceMatches.map(parseNum).filter((n): n is number => typeof n === 'number' && n > 0);
+      const nums = goldPriceMatches.map(parseNum).filter((n): n is number => n != null && n > 0);
       for (const n of nums) {
         if (signalType === 'long' && n > (entryPrice ?? 0) && n > stopLoss) takeProfits.push(n);
         if (signalType === 'short' && n < (entryPrice ?? Infinity) && n < stopLoss) takeProfits.push(n);
