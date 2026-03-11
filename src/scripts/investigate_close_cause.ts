@@ -88,7 +88,7 @@ async function main() {
   } else {
     const startDate = entryAt.subtract(5, 'minute').toISOString();
     const endDate = entryAt.add(4, 'hour').toISOString();
-    const pool = (db as { adapter?: { pool?: { query: (q: string, p?: any[]) => Promise<{ rows: any[] }> } } }).adapter?.pool;
+    const pool = (db as unknown as { adapter?: { pool?: { query: (q: string, p?: any[]) => Promise<{ rows: any[] }> } } }).adapter?.pool;
     let list: any[] = [];
     if (pool) {
       const res = await pool.query(
@@ -178,8 +178,8 @@ async function main() {
           console.log('Price did NOT retrace to', entryPrice, 'in the window.');
           if (list.length > 0) {
             const parsed = list.map((k: any) => parseKline(k));
-            const minLow = Math.min(...parsed.map((p) => p.low));
-            const maxHigh = Math.max(...parsed.map((p) => p.high));
+            const minLow = Math.min(...parsed.map((p: { low: number }) => p.low));
+            const maxHigh = Math.max(...parsed.map((p: { high: number }) => p.high));
             console.log(
               'Range in window: low',
               minLow,
