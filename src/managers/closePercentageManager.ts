@@ -6,6 +6,7 @@ import { extractReplyContext, findTradesByContext } from './replyContextExtracto
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { Trade, DatabaseManager } from '../db/schema.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
+import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 
 /**
  * Manager to close a percentage of a position
@@ -128,15 +129,16 @@ async function closePercentageOfPosition(
       percentage
     });
 
-    // If moving stop loss to entry, update it
+    // If moving stop loss to entry, use actual fill price (fallback to trade.entry_price in simulation)
     if (moveStopLossToEntry) {
+      const bePrice = await getEntryFillPrice(trade, db);
       await db.updateTrade(trade.id, {
-        stop_loss: trade.entry_price,
+        stop_loss: bePrice,
         stop_loss_breakeven: true
       });
       logger.info('Stop loss moved to entry in simulation', {
         tradeId: trade.id,
-        entryPrice: trade.entry_price
+        bePrice
       });
     }
   } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
@@ -177,20 +179,20 @@ async function closePercentageOfPosition(
             orderId: getBybitField<string>(closeOrder.result, 'orderId', 'order_id') || 'unknown'
           });
 
-          // If moving stop loss to entry, update it
-          // Bybit's setTradingStop with tpslMode='Full' automatically applies to 100% of position
+          // If moving stop loss to entry, use actual fill price (often better than order price for entry ranges)
           if (moveStopLossToEntry) {
             try {
+              const bePrice = await getEntryFillPrice(trade, db, { bybitClient });
               await bybitClient.setTradingStop({
                 category: 'linear',
                 symbol: symbol,
-                stopLoss: trade.entry_price.toString(),
+                stopLoss: bePrice.toString(),
                 positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2,
                 tpslMode: 'Full' // Apply stop loss to 100% of position automatically
               });
 
               await db.updateTrade(trade.id, {
-                stop_loss: trade.entry_price,
+                stop_loss: bePrice,
                 stop_loss_breakeven: true
               });
               
@@ -218,7 +220,7 @@ async function closePercentageOfPosition(
 
               logger.info('Stop loss moved to entry', {
                 tradeId: trade.id,
-                entryPrice: trade.entry_price
+                bePrice
               });
             } catch (error) {
               logger.error('Error moving stop loss to entry', {
@@ -276,17 +278,18 @@ async function closePercentageOfPosition(
 
       if (moveStopLossToEntry) {
         try {
+          const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
           await ctraderClient.modifyPosition({
             positionId: trade.position_id,
-            stopLoss: trade.entry_price
+            stopLoss: bePrice
           });
           await db.updateTrade(trade.id, {
-            stop_loss: trade.entry_price,
+            stop_loss: bePrice,
             stop_loss_breakeven: true
           });
           logger.info('Stop loss moved to entry on cTrader', {
             tradeId: trade.id,
-            entryPrice: trade.entry_price
+            bePrice
           });
         } catch (slError) {
           logger.error('Error moving stop loss to entry on cTrader', {

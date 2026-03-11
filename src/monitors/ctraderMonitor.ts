@@ -27,6 +27,7 @@ import {
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { cancelCTraderPendingOrders } from '../managers/positionUtils.js';
+import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 
 /** Per-account tracking: positionId -> firstSeenAt (ms) for orphan grace period */
 const orphanFirstSeenByAccount = new Map<string, Map<string, number>>();
@@ -181,7 +182,7 @@ const checkEntryFilled = async (
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
-): Promise<{ filled: boolean; positionId?: string; filledAt?: string }> => {
+): Promise<{ filled: boolean; positionId?: string; filledAt?: string; filledPrice?: number }> => {
   try {
     if (isSimulation) {
       if (priceProvider) {
@@ -264,15 +265,24 @@ const checkEntryFilled = async (
         const openTs = position.tradeData?.openTimestamp ?? position.openTimestamp;
         const tsMs = protobufLongToNumber(openTs);
         const filledAt = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
+        const filledPrice = parseFloat(
+          position.avgPrice || position.averagePrice || position.price || '0'
+        );
         logger.info('Found open cTrader position for trade, entry likely filled', {
           tradeId: trade.id,
           symbol,
           positionId: positionId?.toString(),
           volume: position.volume || position.quantity,
           orderId: trade.order_id,
+          filledPrice: filledPrice > 0 ? filledPrice : undefined,
           exchange: 'ctrader'
         });
-        return { filled: true, positionId: positionId?.toString(), filledAt };
+        return {
+          filled: true,
+          positionId: positionId?.toString(),
+          filledAt,
+          filledPrice: filledPrice > 0 ? filledPrice : undefined,
+        };
       }
       
       // Strategy 2: Check open orders by orderId
@@ -331,13 +341,25 @@ const checkEntryFilled = async (
               const openTs = positionAgain.tradeData?.openTimestamp ?? positionAgain.openTimestamp;
               const tsMs = protobufLongToNumber(openTs);
               const filledAt = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
+              const filledPrice = parseFloat(
+                positionAgain.avgPrice ||
+                  positionAgain.averagePrice ||
+                  positionAgain.price ||
+                  '0'
+              );
               logger.info('Found position on re-check after order not found', {
                 tradeId: trade.id,
                 symbol,
                 positionId: posId?.toString(),
+                filledPrice: filledPrice > 0 ? filledPrice : undefined,
                 exchange: 'ctrader'
               });
-              return { filled: true, positionId: posId?.toString(), filledAt };
+              return {
+                filled: true,
+                positionId: posId?.toString(),
+                filledAt,
+                filledPrice: filledPrice > 0 ? filledPrice : undefined,
+              };
             }
             
             // Order filled but position closed already (edge case)
@@ -1307,6 +1329,19 @@ const placeTakeProfitOrders = async (
       }
     }
 
+    // Guard: never place TP without positionId - would create orphaned orders (no auto-cancel when position closes)
+    const positionIdStr = positionId != null
+      ? String(protobufLongToNumber(positionId) ?? positionId)
+      : '';
+    if (!positionIdStr) {
+      logger.warn('Cannot place cTrader TP orders without positionId - would create orphaned orders', {
+        tradeId: trade.id,
+        symbol,
+        exchange: 'ctrader'
+      });
+      return;
+    }
+
     // Place limit orders only for non-best TPs (indices 1..n-1). Best TP is on position.
     for (const tpOrder of validTPOrders) {
       if (tpOrder.index === takeProfits.length) {
@@ -1325,7 +1360,7 @@ const placeTakeProfitOrders = async (
           volume: volumeLots,
           tradeSide: tpSide,
           price: tpPrice,
-          positionId: positionId?.toString() // Link to position (reduce-only-like guard - order modifies this position, not a new one)
+          positionId: positionIdStr // Link to position (reduce-only-like guard - order modifies this position, not a new one)
         });
         
         logger.info('cTrader take profit limit order placed', {
@@ -1336,20 +1371,33 @@ const placeTakeProfitOrders = async (
           volumeLots,
           tpSide,
           orderId,
-          positionId: positionId?.toString(),
+          positionId: positionIdStr,
           exchange: 'ctrader'
         });
         
         // Store TP order in database (quantity in lots for consistency with other exchanges)
-        await db.insertOrder({
-          trade_id: trade.id,
-          order_type: 'take_profit',
-          order_id: orderId,
-          price: tpPrice,
-          quantity: volumeLots,
-          tp_index: tpOrder.index,
-          status: 'pending'
-        });
+        try {
+          await db.insertOrder({
+            trade_id: trade.id,
+            order_type: 'take_profit',
+            order_id: orderId,
+            price: tpPrice,
+            quantity: volumeLots,
+            tp_index: tpOrder.index,
+            status: 'pending'
+          });
+        } catch (insertErr) {
+          logger.error('cTrader TP order placed on exchange but failed to save to DB - order may be orphaned', {
+            tradeId: trade.id,
+            orderId,
+            tpIndex: tpOrder.index,
+            tpPrice,
+            symbol,
+            exchange: 'ctrader',
+            error: insertErr instanceof Error ? insertErr.message : String(insertErr)
+          });
+          throw insertErr;
+        }
       } catch (error) {
         logger.error('Error placing cTrader take profit order', {
           tradeId: trade.id,
@@ -1358,7 +1406,7 @@ const placeTakeProfitOrders = async (
           tpIndex: tpOrder.index,
           tpPrice,
           tpVolume,
-          positionId: positionId?.toString(),
+          positionId: positionIdStr,
           exchange: 'ctrader',
           error: error instanceof Error ? error.message : String(error)
         });
@@ -1512,8 +1560,9 @@ const placeBreakevenLimitOrder = async (
     const pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : 5;
     const quantityPrecision = symbolInfo.volumePrecision !== undefined ? symbolInfo.volumePrecision : 2;
 
-    // Round entry price (Gap #3)
-    const entryPrice = roundPrice(trade.entry_price, pricePrecision, undefined);
+    // Use actual fill price for BE (often better than order price for entry ranges)
+    const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
+    const entryPrice = roundPrice(bePrice, pricePrecision, undefined);
     
     // Breakeven order side is opposite of position side (to close the position)
     // For Long (Buy) position, breakeven order is Sell
@@ -1524,6 +1573,14 @@ const placeBreakevenLimitOrder = async (
     const quantity = roundQuantity(positionVolume, quantityPrecision, false);
 
     const breakevenPositionId = (position.positionId || position.id)?.toString() || trade.position_id;
+    if (!breakevenPositionId) {
+      logger.warn('Cannot place cTrader breakeven order without positionId - would create orphaned order', {
+        tradeId: trade.id,
+        symbol,
+        exchange: 'ctrader'
+      });
+      return;
+    }
 
     logger.info('Placing breakeven stop-limit order', {
       tradeId: trade.id,
@@ -1547,14 +1604,26 @@ const placeBreakevenLimitOrder = async (
 
     if (orderId) {
       // Store breakeven limit order in database
-      await db.insertOrder({
-        trade_id: trade.id,
-        order_type: 'breakeven_limit',
-        order_id: orderId,
-        price: entryPrice,
-        quantity: positionVolume,
-        status: 'pending'
-      });
+      try {
+        await db.insertOrder({
+          trade_id: trade.id,
+          order_type: 'breakeven_limit',
+          order_id: orderId,
+          price: entryPrice,
+          quantity: positionVolume,
+          status: 'pending'
+        });
+      } catch (insertErr) {
+        logger.error('cTrader breakeven order placed on exchange but failed to save to DB - order may be orphaned', {
+          tradeId: trade.id,
+          orderId,
+          symbol,
+          entryPrice,
+          exchange: 'ctrader',
+          error: insertErr instanceof Error ? insertErr.message : String(insertErr)
+        });
+        throw insertErr;
+      }
 
       logger.info('Breakeven stop-limit order placed successfully', {
         tradeId: trade.id,
@@ -1646,27 +1715,38 @@ const monitorTrade = async (
         if (position) {
           const positionId = position.positionId || position.id;
           const fillTime = trade.entry_filled_at || dayjs().toISOString();
+          const fillPrice = parseFloat(
+            position.avgPrice || position.averagePrice || position.price || '0'
+          );
           
           logger.info('cTrader entry order filled', {
             tradeId: trade.id,
             tradingPair: trade.trading_pair,
             entryPrice: trade.entry_price,
+            fillPrice: fillPrice > 0 ? fillPrice : undefined,
             positionId: positionId?.toString(),
             channel: trade.channel,
             exchange: 'ctrader',
             note: 'Detected via position check - entry was filled but status not updated'
           });
           
-          await db.updateTrade(trade.id, {
+          const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
             status: 'active',
             entry_filled_at: fillTime,
-            position_id: positionId?.toString()
-          });
+            position_id: positionId?.toString(),
+          };
+          if (fillPrice > 0) {
+            updates.entry_price = fillPrice;
+          }
+          await db.updateTrade(trade.id, updates);
           trade.status = 'active';
           trade.entry_filled_at = fillTime;
+          if (fillPrice > 0) {
+            trade.entry_price = fillPrice;
+          }
           trade.position_id = positionId?.toString();
 
-          await updateEntryOrderToFilled(trade, db, fillTime);
+          await updateEntryOrderToFilled(trade, db, fillTime, fillPrice > 0 ? fillPrice : undefined);
           await Promise.race([
             placeTakeProfitOrders(trade, ctraderClient, db),
             new Promise<void>((_, reject) =>
@@ -1750,27 +1830,35 @@ const monitorTrade = async (
       });
       
       if (entryResult.filled) {
+        const fillPrice = entryResult.filledPrice;
         logger.info('cTrader entry order filled', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
           entryPrice: trade.entry_price,
+          fillPrice,
           positionId: entryResult.positionId,
           channel: trade.channel,
           exchange: 'ctrader'
         });
-        
         // Use actual fill time from position when available; dayjs() is monitor poll time and can be delayed
         const fillTime = entryResult.filledAt ?? dayjs().toISOString();
-        await db.updateTrade(trade.id, {
+        const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
           status: 'active',
           entry_filled_at: fillTime,
-          position_id: entryResult.positionId
-        });
+          position_id: entryResult.positionId,
+        };
+        if (fillPrice != null && fillPrice > 0) {
+          updates.entry_price = fillPrice;
+        }
+        await db.updateTrade(trade.id, updates);
         trade.status = 'active';
         trade.entry_filled_at = fillTime;
         trade.position_id = entryResult.positionId;
+        if (fillPrice != null && fillPrice > 0) {
+          trade.entry_price = fillPrice;
+        }
 
-        await updateEntryOrderToFilled(trade, db, fillTime);
+        await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
         await Promise.race([
           placeTakeProfitOrders(trade, ctraderClient, db),
           new Promise<void>((_, reject) =>
@@ -1954,12 +2042,14 @@ const monitorTrade = async (
             });
           }
         } else {
-          // Move stop loss to entry price
+          // Move stop loss to actual fill price (often better than order price for entry ranges)
+          const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
           logger.info('Required take profits hit - moving cTrader stop loss to breakeven', {
             tradeId: trade.id,
             filledTPCount,
             breakevenAfterTPs,
-            entryPrice: trade.entry_price,
+            bePrice,
+            orderPrice: trade.entry_price,
             exchange: 'ctrader'
           });
           
@@ -1967,10 +2057,10 @@ const monitorTrade = async (
             try {
               await ctraderClient.modifyPosition({
                 positionId: trade.position_id,
-                stopLoss: trade.entry_price
+                stopLoss: bePrice
               });
               await db.updateTrade(trade.id, {
-                stop_loss: trade.entry_price,
+                stop_loss: bePrice,
                 stop_loss_breakeven: true
               });
             } catch (error) {

@@ -26,6 +26,7 @@ import {
   MONITOR_TRADE_TIMEOUT_MS,
   TP_PLACEMENT_TIMEOUT_MS
 } from './shared.js';
+import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
@@ -155,7 +156,7 @@ const checkEntryFilled = async (
   bybitClient: RestClientV5 | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider
-): Promise<{ filled: boolean; positionId?: string }> => {
+): Promise<{ filled: boolean; positionId?: string; filledPrice?: number }> => {
   try {
     if (isSimulation) {
       // In simulation, check if current price has reached entry price
@@ -223,14 +224,24 @@ const checkEntryFilled = async (
         
         if (position) {
           const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
+          const filledPrice = parseFloat(
+            getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+              getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+              '0'
+          );
           logger.debug('Found open position for trade, entry likely filled', {
             tradeId: trade.id,
             symbol,
             positionIdx: positionIdx?.toString(),
             size: getBybitField<string>(position, 'size'),
-            orderId: trade.order_id
+            orderId: trade.order_id,
+            filledPrice: filledPrice > 0 ? filledPrice : undefined
           });
-          return { filled: true, positionId: positionIdx?.toString() };
+          return {
+            filled: true,
+            positionId: positionIdx?.toString(),
+            filledPrice: filledPrice > 0 ? filledPrice : undefined,
+          };
         } else {
           logger.debug('No matching position found', {
             tradeId: trade.id,
@@ -281,15 +292,24 @@ const checkEntryFilled = async (
               });
               
               if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
-                // Get position ID if available
+                // Get position ID and avg price if available
                 const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
                 if (positions.retCode === 0 && positions.result && positions.result.list) {
-                  const position = positions.result.list.find((p: any) => 
+                  const position = positions.result.list.find((p: any) =>
                     p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
                   );
                   if (position) {
                     const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
-                    return { filled: true, positionId: positionIdx?.toString() };
+                    const filledPrice = parseFloat(
+                      getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+                        getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+                        '0'
+                    );
+                    return {
+                      filled: true,
+                      positionId: positionIdx?.toString(),
+                      filledPrice: filledPrice > 0 ? filledPrice : undefined,
+                    };
                   }
                 }
                 return { filled: true };
@@ -335,15 +355,24 @@ const checkEntryFilled = async (
               });
               
               if (orderStatus === 'Filled') {
-                // Get position ID if available
+                // Get position ID and avg price if available
                 const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
                 if (positions.retCode === 0 && positions.result && positions.result.list) {
-                  const position = positions.result.list.find((p: any) => 
+                  const position = positions.result.list.find((p: any) =>
                     p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
                   );
                   if (position) {
                     const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
-                    return { filled: true, positionId: positionIdx?.toString() };
+                    const filledPrice = parseFloat(
+                      getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+                        getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+                        '0'
+                    );
+                    return {
+                      filled: true,
+                      positionId: positionIdx?.toString(),
+                      filledPrice: filledPrice > 0 ? filledPrice : undefined,
+                    };
                   }
                 }
                 return { filled: true };
@@ -390,15 +419,24 @@ const checkEntryFilled = async (
               });
               
               if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
-                // Get position ID if available
+                // Get position ID and avg price if available
                 const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
                 if (positions.retCode === 0 && positions.result && positions.result.list) {
-                  const position = positions.result.list.find((p: any) => 
+                  const position = positions.result.list.find((p: any) =>
                     p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
                   );
                   if (position) {
                     const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
-                    return { filled: true, positionId: positionIdx?.toString() };
+                    const filledPrice = parseFloat(
+                      getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+                        getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+                        '0'
+                    );
+                    return {
+                      filled: true,
+                      positionId: positionIdx?.toString(),
+                      filledPrice: filledPrice > 0 ? filledPrice : undefined,
+                    };
                   }
                 }
                 return { filled: true };
@@ -447,12 +485,21 @@ const checkEntryFilled = async (
               if (orderStatus === 'Filled' || orderStatus === 'PartiallyFilled') {
                 const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
                 if (positions.retCode === 0 && positions.result && positions.result.list) {
-                  const position = positions.result.list.find((p: any) => 
+                  const position = positions.result.list.find((p: any) =>
                     p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
                   );
                   if (position) {
                     const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
-                    return { filled: true, positionId: positionIdx?.toString() };
+                    const filledPrice = parseFloat(
+                      getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+                        getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+                        '0'
+                    );
+                    return {
+                      filled: true,
+                      positionId: positionIdx?.toString(),
+                      filledPrice: filledPrice > 0 ? filledPrice : undefined,
+                    };
                   }
                 }
                 return { filled: true };
@@ -1373,8 +1420,9 @@ const placeBreakevenLimitOrder = async (
       pricePrecision = symbolInfo.pricePrecision;
     }
 
-    // Round entry price
-    const entryPrice = roundPrice(trade.entry_price, pricePrecision, undefined);
+    // Use actual fill price for BE (often better than order price for entry ranges)
+    const bePrice = await getEntryFillPrice(trade, db, { bybitClient });
+    const entryPrice = roundPrice(bePrice, pricePrecision, undefined);
     
     // Breakeven order side is opposite of position side (to close the position)
     // For Long (Buy) position, breakeven order is Sell
@@ -1576,30 +1624,41 @@ const monitorTrade = async (
           );
           if (position) {
             const positionIdx = getBybitField<string | number>(position, 'positionIdx', 'position_idx');
-            // Update trade status to active
+            const fillPrice = parseFloat(
+              getBybitField<string>(position, 'avgPrice', 'avg_price') ||
+                getBybitField<string>(position, 'avgEntryPrice', 'avg_entry_price') ||
+                '0'
+            );
             const fillTime = trade.entry_filled_at || dayjs().toISOString();
             
-            // Log the entry fill (same message as the normal flow for consistency)
             logger.info('Bybit entry order filled', {
               tradeId: trade.id,
               tradingPair: trade.trading_pair,
               entryPrice: trade.entry_price,
+              fillPrice: fillPrice > 0 ? fillPrice : undefined,
               positionId: positionIdx?.toString(),
               channel: trade.channel,
               exchange: 'bybit',
               note: 'Detected via position check - entry was filled but status not updated'
             });
             
-            await db.updateTrade(trade.id, {
+            const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
               status: 'active',
               entry_filled_at: fillTime,
-              position_id: positionIdx?.toString()
-            });
+              position_id: positionIdx?.toString(),
+            };
+            if (fillPrice > 0) {
+              updates.entry_price = fillPrice;
+            }
+            await db.updateTrade(trade.id, updates);
             trade.status = 'active';
             trade.entry_filled_at = fillTime;
             trade.position_id = positionIdx?.toString();
+            if (fillPrice > 0) {
+              trade.entry_price = fillPrice;
+            }
 
-            await updateEntryOrderToFilled(trade, db, fillTime);
+            await updateEntryOrderToFilled(trade, db, fillTime, fillPrice > 0 ? fillPrice : undefined);
 
             // Place take profit orders now that entry has filled
             await Promise.race([
@@ -1766,10 +1825,12 @@ const monitorTrade = async (
         exchange: 'bybit'
       });
       if (entryResult.filled) {
+        const fillPrice = entryResult.filledPrice;
         logger.info('Bybit entry order filled', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
           entryPrice: trade.entry_price,
+          fillPrice,
           positionId: entryResult.positionId,
           channel: trade.channel,
           exchange: 'bybit'
@@ -1798,16 +1859,23 @@ const monitorTrade = async (
           }
         }
         fillTime = fillTime ?? dayjs().toISOString();
-        await db.updateTrade(trade.id, {
+        const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
           status: 'active',
           entry_filled_at: fillTime,
-          position_id: entryResult.positionId
-        });
+          position_id: entryResult.positionId,
+        };
+        if (fillPrice != null && fillPrice > 0) {
+          updates.entry_price = fillPrice;
+        }
+        await db.updateTrade(trade.id, updates);
         trade.status = 'active';
         trade.entry_filled_at = fillTime;
         trade.position_id = entryResult.positionId;
+        if (fillPrice != null && fillPrice > 0) {
+          trade.entry_price = fillPrice;
+        }
 
-        await updateEntryOrderToFilled(trade, db, fillTime);
+        await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
 
         // Place take profit orders now that entry has filled
         await Promise.race([
@@ -1954,17 +2022,20 @@ const monitorTrade = async (
             });
           }
         } else {
+          // Use actual fill price for BE (often better than order price for entry ranges)
+          const bePrice = await getEntryFillPrice(trade, db, { bybitClient });
           logger.info('Required take profits hit - moving Bybit stop loss to breakeven', {
             tradeId: trade.id,
             filledTPCount,
             breakevenAfterTPs,
-            entryPrice: trade.entry_price,
+            bePrice,
+            orderPrice: trade.entry_price,
             exchange: 'bybit'
           });
           
-          await updateStopLoss(trade, trade.entry_price, bybitClient, db);
+          await updateStopLoss(trade, bePrice, bybitClient, db);
           await db.updateTrade(trade.id, {
-            stop_loss: trade.entry_price,
+            stop_loss: bePrice,
             stop_loss_breakeven: true
           });
         }
