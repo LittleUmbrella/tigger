@@ -26,6 +26,9 @@ import {
   MONITOR_TRADE_TIMEOUT_MS,
   TP_PLACEMENT_TIMEOUT_MS
 } from './shared.js';
+
+/** Bybit error codes that warrant a retry (transient: rate limit, server error, timeout) */
+const BYBIT_RETRYABLE_CODES = new Set([10000, 10006, 10016, 10018, 429]);
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -45,6 +48,61 @@ const normalizeBybitSymbol = (tradingPair: string): string => {
   return normalized;
 };
 
+type TickerDiagnostic = {
+  symbol: string;
+  category: 'linear' | 'spot';
+  retCode?: number;
+  retMsg?: string;
+  listLength?: number;
+  thrown?: boolean;
+  error?: string;
+};
+
+const fetchBybitTickerWithRetry = async (
+  bybitClient: RestClientV5,
+  category: 'linear' | 'spot',
+  symbol: string,
+  maxRetries = 2
+): Promise<{ response: any; diagnostic: TickerDiagnostic }> => {
+  let lastDiagnostic: TickerDiagnostic = { symbol, category };
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const response = category === 'linear'
+        ? await bybitClient.getTickers({ category: 'linear', symbol })
+        : await bybitClient.getTickers({ category: 'spot', symbol });
+      if (response.retCode === 0) {
+        const listLen = (response.result as { list?: unknown[] })?.list?.length ?? 0;
+        return { response, diagnostic: { symbol, category, retCode: 0, listLength: listLen } };
+      }
+      lastDiagnostic = {
+        symbol,
+        category,
+        retCode: response.retCode,
+        retMsg: response.retMsg,
+        listLength: (response.result as { list?: unknown[] })?.list?.length
+      };
+      if (BYBIT_RETRYABLE_CODES.has(response.retCode) && attempt < maxRetries) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      return { response, diagnostic: lastDiagnostic };
+    } catch (error) {
+      lastDiagnostic = {
+        symbol,
+        category,
+        thrown: true,
+        error: error instanceof Error ? error.message : String(error)
+      };
+      if (attempt < maxRetries) {
+        await sleep(500 * attempt);
+        continue;
+      }
+      return { response: null, diagnostic: lastDiagnostic };
+    }
+  }
+  return { response: null, diagnostic: lastDiagnostic };
+};
+
 const getCurrentPrice = async (
   tradingPair: string,
   bybitClient: RestClientV5 | undefined,
@@ -61,7 +119,7 @@ const getCurrentPrice = async (
       return price;
     } else if (bybitClient) {
       // Normalize symbol similar to validateBybitSymbol
-      let normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
+      const normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
       
       // Ensure symbol ends with USDT or USDC
       const baseSymbol = normalizedSymbol.replace(/USDT$|USDC$/, '');
@@ -72,72 +130,72 @@ const getCurrentPrice = async (
         ? [`${baseSymbol}USDC`, `${baseSymbol}USDT`]
         : [`${baseSymbol}USDT`, `${baseSymbol}USDC`];
       
+      const diagnostics: TickerDiagnostic[] = [];
+      
       for (const symbolToCheck of symbolsToTry) {
         // Try linear category first (futures) - this matches where trades are placed
-        try {
-          const linearTicker = await bybitClient.getTickers({ category: 'linear', symbol: symbolToCheck });
-          if (linearTicker.retCode === 0 && linearTicker.result && linearTicker.result.list && linearTicker.result.list.length > 0) {
-            // Find the ticker that matches our symbol exactly (case-insensitive)
-            const matchingTicker = linearTicker.result.list.find((t: any) => 
-              t.symbol && t.symbol.toUpperCase() === symbolToCheck.toUpperCase()
-            );
-            
-            if (matchingTicker?.lastPrice) {
-              const price = parseFloat(matchingTicker.lastPrice);
-              logger.debug('Got current price from Bybit linear', {
-                tradingPair,
-                symbolToCheck,
-                category: 'linear',
-                price,
-                tickerSymbol: matchingTicker.symbol
-              });
-              return price;
-            }
+        const { response: linearTicker, diagnostic: linearDiag } = await fetchBybitTickerWithRetry(
+          bybitClient, 'linear', symbolToCheck
+        );
+        diagnostics.push(linearDiag);
+        
+        if (linearTicker?.retCode === 0 && linearTicker.result?.list?.length > 0) {
+          const matchingTicker = linearTicker.result.list.find((t: any) => 
+            t.symbol && t.symbol.toUpperCase() === symbolToCheck.toUpperCase()
+          );
+          
+          if (matchingTicker?.lastPrice) {
+            const price = parseFloat(matchingTicker.lastPrice);
+            logger.debug('Got current price from Bybit linear', {
+              tradingPair,
+              symbolToCheck,
+              category: 'linear',
+              price,
+              tickerSymbol: matchingTicker.symbol
+            });
+            return price;
           }
-        } catch (error) {
-          logger.debug('Error getting linear ticker, trying spot', {
-            symbolToCheck,
-            error: error instanceof Error ? error.message : String(error)
-          });
         }
         
         // Try spot category as fallback (only if linear doesn't exist)
-        try {
-          const spotTicker = await bybitClient.getTickers({ category: 'spot', symbol: symbolToCheck });
-          if (spotTicker.retCode === 0 && spotTicker.result && spotTicker.result.list && spotTicker.result.list.length > 0) {
-            // Find the ticker that matches our symbol exactly (case-insensitive)
-            const matchingTicker = spotTicker.result.list.find((t: any) => 
-              t.symbol && t.symbol.toUpperCase() === symbolToCheck.toUpperCase()
-            );
-            
-            if (matchingTicker?.lastPrice) {
-              const price = parseFloat(matchingTicker.lastPrice);
-              logger.debug('Got current price from Bybit spot (fallback)', {
-                tradingPair,
-                symbolToCheck,
-                category: 'spot',
-                price,
-                tickerSymbol: matchingTicker.symbol,
-                note: 'Using spot price as fallback - trade is on linear, price may differ'
-              });
-              return price;
-            }
+        const { response: spotTicker, diagnostic: spotDiag } = await fetchBybitTickerWithRetry(
+          bybitClient, 'spot', symbolToCheck
+        );
+        diagnostics.push(spotDiag);
+        
+        if (spotTicker?.retCode === 0 && spotTicker.result?.list?.length > 0) {
+          const matchingTicker = spotTicker.result.list.find((t: any) => 
+            t.symbol && t.symbol.toUpperCase() === symbolToCheck.toUpperCase()
+          );
+          
+          if (matchingTicker?.lastPrice) {
+            const price = parseFloat(matchingTicker.lastPrice);
+            logger.debug('Got current price from Bybit spot (fallback)', {
+              tradingPair,
+              symbolToCheck,
+              category: 'spot',
+              price,
+              tickerSymbol: matchingTicker.symbol,
+              note: 'Using spot price as fallback - trade is on linear, price may differ'
+            });
+            return price;
           }
-        } catch (error) {
-          // Continue to next symbol
-          logger.debug('Error getting spot ticker', {
-            symbolToCheck,
-            error: error instanceof Error ? error.message : String(error)
-          });
-          continue;
         }
       }
       
-      // If we get here, no price was found
+      // If we get here, no price was found - log diagnostics for debugging
       logger.warn('Could not get current price from Bybit', {
         tradingPair,
         normalizedSymbol,
-        symbolsTried: symbolsToTry
+        symbolsTried: symbolsToTry,
+        bybitResponses: diagnostics.map(d => ({
+          symbol: d.symbol,
+          category: d.category,
+          ...(d.retCode !== undefined && { retCode: d.retCode }),
+          ...(d.retMsg && { retMsg: d.retMsg }),
+          ...(d.listLength !== undefined && { listLength: d.listLength }),
+          ...(d.thrown && { thrown: true, error: d.error })
+        }))
       });
     }
     return null;
