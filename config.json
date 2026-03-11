@@ -166,10 +166,7 @@
     },
     {
       "type": "ctrader",
-      "pollInterval": 3000,
-      "closeOrphanPositions": false,
-      "closeOrphanPositionsGraceMinutes": 2,
-      "_comment_closeOrphanPositions": "Set to true to auto-close positions with no matching trade (safety net). Default false."
+      "pollInterval": 3000
     }
   ],
   "channels": [

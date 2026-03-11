@@ -522,6 +522,8 @@ export class CTraderClient {
     relativeStopLoss?: number;
     /** Optional. Relative TP in 1/100000 of price unit. For BUY: tp = entry + relative; for SELL: tp = entry - relative */
     relativeTakeProfit?: number;
+    /** Optional. User label (max 100 chars) - groups positions for management */
+    label?: string;
   }): Promise<string> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
@@ -552,6 +554,9 @@ export class CTraderClient {
       }
       if (params.relativeTakeProfit != null && params.relativeTakeProfit > 0) {
         payload.relativeTakeProfit = params.relativeTakeProfit;
+      }
+      if (params.label != null && params.label !== '') {
+        payload.label = params.label.slice(0, 100);
       }
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
 
@@ -595,6 +600,12 @@ export class CTraderClient {
     price: number;
     /** Optional. Link order to position (cTrader "modify position") - use for TP orders as reduce-only-like guard */
     positionId?: string;
+    /** Optional. Absolute stop loss - set on resulting position when order fills */
+    stopLoss?: number;
+    /** Optional. Absolute take profit - set on resulting position when order fills */
+    takeProfit?: number;
+    /** Optional. User label (max 100 chars) - groups positions for management */
+    label?: string;
   }): Promise<string> {
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
@@ -634,6 +645,15 @@ export class CTraderClient {
       };
       if (params.positionId != null && params.positionId !== '') {
         payload.positionId = parseInt(params.positionId, 10);
+      }
+      if (params.stopLoss != null && params.stopLoss > 0) {
+        payload.stopLoss = params.stopLoss;
+      }
+      if (params.takeProfit != null && params.takeProfit > 0) {
+        payload.takeProfit = params.takeProfit;
+      }
+      if (params.label != null && params.label !== '') {
+        payload.label = params.label.slice(0, 100);
       }
       const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
 

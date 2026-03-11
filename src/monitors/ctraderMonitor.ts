@@ -4,7 +4,6 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { CTraderClient } from '../clients/ctraderClient.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
-import { roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import {
   getIsLong,
@@ -13,122 +12,14 @@ import {
   checkStopLossHit,
   checkTPHitBeforeEntry,
   checkSLHitBeforeEntry,
-  calculatePNLPercentage,
-  countFilledTakeProfits,
-  getBreakevenLimitOrder,
   updateOrderToFilled,
   updateTradeOnPositionClosed,
   updateTradeOnStopLossHit,
-  updateTradeOnBreakevenFilled,
   cancelTrade,
   sleep,
-  MONITOR_TRADE_TIMEOUT_MS,
-  TP_PLACEMENT_TIMEOUT_MS
+  MONITOR_TRADE_TIMEOUT_MS
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
-import { cancelCTraderPendingOrders } from '../managers/positionUtils.js';
-import { getEntryFillPrice } from '../utils/entryFillPrice.js';
-
-/** Per-account tracking: positionId -> firstSeenAt (ms) for orphan grace period */
-const orphanFirstSeenByAccount = new Map<string, Map<string, number>>();
-/** Last orphan check per account (ms) - throttle to every 5 min */
-const lastOrphanCheckByAccount = new Map<string, number>();
-const ORPHAN_CHECK_THROTTLE_MS = 5 * 60 * 1000;
-
-/**
- * Check for orphan cTrader positions (no matching trade) and close them after grace period.
- * Only runs when closeOrphanPositions is enabled. Scoped per account.
- */
-const checkAndCloseOrphanPositions = async (
-  db: DatabaseManager,
-  getCTraderClient: (accountName?: string) => Promise<CTraderClient | undefined>,
-  closeOrphanPositions: boolean,
-  graceMinutes: number
-): Promise<void> => {
-  if (!closeOrphanPositions) return;
-
-  const ourTrades = (await db.getActiveTrades()).filter(t => t.exchange === 'ctrader');
-  if (ourTrades.length === 0) return; // No active trades - skip to avoid closing manual positions
-
-  const byAccount = new Map<string, Trade[]>();
-  for (const t of ourTrades) {
-    const acc = t.account_name ?? 'ctrader_demo';
-    if (!byAccount.has(acc)) byAccount.set(acc, []);
-    byAccount.get(acc)!.push(t);
-  }
-
-  const graceMs = graceMinutes * 60 * 1000;
-  const now = Date.now();
-
-  for (const [accountName, trades] of byAccount) {
-    if (now - (lastOrphanCheckByAccount.get(accountName) ?? 0) < ORPHAN_CHECK_THROTTLE_MS) continue;
-    lastOrphanCheckByAccount.set(accountName, now);
-
-    const ourPositionIds = new Set(
-      trades
-        .map(t => t.position_id)
-        .filter((id): id is string => id != null && id !== '')
-    );
-
-    const client = await getCTraderClient(accountName);
-    if (!client) continue;
-
-    try {
-      const positions = await client.getOpenPositions();
-      const candidates = orphanFirstSeenByAccount.get(accountName) ?? new Map();
-      let sawNewOrphans = false;
-
-      for (const p of positions) {
-        const posId = typeof p.positionId === 'object' && p.positionId?.low != null
-          ? String(protobufLongToNumber(p.positionId) ?? '')
-          : String(p.positionId ?? p.id ?? '');
-        if (!posId) continue;
-        if (ourPositionIds.has(posId)) {
-          candidates.delete(posId);
-          continue;
-        }
-
-        const firstSeen = candidates.get(posId) ?? now;
-        if (!candidates.has(posId)) {
-          candidates.set(posId, firstSeen);
-          sawNewOrphans = true;
-        }
-
-        if (now - firstSeen < graceMs) continue;
-
-        const symbol = p.symbolName ?? p.symbol ?? '?';
-        const vol = p.volume ?? p.quantity ?? 0;
-        logger.info('Closing orphan cTrader position (no matching trade)', {
-          positionId: posId,
-          symbol,
-          volume: vol,
-          accountName,
-          exchange: 'ctrader'
-        });
-        try {
-          await client.closePosition(posId);
-          candidates.delete(posId);
-        } catch (err) {
-          logger.warn('Failed to close orphan position', {
-            positionId: posId,
-            error: err instanceof Error ? err.message : String(err),
-            exchange: 'ctrader'
-          });
-        }
-      }
-
-      if (sawNewOrphans || candidates.size > 0) {
-        orphanFirstSeenByAccount.set(accountName, candidates);
-      }
-    } catch (err) {
-      logger.warn('Orphan position check failed', {
-        accountName,
-        error: err instanceof Error ? err.message : String(err),
-        exchange: 'ctrader'
-      });
-    }
-  }
-};
 
 /**
  * Get current price from cTrader
@@ -425,25 +316,15 @@ const checkEntryFilled = async (
   }
 };
 
-/** Extract positionId from an order (handles protobuf Long) */
-const extractPositionIdFromOrder = (o: any): string | undefined => {
-  const raw = o.positionId ?? o.position_id;
-  if (raw == null) return undefined;
-  const num = protobufLongToNumber(raw);
-  return num != null ? String(num) : String(raw);
-};
-
 /**
  * Check if position is closed for cTrader
  * Implements retry logic and detailed logging (Gaps #4, #6)
- * When position_id is missing, derives it from our pending orders on the exchange - detects orphans
  */
 const checkPositionClosed = async (
   trade: Trade,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider,
-  db?: DatabaseManager
+  priceProvider?: HistoricalPriceProvider
 ): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
   try {
     logger.debug('Checking if cTrader position is closed', {
@@ -609,52 +490,6 @@ const checkPositionClosed = async (
           exchange: 'ctrader'
         });
       }
-    } else if (ctraderClient && !trade.position_id && db && trade.entry_filled_at) {
-      // Fallback: derive position from our pending orders on exchange - detects orphans when position_id was never set
-      const symbol = normalizeCTraderSymbol(trade.trading_pair);
-      const pendingOrders = await db.getOrdersByTradeId(trade.id);
-      const pendingWithOrderId = pendingOrders.filter(o => o.status === 'pending' && o.order_id);
-      if (pendingWithOrderId.length === 0) return { closed: false };
-
-      const [openOrders, positions] = await Promise.all([
-        ctraderClient.getOpenOrders(),
-        ctraderClient.getOpenPositions()
-      ]);
-      const ourOrderIds = new Set(pendingWithOrderId.map(o => String(o.order_id)));
-      const matchingExchangeOrders = openOrders.filter((o: any) => {
-        const oid = String(o.orderId ?? o.id ?? '');
-        return ourOrderIds.has(oid);
-      });
-      if (matchingExchangeOrders.length === 0) return { closed: false }; // Our orders not on exchange (filled/cancelled)
-
-      const positionIds = new Set<string>();
-      for (const o of matchingExchangeOrders) {
-        const pid = extractPositionIdFromOrder(o);
-        if (pid) positionIds.add(pid);
-      }
-      if (positionIds.size === 0) return { closed: false };
-
-      const openPositionIds = new Set(
-        positions.map((p: any) => {
-          const id = p.positionId ?? p.id;
-          return id != null ? String(protobufLongToNumber(id) ?? id) : '';
-        }).filter(Boolean)
-      );
-      const ourPositionsExist = [...positionIds].some(pid => openPositionIds.has(pid));
-      if (!ourPositionsExist) {
-        logger.info('cTrader position closed (derived from orphaned orders)', {
-          tradeId: trade.id,
-          symbol,
-          derivedPositionIds: [...positionIds],
-          note: 'Our orders on exchange but their positions closed - cTrader does not auto-cancel',
-          exchange: 'ctrader'
-        });
-        return { closed: true };
-      }
-      // Persist learned position_id for future runs
-      const firstPosId = [...positionIds][0];
-      await db.updateTrade(trade.id, { position_id: firstPosId });
-      trade.position_id = firstPosId;
     } else {
       logger.debug('Cannot check position close - missing client or position ID', {
         tradeId: trade.id,
@@ -677,14 +512,15 @@ const checkPositionClosed = async (
 };
 
 /**
- * Cancel order for cTrader
+ * Cancel order(s) for cTrader.
  */
 const cancelOrder = async (
   trade: Trade,
   ctraderClient?: CTraderClient
 ): Promise<void> => {
   try {
-    if (ctraderClient && trade.order_id) {
+    if (!ctraderClient) return;
+    if (trade.order_id) {
       await ctraderClient.cancelOrder(trade.order_id);
       logger.info('cTrader order cancelled', {
         tradeId: trade.id,
@@ -900,758 +736,6 @@ const checkOrderFilled = async (
 };
 
 /**
- * Place take profit orders for cTrader
- * Implements position size validation and precision handling (Gaps #2, #3)
- */
-const placeTakeProfitOrders = async (
-  trade: Trade,
-  ctraderClient: CTraderClient | undefined,
-  db: DatabaseManager
-): Promise<void> => {
-  try {
-    if (!trade.entry_filled_at) {
-      logger.debug('Entry not filled yet, skipping TP order placement', {
-        tradeId: trade.id,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    const takeProfits = JSON.parse(trade.take_profits) as number[];
-    if (!takeProfits || takeProfits.length === 0) {
-      logger.debug('No take profits configured', {
-        tradeId: trade.id,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    // Check if TP orders already exist. Best TP is set on position (not in DB); non-best TPs are limit orders.
-    // Skip when we have all non-best limit orders (n-1 for n TPs), or all TPs for single-TP case.
-    let existingOrders = await db.getOrdersByTradeId(trade.id);
-    const existingTPOrders = existingOrders.filter(o => o.order_type === 'take_profit');
-    const nonBestCount = Math.max(0, takeProfits.length - 1);
-    if (takeProfits.length === 1) {
-      // Single TP: set on position only; no DB orders. Skip only if position already has TP (we can't verify).
-      // We don't skip - always run to set SL and best TP on position (idempotent).
-    } else if (existingTPOrders.length >= nonBestCount) {
-      logger.debug('All non-best take profit orders already exist for cTrader trade, skipping placement', {
-        tradeId: trade.id,
-        existingTPCount: existingTPOrders.length,
-        nonBestCount,
-        expectedTPCount: takeProfits.length,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    // Only proceed if we have a cTrader client and exchange is cTrader (for real exchange orders)
-    if (!ctraderClient || trade.exchange !== 'ctrader') {
-      logger.debug('Skipping take profit order placement - no cTrader client or not cTrader exchange', {
-        tradeId: trade.id,
-        exchange: trade.exchange,
-        hasCTraderClient: !!ctraderClient
-      });
-      return;
-    }
-
-    const symbol = normalizeCTraderSymbol(trade.trading_pair);
-    
-    logger.info('Placing cTrader take profit orders', {
-      tradeId: trade.id,
-      symbol,
-      tpCount: takeProfits.length,
-      takeProfits,
-      channel: trade.channel,
-      exchange: 'ctrader'
-    });
-    
-    // Get position info with retry logic (Gap #4)
-    let position: any = null;
-    let positionResponse: any[] = [];
-    const maxRetries = 3;
-    const retryDelay = 1000; // 1 second
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        positionResponse = await ctraderClient.getOpenPositions();
-        
-        logger.info('cTrader positions received for TP placement', {
-          tradeId: trade.id,
-          symbol,
-          positionsCount: positionResponse.length,
-          channel: trade.channel,
-          exchange: 'ctrader'
-        });
-
-        // Resolve position by position_id or order_id (order_id → deal → positionId avoids wrong position when multiple per symbol)
-        if (trade.position_id) {
-          position = positionResponse.find((p: any) => {
-            const positionId = p.positionId || p.id;
-            const positionSymbol = p.symbolName || p.symbol;
-            return positionSymbol === symbol && positionId?.toString() === trade.position_id;
-          });
-        }
-        if (!position && trade.order_id) {
-          const fillTime = trade.entry_filled_at || trade.created_at;
-          const fromTs = fillTime ? new Date(fillTime).getTime() - 60000 : undefined;
-          const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
-            trade.order_id,
-            fromTs,
-            Date.now()
-          );
-          if (resolvedPositionId) {
-            position = positionResponse.find((p: any) =>
-              String(p.positionId ?? p.id) === String(resolvedPositionId)
-            );
-          }
-        }
-        if (!position) {
-          const positions = positionResponse.filter((p: any) => {
-            const positionSymbol = p.symbolName || p.symbol;
-            const volume = Math.abs(p.volume || p.quantity || 0);
-            return positionSymbol === symbol && volume > 0;
-          });
-          if (positions.length > 0) {
-            position = positions[0];
-          }
-        }
-        
-        if (position) {
-          logger.debug('Position found', {
-            tradeId: trade.id,
-            symbol,
-            positionId: (position.positionId || position.id)?.toString(),
-            volume: position.volume || position.quantity,
-            attempt,
-            exchange: 'ctrader'
-          });
-          break; // Found position, exit retry loop
-        }
-      } catch (error) {
-        logger.debug('Error getting positions, retrying', {
-          tradeId: trade.id,
-          symbol,
-          attempt,
-          maxRetries,
-          error: error instanceof Error ? error.message : String(error),
-          exchange: 'ctrader'
-        });
-      }
-      
-      // If this wasn't the last attempt, wait before retrying
-      if (attempt < maxRetries && !position) {
-        logger.debug('Position not found yet, retrying', {
-          tradeId: trade.id,
-          symbol,
-          attempt,
-          maxRetries,
-          exchange: 'ctrader'
-        });
-        await sleep(retryDelay);
-      }
-    }
-
-    if (!position) {
-      logger.warn('No cTrader position found for TP order placement after retries', {
-        tradeId: trade.id,
-        symbol,
-        positionId: trade.position_id,
-        attempts: maxRetries,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    const positionId = position.positionId || position.id;
-    const positionVolume = Math.abs(position.volume || position.quantity || 0);
-    
-    // Determine position side
-    let positionSide: 'BUY' | 'SELL';
-    if (position.tradeSide && (position.tradeSide === 'BUY' || position.tradeSide === 'SELL')) {
-      positionSide = position.tradeSide as 'BUY' | 'SELL';
-    } else if (position.side && (position.side === 'BUY' || position.side === 'SELL')) {
-      positionSide = position.side as 'BUY' | 'SELL';
-    } else {
-      // Fallback: infer from volume (positive = long/BUY, negative = short/SELL)
-      positionSide = positionVolume > 0 ? 'BUY' : 'SELL';
-      logger.debug('Position side not available, inferred from volume', {
-        tradeId: trade.id,
-        inferredSide: positionSide,
-        positionVolume,
-        exchange: 'ctrader'
-      });
-    }
-    const expectedPositionSide = trade.direction === 'long' ? 'BUY' : 'SELL';
-    if (positionSide !== expectedPositionSide) {
-      logger.error('Position side mismatch, using expected side for TP orders', {
-        tradeId: trade.id,
-        symbol,
-        expectedPositionSide,
-        actualPositionSide: positionSide,
-        note: 'TP side derived from trade.direction to avoid increasing position',
-        exchange: 'ctrader'
-      });
-    }
-    const effectivePositionSide = positionSide === expectedPositionSide ? positionSide : expectedPositionSide;
-
-    // TP side is always opposite of position side
-    // For Long (Buy) position, TP is Sell
-    // For Short (Sell) position, TP is Buy
-    const tpSide = effectivePositionSide === 'BUY' ? 'SELL' : 'BUY';
-
-    // Set stop loss on position early for faster protection (later modifyPosition will reset it with best TP)
-    if (trade.stop_loss != null) {
-      try {
-        await ctraderClient.modifyPosition({
-          positionId: positionId?.toString() || '',
-          stopLoss: trade.stop_loss
-        });
-        logger.info('cTrader stop loss set on position', {
-          tradeId: trade.id,
-          symbol,
-          stopLoss: trade.stop_loss,
-          positionId: positionId?.toString(),
-          exchange: 'ctrader'
-        });
-      } catch (error) {
-        logger.warn('Failed to set stop loss on cTrader position', {
-          tradeId: trade.id,
-          symbol,
-          stopLoss: trade.stop_loss,
-          channel: trade.channel,
-          exchange: 'ctrader',
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-
-    // Get symbol info for precision (Gap #3) - needed before we can compute best TP and validTPOrders
-    logger.debug('Getting symbol info for precision', {
-      tradeId: trade.id,
-      symbol,
-      exchange: 'ctrader'
-    });
-    
-    let symbolInfo: any;
-    try {
-      symbolInfo = await ctraderClient.getSymbolInfo(symbol);
-      logger.debug('Symbol info retrieved', {
-        tradeId: trade.id,
-        symbol,
-        symbolInfo: {
-          symbolId: symbolInfo.symbolId,
-          symbolName: symbolInfo.symbolName,
-          digits: symbolInfo.digits,
-          pipSize: symbolInfo.pipSize
-        },
-        exchange: 'ctrader'
-      });
-    } catch (error) {
-      logger.warn('Failed to get symbol info, using defaults', {
-        tradeId: trade.id,
-        symbol,
-        channel: trade.channel,
-        exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
-      });
-      symbolInfo = {};
-    }
-
-    // Extract precision and volume limits from symbol info
-    // cTrader: ProtoOASymbol returns int64 as Long objects; normalize to number
-    const pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : 5;
-    const quantityPrecision = symbolInfo.volumePrecision !== undefined ? symbolInfo.volumePrecision : 2;
-    const lotSize = protobufLongToNumber(symbolInfo.lotSize) ?? 100;
-    const minOrderVolume = protobufLongToNumber(symbolInfo.minVolume) ?? protobufLongToNumber(symbolInfo.minLotSize) ?? 0;
-    const maxOrderVolume = protobufLongToNumber(symbolInfo.maxVolume) ?? protobufLongToNumber(symbolInfo.maxLotSize);
-    const volumeStep = protobufLongToNumber(symbolInfo.volumeStep) ?? protobufLongToNumber(symbolInfo.stepVolume) ?? protobufLongToNumber(symbolInfo.lotSize) ?? Math.pow(10, -quantityPrecision);
-
-    logger.debug('Precision and limits extracted', {
-      tradeId: trade.id,
-      symbol,
-      pricePrecision,
-      quantityPrecision,
-      minOrderVolume,
-      maxOrderVolume,
-      volumeStep,
-      exchange: 'ctrader'
-    });
-
-    // Round TP prices (Gap #3)
-    const roundedTPPrices = takeProfits.map(tpPrice => 
-      roundPrice(tpPrice, pricePrecision, undefined)
-    );
-
-    logger.debug('TP prices rounded', {
-      tradeId: trade.id,
-      symbol,
-      originalTPs: takeProfits,
-      roundedTPs: roundedTPPrices,
-      exchange: 'ctrader'
-    });
-
-    // Distribute quantity across TPs (Gap #2)
-    const tpQuantities = distributeQuantityAcrossTPs(
-      positionVolume,
-      takeProfits.length,
-      quantityPrecision
-    );
-
-    logger.debug('TP quantities distributed', {
-      tradeId: trade.id,
-      symbol,
-      positionVolume,
-      numTPs: takeProfits.length,
-      tpQuantities,
-      exchange: 'ctrader'
-    });
-
-    // Validate and redistribute TP quantities (Gap #2)
-    const validTPOrders = validateAndRedistributeTPQuantities(
-      tpQuantities,
-      roundedTPPrices,
-      positionVolume,
-      volumeStep,
-      minOrderVolume,
-      maxOrderVolume,
-      quantityPrecision
-    );
-    
-    logger.info('TP orders validated and redistributed', {
-      tradeId: trade.id,
-      symbol,
-      originalTPCount: takeProfits.length,
-      validTPCount: validTPOrders.length,
-      skippedTPCount: takeProfits.length - validTPOrders.length,
-      validTPOrders: validTPOrders.map(tp => ({
-        index: tp.index,
-        price: tp.price,
-        quantity: tp.quantity
-      })),
-      exchange: 'ctrader'
-    });
-
-    // Log that last TP uses remaining quantity
-    if (validTPOrders.length > 0) {
-      const lastTP = validTPOrders[validTPOrders.length - 1];
-      const allocatedQty = validTPOrders.slice(0, -1).reduce((sum, tp) => sum + tp.quantity, 0);
-      const remainingQty = positionVolume - allocatedQty;
-      logger.info('Last TP order uses remaining quantity to close entire position', {
-        tradeId: trade.id,
-        symbol,
-        lastTPIndex: lastTP.index,
-        lastTPQuantity: lastTP.quantity,
-        remainingQuantity: remainingQty,
-        totalPositionQty: positionVolume,
-        allocatedQty,
-        exchange: 'ctrader',
-        note: 'cTrader will automatically adjust last TP quantity to match available position size when executing'
-      });
-    }
-
-    // Log redistribution if fewer TPs than expected
-    if (validTPOrders.length < takeProfits.length) {
-      const skippedCount = takeProfits.length - validTPOrders.length;
-      const skippedIndices: number[] = [];
-      for (let i = 0; i < takeProfits.length; i++) {
-        if (!validTPOrders.find(tp => tp.index === i + 1)) {
-          skippedIndices.push(i + 1);
-        }
-      }
-      logger.warn('Some TP orders were skipped due to quantity validation', {
-        tradeId: trade.id,
-        symbol,
-        skippedCount,
-        skippedIndices,
-        reason: 'Quantity too small after rounding or below minimum order volume',
-        exchange: 'ctrader'
-      });
-    }
-
-    // Best TP = last/furthest TP - set on position via modifyPosition (closes remainder when hit).
-    // Monitor replaces SL and TP on position so they are always correct (handles initiator values or limit-order fills).
-    const bestTpOrder = validTPOrders.find(tp => tp.index === takeProfits.length);
-    const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices[roundedTPPrices.length - 1];
-    
-    try {
-      const modifyPayload: { positionId: string; stopLoss?: number; takeProfit?: number } = {
-        positionId: positionId?.toString() || ''
-      };
-      if (trade.stop_loss != null) {
-        modifyPayload.stopLoss = trade.stop_loss;
-      }
-      if (bestTpPrice != null && bestTpPrice > 0) {
-        modifyPayload.takeProfit = bestTpPrice;
-      }
-      if (modifyPayload.stopLoss != null || modifyPayload.takeProfit != null) {
-        await ctraderClient.modifyPosition(modifyPayload);
-        logger.info('cTrader position SL and best TP set via modifyPosition', {
-          tradeId: trade.id,
-          symbol,
-          stopLoss: modifyPayload.stopLoss,
-          bestTpPrice: modifyPayload.takeProfit,
-          positionId: positionId?.toString(),
-          exchange: 'ctrader'
-        });
-      }
-    } catch (error) {
-      logger.warn('Failed to set stop loss or best TP on cTrader position', {
-        tradeId: trade.id,
-        symbol,
-        stopLoss: trade.stop_loss,
-        bestTpPrice,
-        channel: trade.channel,
-        exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
-      });
-    }
-
-    // When validation consolidated to only the best TP (all non-best rounded to 0), insert a marker
-    // so the retry logic knows we're done and stops retrying every poll.
-    if (validTPOrders.length === 1 && validTPOrders[0].index === takeProfits.length) {
-      const existingPositionTp = existingTPOrders.find((o) => o.order_id === 'ctrader_position_tp');
-      if (!existingPositionTp) {
-        await db.insertOrder({
-          trade_id: trade.id,
-          order_type: 'take_profit',
-          order_id: 'ctrader_position_tp',
-          price: bestTpPrice,
-          quantity: positionVolume / lotSize,
-          tp_index: takeProfits.length,
-          status: 'pending'
-        });
-        logger.info('Inserted position TP marker - validation consolidated all TPs to best (on position)', {
-          tradeId: trade.id,
-          symbol,
-          exchange: 'ctrader'
-        });
-      }
-    }
-
-    // Guard: never place TP without positionId - would create orphaned orders (no auto-cancel when position closes)
-    const positionIdStr = positionId != null
-      ? String(protobufLongToNumber(positionId) ?? positionId)
-      : '';
-    if (!positionIdStr) {
-      logger.warn('Cannot place cTrader TP orders without positionId - would create orphaned orders', {
-        tradeId: trade.id,
-        symbol,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    // Place limit orders only for non-best TPs (indices 1..n-1). Best TP is on position.
-    for (const tpOrder of validTPOrders) {
-      if (tpOrder.index === takeProfits.length) {
-        // Best TP - already set on position, skip separate order
-        continue;
-      }
-      
-      const tpPrice = tpOrder.price;
-      const tpVolume = tpOrder.quantity;
-      
-      try {
-        // cTrader placeLimitOrder expects volume in lots; tpOrder.quantity is in API units (cents)
-        const volumeLots = tpVolume / lotSize;
-        const orderId = await ctraderClient.placeLimitOrder({
-          symbol,
-          volume: volumeLots,
-          tradeSide: tpSide,
-          price: tpPrice,
-          positionId: positionIdStr // Link to position (reduce-only-like guard - order modifies this position, not a new one)
-        });
-        
-        logger.info('cTrader take profit limit order placed', {
-          tradeId: trade.id,
-          tpIndex: tpOrder.index,
-          tpPrice,
-          tpVolumeApiUnits: tpVolume,
-          volumeLots,
-          tpSide,
-          orderId,
-          positionId: positionIdStr,
-          exchange: 'ctrader'
-        });
-        
-        // Store TP order in database (quantity in lots for consistency with other exchanges)
-        try {
-          await db.insertOrder({
-            trade_id: trade.id,
-            order_type: 'take_profit',
-            order_id: orderId,
-            price: tpPrice,
-            quantity: volumeLots,
-            tp_index: tpOrder.index,
-            status: 'pending'
-          });
-        } catch (insertErr) {
-          logger.error('cTrader TP order placed on exchange but failed to save to DB - order may be orphaned', {
-            tradeId: trade.id,
-            orderId,
-            tpIndex: tpOrder.index,
-            tpPrice,
-            symbol,
-            exchange: 'ctrader',
-            error: insertErr instanceof Error ? insertErr.message : String(insertErr)
-          });
-          throw insertErr;
-        }
-      } catch (error) {
-        logger.error('Error placing cTrader take profit order', {
-          tradeId: trade.id,
-          symbol,
-          channel: trade.channel,
-          tpIndex: tpOrder.index,
-          tpPrice,
-          tpVolume,
-          positionId: positionIdStr,
-          exchange: 'ctrader',
-          error: error instanceof Error ? error.message : String(error)
-        });
-      }
-    }
-  } catch (error) {
-    logger.error('Error placing cTrader take profit orders', {
-      tradeId: trade.id,
-      symbol: normalizeCTraderSymbol(trade.trading_pair),
-      channel: trade.channel,
-      exchange: 'ctrader',
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
-};
-
-/**
- * Place breakeven stop-limit order for cTrader.
- * Uses stopPrice so the order activates only when price retraces to entry (not immediately).
- * A regular limit at entry would fill immediately when price is above/below entry.
- */
-const placeBreakevenLimitOrder = async (
-  trade: Trade,
-  ctraderClient: CTraderClient,
-  db: DatabaseManager,
-  isLong: boolean
-): Promise<void> => {
-  try {
-    const symbol = normalizeCTraderSymbol(trade.trading_pair);
-    
-    logger.debug('Getting position info for breakeven limit order', {
-      tradeId: trade.id,
-      symbol,
-      positionId: trade.position_id,
-      exchange: 'ctrader'
-    });
-    
-    // Get position info with retry logic (Gap #4)
-    let position: any = null;
-    let positionResponse: any[] = [];
-    const maxRetries = 3;
-    const retryDelay = 1000;
-    
-    for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      try {
-        positionResponse = await ctraderClient.getOpenPositions();
-        
-        logger.debug('Position API response received for breakeven order', {
-          tradeId: trade.id,
-          symbol,
-          positionsCount: positionResponse.length,
-          attempt,
-          maxRetries,
-          exchange: 'ctrader'
-        });
-
-        // Find the position
-        if (trade.position_id) {
-          position = positionResponse.find((p: any) => {
-            const positionId = p.positionId || p.id;
-            const positionSymbol = p.symbolName || p.symbol;
-            return positionSymbol === symbol && positionId?.toString() === trade.position_id;
-          });
-        }
-        
-        if (!position) {
-          const positions = positionResponse.filter((p: any) => {
-            const positionSymbol = p.symbolName || p.symbol;
-            const volume = Math.abs(p.volume || p.quantity || 0);
-            return positionSymbol === symbol && volume > 0;
-          });
-          if (positions.length > 0) {
-            position = positions[0];
-          }
-        }
-
-        if (position) {
-          logger.debug('Position found for breakeven order', {
-            tradeId: trade.id,
-            symbol,
-            positionId: (position.positionId || position.id)?.toString(),
-            volume: position.volume || position.quantity,
-            attempt,
-            exchange: 'ctrader'
-          });
-          break; // Found position, exit retry loop
-        }
-      } catch (error) {
-        logger.debug('Error getting positions for breakeven order, retrying', {
-          tradeId: trade.id,
-          symbol,
-          attempt,
-          maxRetries,
-          error: error instanceof Error ? error.message : String(error),
-          exchange: 'ctrader'
-        });
-      }
-      
-      // If this wasn't the last attempt, wait before retrying
-      if (attempt < maxRetries && !position) {
-        await sleep(retryDelay);
-      }
-    }
-
-    if (!position) {
-      logger.warn('No cTrader position found for breakeven limit order', {
-        tradeId: trade.id,
-        symbol,
-        positionId: trade.position_id,
-        attempts: maxRetries,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    const positionVolume = Math.abs(position.volume || position.quantity || 0);
-    if (positionVolume === 0) {
-      logger.warn('Position size is zero, cannot place breakeven limit order', {
-        tradeId: trade.id,
-        symbol,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    // Get symbol info for precision (Gap #3)
-    let symbolInfo: any;
-    try {
-      symbolInfo = await ctraderClient.getSymbolInfo(symbol);
-      logger.debug('Symbol info retrieved for breakeven order', {
-        tradeId: trade.id,
-        symbol,
-        symbolInfo: {
-          symbolId: symbolInfo.symbolId,
-          digits: symbolInfo.digits,
-          volumePrecision: symbolInfo.volumePrecision
-        },
-        exchange: 'ctrader'
-      });
-    } catch (error) {
-      logger.warn('Failed to get symbol info for breakeven order, using defaults', {
-        tradeId: trade.id,
-        symbol,
-        error: error instanceof Error ? error.message : String(error),
-        exchange: 'ctrader'
-      });
-      symbolInfo = {};
-    }
-
-    // Extract precision from symbol info
-    const pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : 5;
-    const quantityPrecision = symbolInfo.volumePrecision !== undefined ? symbolInfo.volumePrecision : 2;
-
-    // Use actual fill price for BE (often better than order price for entry ranges)
-    const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
-    const entryPrice = roundPrice(bePrice, pricePrecision, undefined);
-    
-    // Breakeven order side is opposite of position side (to close the position)
-    // For Long (Buy) position, breakeven order is Sell
-    // For Short (Sell) position, breakeven order is Buy
-    const breakevenSide = isLong ? 'SELL' : 'BUY';
-
-    // Round quantity (Gap #3)
-    const quantity = roundQuantity(positionVolume, quantityPrecision, false);
-
-    const breakevenPositionId = (position.positionId || position.id)?.toString() || trade.position_id;
-    if (!breakevenPositionId) {
-      logger.warn('Cannot place cTrader breakeven order without positionId - would create orphaned order', {
-        tradeId: trade.id,
-        symbol,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-
-    logger.info('Placing breakeven stop-limit order', {
-      tradeId: trade.id,
-      symbol,
-      entryPrice,
-      quantity,
-      side: breakevenSide,
-      positionVolume,
-      positionId: breakevenPositionId,
-      exchange: 'ctrader'
-    });
-
-    const orderId = await ctraderClient.placeStopLimitOrder({
-      symbol,
-      volume: quantity,
-      tradeSide: breakevenSide,
-      limitPrice: entryPrice,
-      stopPrice: entryPrice,
-      positionId: breakevenPositionId
-    });
-
-    if (orderId) {
-      // Store breakeven limit order in database
-      try {
-        await db.insertOrder({
-          trade_id: trade.id,
-          order_type: 'breakeven_limit',
-          order_id: orderId,
-          price: entryPrice,
-          quantity: positionVolume,
-          status: 'pending'
-        });
-      } catch (insertErr) {
-        logger.error('cTrader breakeven order placed on exchange but failed to save to DB - order may be orphaned', {
-          tradeId: trade.id,
-          orderId,
-          symbol,
-          entryPrice,
-          exchange: 'ctrader',
-          error: insertErr instanceof Error ? insertErr.message : String(insertErr)
-        });
-        throw insertErr;
-      }
-
-      logger.info('Breakeven stop-limit order placed successfully', {
-        tradeId: trade.id,
-        symbol,
-        orderId,
-        entryPrice,
-        quantity,
-        exchange: 'ctrader'
-      });
-    } else {
-      logger.error('Failed to place breakeven stop-limit order - no order ID returned', {
-        tradeId: trade.id,
-        symbol,
-        entryPrice,
-        quantity,
-        exchange: 'ctrader'
-      });
-    }
-  } catch (error) {
-    logger.error('Failed to place breakeven stop-limit order', {
-      tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error),
-      exchange: 'ctrader'
-    });
-  }
-};
-
-/**
  * Monitor a single cTrader trade
  */
 const monitorTrade = async (
@@ -1661,9 +745,7 @@ const monitorTrade = async (
   db: DatabaseManager,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider: HistoricalPriceProvider | undefined,
-  breakevenAfterTPs: number,
-  useLimitOrderForBreakeven: boolean = false
+  priceProvider: HistoricalPriceProvider | undefined
 ): Promise<void> => {
   const timings: Record<string, number> = {};
   let t0 = Date.now();
@@ -1684,7 +766,7 @@ const monitorTrade = async (
     t0 = Date.now();
     if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
       timings.checkTradeExpired = Date.now() - t0;
-      logger.info('cTrader trade expired - cancelling order', {
+      logger.info('cTrader trade expired - cancelling order and sibling trades', {
         tradeId: trade.id,
         orderId: trade.order_id,
         channel: trade.channel,
@@ -1696,6 +778,19 @@ const monitorTrade = async (
       });
       await cancelOrder(trade, ctraderClient);
       await cancelTrade(trade, db);
+      // Cancel sibling trades (N-trades from same message) - cancel their entry orders and mark cancelled
+      const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
+        .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
+      for (const sibling of siblings) {
+        await cancelOrder(sibling, ctraderClient);
+        await cancelTrade(sibling, db);
+        logger.info('cTrader sibling trade cancelled on expiry', {
+          siblingTradeId: sibling.id,
+          messageId: trade.message_id,
+          channel: trade.channel,
+          exchange: 'ctrader'
+        });
+      }
       return;
     }
     timings.checkTradeExpired = Date.now() - t0;
@@ -1747,18 +842,6 @@ const monitorTrade = async (
           trade.position_id = positionId?.toString();
 
           await updateEntryOrderToFilled(trade, db, fillTime, fillPrice > 0 ? fillPrice : undefined);
-          await Promise.race([
-            placeTakeProfitOrders(trade, ctraderClient, db),
-            new Promise<void>((_, reject) =>
-              setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
-          ]).catch(err => {
-            logger.warn('TP placement timed out or failed - will retry next poll', {
-              tradeId: trade.id,
-              channel: trade.channel,
-              exchange: 'ctrader',
-              error: err instanceof Error ? err.message : String(err)
-            });
-          });
         }
       } catch (error) {
         logger.debug('Error checking cTrader positions for pending trade', {
@@ -1788,7 +871,7 @@ const monitorTrade = async (
       const isLong = getIsLong(trade);
       
       if (checkSLHitBeforeEntry(trade, currentPrice)) {
-        logger.info('Price hit SL before entry - cancelling cTrader order', {
+        logger.info('Price hit SL before entry - cancelling cTrader order and sibling trades', {
           tradeId: trade.id,
           currentPrice,
           stopLoss: trade.stop_loss,
@@ -1797,6 +880,12 @@ const monitorTrade = async (
         });
         await cancelOrder(trade, ctraderClient);
         await cancelTrade(trade, db);
+        const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
+          .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
+        for (const sibling of siblings) {
+          await cancelOrder(sibling, ctraderClient);
+          await cancelTrade(sibling, db);
+        }
         return;
       }
 
@@ -1859,60 +948,12 @@ const monitorTrade = async (
         }
 
         await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
-        await Promise.race([
-          placeTakeProfitOrders(trade, ctraderClient, db),
-          new Promise<void>((_, reject) =>
-            setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
-        ]).catch(err => {
-          logger.warn('TP placement timed out or failed - will retry next poll', {
-            tradeId: trade.id,
-            channel: trade.channel,
-            exchange: 'ctrader',
-            error: err instanceof Error ? err.message : String(err)
-          });
-        });
       }
     }
 
     // Monitor active trades
     if (trade.status === 'active' || trade.status === 'filled') {
       const orders = await db.getOrdersByTradeId(trade.id);
-
-      // Retry TP placement if entry filled but we have fewer TPs than expected
-      // Handles: initial placement failed, partial placement failed, monitor was down when entry filled
-      // cTrader: best TP is on position (not in DB); only non-best TPs are limit orders in DB.
-      // When validation consolidates to 1 TP (all non-best round to 0), we insert a position-TP marker.
-      if (trade.entry_filled_at && ctraderClient) {
-        const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
-        if (takeProfits.length > 0) {
-          const tpOrders = orders.filter((o) => o.order_type === 'take_profit');
-          const tpCount = tpOrders.length;
-          const nonBestCount = Math.max(0, takeProfits.length - 1);
-          const hasPositionTpMarker = tpOrders.some((o) => o.order_id === 'ctrader_position_tp');
-          const expectedMet = tpCount >= nonBestCount || (tpCount >= 1 && hasPositionTpMarker);
-          if (!expectedMet) {
-            logger.info('Retrying TP placement - active trade has fewer TPs than expected', {
-              tradeId: trade.id,
-              tpCount,
-              expectedCount: nonBestCount,
-              hasPositionTpMarker,
-              exchange: 'ctrader'
-            });
-            await Promise.race([
-              placeTakeProfitOrders(trade, ctraderClient, db),
-              new Promise<void>((_, reject) =>
-                setTimeout(() => reject(new Error(`TP placement timeout after ${TP_PLACEMENT_TIMEOUT_MS}ms`)), TP_PLACEMENT_TIMEOUT_MS))
-            ]).catch(err => {
-              logger.warn('TP placement timed out or failed - will retry next poll', {
-                tradeId: trade.id,
-                channel: trade.channel,
-                exchange: 'ctrader',
-                error: err instanceof Error ? err.message : String(err)
-              });
-            });
-          }
-        }
-      }
 
       // Check SL/TP orders for fills
       const pendingOrders = orders.filter(o => o.status === 'pending');
@@ -1972,113 +1013,23 @@ const monitorTrade = async (
           if (order.order_type === 'stop_loss') {
             await updateTradeOnStopLossHit(trade, db, orderResult.filledPrice);
           }
-          
-          if (order.order_type === 'breakeven_limit') {
-            await updateTradeOnBreakevenFilled(trade, db, orderResult.filledPrice || trade.entry_price);
-          }
         }
       }
       timings.checkOrderFillsLoop = Date.now() - t0;
 
       // Check if position is closed (pass db for fallback when position_id missing - detects orphans)
       t0 = Date.now();
-      const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider, db);
+      const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
       timings.checkPositionClosed = Date.now() - t0;
-      if (positionResult.closed) {
+        if (positionResult.closed) {
         logger.info('cTrader position closed', {
           tradeId: trade.id,
           exitPrice: positionResult.exitPrice,
           pnl: positionResult.pnl,
           exchange: 'ctrader'
         });
-        // Cancel any pending TP/SL/breakeven orders - cTrader does not auto-cancel them when position closes
-        if (ctraderClient) {
-          t0 = Date.now();
-          await cancelCTraderPendingOrders(trade, db, ctraderClient);
-          timings.cancelPendingOrders = Date.now() - t0;
-        }
         await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
         return;
-      }
-      
-      const isLong = getIsLong(trade);
-      const filledTPCount = await countFilledTakeProfits(trade, db);
-
-      // Check if we've hit the required number of TPs to move to breakeven
-      if (filledTPCount >= breakevenAfterTPs && !trade.stop_loss_breakeven) {
-        const existingBreakevenOrder = await getBreakevenLimitOrder(trade, db);
-
-        if (useLimitOrderForBreakeven) {
-          // Create limit order at entry price instead of moving stop loss (Gap #1)
-          if (!existingBreakevenOrder && ctraderClient) {
-            logger.info('Required take profits hit - creating cTrader breakeven limit order at entry price', {
-              tradeId: trade.id,
-              filledTPCount,
-              breakevenAfterTPs,
-              entryPrice: trade.entry_price,
-              exchange: 'ctrader'
-            });
-            
-            try {
-              await placeBreakevenLimitOrder(trade, ctraderClient, db, isLong);
-              await db.updateTrade(trade.id, {
-                stop_loss_breakeven: true
-              });
-            } catch (error) {
-              logger.warn('cTrader breakeven limit order placement failed - will retry on next poll', {
-                tradeId: trade.id,
-                exchange: 'ctrader',
-                error: error instanceof Error ? error.message : String(error)
-              });
-            }
-          } else if (existingBreakevenOrder) {
-            logger.debug('cTrader breakeven limit order already exists', {
-              tradeId: trade.id,
-              orderId: existingBreakevenOrder.order_id,
-              exchange: 'ctrader'
-            });
-            await db.updateTrade(trade.id, {
-              stop_loss_breakeven: true
-            });
-          }
-        } else {
-          // Move stop loss to actual fill price (often better than order price for entry ranges)
-          const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
-          logger.info('Required take profits hit - moving cTrader stop loss to breakeven', {
-            tradeId: trade.id,
-            filledTPCount,
-            breakevenAfterTPs,
-            bePrice,
-            orderPrice: trade.entry_price,
-            exchange: 'ctrader'
-          });
-          
-          if (trade.position_id && ctraderClient) {
-            try {
-              await ctraderClient.modifyPosition({
-                positionId: trade.position_id,
-                stopLoss: bePrice
-              });
-              await db.updateTrade(trade.id, {
-                stop_loss: bePrice,
-                stop_loss_breakeven: true
-              });
-            } catch (error) {
-              logger.warn('cTrader stop loss move to breakeven failed - will retry on next poll', {
-                tradeId: trade.id,
-                exchange: 'ctrader',
-                error: error instanceof Error ? error.message : String(error)
-              });
-            }
-          } else {
-            logger.warn('Cannot move cTrader SL to breakeven - missing position_id or client, will retry on next poll', {
-              tradeId: trade.id,
-              hasPositionId: !!trade.position_id,
-              hasClient: !!ctraderClient,
-              exchange: 'ctrader'
-            });
-          }
-        }
       }
 
       // Check if stop loss is hit
@@ -2090,11 +1041,8 @@ const monitorTrade = async (
           exchange: 'ctrader'
         });
         
-        const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider, db);
+        const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
         if (stopLossResult.closed) {
-          if (ctraderClient) {
-            await cancelCTraderPendingOrders(trade, db, ctraderClient);
-          }
           await updateTradeOnStopLossHit(trade, db, stopLossResult.exitPrice, stopLossResult.pnl);
         } else {
           await db.updateTrade(trade.id, { status: 'stopped' });
@@ -2181,26 +1129,12 @@ export const startCTraderMonitor = async (
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
-  const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1;
-  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false;
-  const closeOrphanPositions = monitorConfig.closeOrphanPositions ?? false;
-  const closeOrphanPositionsGraceMinutes = monitorConfig.closeOrphanPositionsGraceMinutes ?? 2;
 
   const monitorLoop = async (): Promise<void> => {
     const isMaxSpeed = speedMultiplier !== undefined && (speedMultiplier === 0 || speedMultiplier === Infinity || !isFinite(speedMultiplier));
     
     while (running) {
       try {
-        if (closeOrphanPositions) {
-          const getClient = getCTraderClient ?? (async () => ctraderClient);
-          await checkAndCloseOrphanPositions(
-            db,
-            getClient,
-            closeOrphanPositions,
-            closeOrphanPositionsGraceMinutes
-          );
-        }
-
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'ctrader');
         
         // Process each trade in parallel with per-trade timeout - prevents one stuck trade from blocking others
@@ -2224,9 +1158,7 @@ export const startCTraderMonitor = async (
               db,
               accountCTraderClient,
               isSimulation,
-              priceProvider,
-              breakevenAfterTPs,
-              useLimitOrderForBreakeven
+              priceProvider
             ),
             new Promise<void>((_, reject) =>
               setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)

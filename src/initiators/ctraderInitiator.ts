@@ -1043,19 +1043,53 @@ const executeTradeForAccount = async (
       }
     }
     
-    // Place order
-    let orderId: string;
+    // Place order (assigned in N-trades path or single-order path below)
+    let orderId!: string;
+    /** When using N trades (one per TP), each trade has its own order with SL+TP - no separate TP orders */
+    let nTradeData: { tradeIds: number[]; orderIds: string[]; quantities: number[]; tpPrices: number[] } | undefined;
     if (isSimulation) {
-      orderId = `SIM-${Date.now()}-${Math.random().toString(36).substring(7)}`;
-      logger.info('Simulation mode: Trade created', {
-        channel,
-        accountName: accountName || 'default',
-        orderId,
-        symbol,
-        tradeSide,
-        qty,
-        entryPrice: roundedEntryPrice
-      });
+      if (roundedTPPrices && roundedTPPrices.length > 1 && roundedStopLoss && roundedStopLoss > 0) {
+        const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision);
+        const validTPOrders = validateAndRedistributeTPQuantities(
+          tpQuantities,
+          roundedTPPrices,
+          qty,
+          volumeStep,
+          minOrderVolume,
+          maxOrderVolume,
+          decimalPrecision
+        );
+        if (validTPOrders.length > 0) {
+          const orderIds = validTPOrders.map((_, i) =>
+            `SIM-${Date.now()}-${i}-${Math.random().toString(36).substring(7)}`
+          );
+          orderId = orderIds[0];
+          nTradeData = {
+            tradeIds: [],
+            orderIds,
+            quantities: validTPOrders.map((tp) => tp.quantity),
+            tpPrices: validTPOrders.map((tp) => tp.price)
+          };
+        } else {
+          orderId = `SIM-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+          logger.info('Simulation N-trades skipped - validation returned no valid TP orders, using single trade', {
+            channel,
+            symbol,
+            exchange: 'ctrader'
+          });
+        }
+      } else {
+        orderId = `SIM-${Date.now()}-${Math.random().toString(36).substring(7)}`;
+        logger.info('Simulation mode: Trade created', {
+          channel,
+          accountName: accountName || 'default',
+          orderId,
+          symbol,
+          tradeSide,
+          qty,
+          entryPrice: roundedEntryPrice
+        });
+      }
     } else if (ctraderClient) {
       // Require lotSize for correct volume conversion (base units → lots)
       if (lotSize == null || lotSize <= 0) {
@@ -1068,15 +1102,139 @@ const executeTradeForAccount = async (
         // useLimitOrderForEntry: true (default) = convert market to limit at current price (like Bybit)
         // useLimitOrderForEntry: false = use actual market order with relative SL/TP (cTrader rejects absolute on MARKET)
         const useLimit = useLimitOrderForEntry !== false;
-        if (isMarketOrder && useLimit) {
+        const limitPrice = (isMarketOrder && useLimit ? currentPriceForMarketOrder : null) ?? roundedEntryPrice;
+
+        // N-trades path: one trade per TP, each order has SL+TP - works for both limit and market
+        // Reuse TP quantity logic: distribute + validate (volumeStep, min/max, redistribution when slices too small)
+        if (
+          roundedTPPrices &&
+          roundedTPPrices.length > 1 &&
+          roundedStopLoss &&
+          roundedStopLoss > 0
+        ) {
+          const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision);
+          const validTPOrders = validateAndRedistributeTPQuantities(
+            tpQuantities,
+            roundedTPPrices,
+            qty,
+            volumeStep,
+            minOrderVolume,
+            maxOrderVolume,
+            decimalPrecision
+          );
+          if (validTPOrders.length > 0) {
+            const label = `tgr-${channel}-${message.message_id}`.slice(0, 100);
+            const ids: string[] = [];
+            const quantities = validTPOrders.map((tp) => tp.quantity);
+
+            if (useLimit) {
+              for (const tp of validTPOrders) {
+                const sid = await ctraderClient.placeLimitOrder({
+                  symbol,
+                  volume: tp.quantity,
+                  tradeSide,
+                  price: limitPrice,
+                  stopLoss: roundedStopLoss,
+                  takeProfit: tp.price,
+                  label
+                });
+                ids.push(sid);
+              }
+              logger.info('cTrader N-trades placed (limit, one per TP)', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                tradeCount: ids.length,
+                quantities,
+                label,
+                exchange: 'ctrader'
+              });
+            } else {
+              // Market: each order with relative SL + relative TP for that TP level
+              if (currentPriceForMarketOrder == null || currentPriceForMarketOrder <= 0) {
+                throw new Error(
+                  `Cannot place cTrader market N-trades: could not fetch current price for ${symbol}. ` +
+                  'Need current price for relative SL/TP.'
+                );
+              }
+              const cp = currentPriceForMarketOrder;
+              const isLong = order.signalType === 'long';
+              const digits = pricePrecision ?? getDecimalPrecision(cp);
+              for (const tp of validTPOrders) {
+                let relativeSl: number | undefined;
+                let relativeTp: number | undefined;
+                if (roundedStopLoss > 0) {
+                  const slValid = isLong ? roundedStopLoss < cp : roundedStopLoss > cp;
+                  if (slValid) {
+                    const slDiff = isLong ? cp - roundedStopLoss : roundedStopLoss - cp;
+                    relativeSl = toRelativeSlTp(slDiff, digits);
+                  }
+                }
+                const tpValid = isLong ? tp.price > cp : tp.price < cp;
+                if (tpValid) {
+                  const tpDiff = isLong ? tp.price - cp : cp - tp.price;
+                  relativeTp = toRelativeSlTp(tpDiff, digits);
+                }
+                if (relativeSl == null && roundedStopLoss > 0) {
+                  throw new Error(
+                    `Cannot place cTrader market order: stop loss invalid relative to current price ${cp}`
+                  );
+                }
+                if (relativeTp == null) {
+                  throw new Error(
+                    `Cannot place cTrader market order: TP ${tp.price} invalid relative to current price ${cp}`
+                  );
+                }
+                const sid = await ctraderClient.placeMarketOrder({
+                  symbol,
+                  volume: tp.quantity,
+                  tradeSide,
+                  ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
+                  label
+                });
+                ids.push(sid);
+              }
+              logger.info('cTrader N-trades placed (market, one per TP)', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                tradeCount: ids.length,
+                quantities,
+                label,
+                exchange: 'ctrader'
+              });
+            }
+
+            orderId = ids[0];
+            nTradeData = {
+              tradeIds: [],
+              orderIds: ids,
+              quantities,
+              tpPrices: validTPOrders.map((tp) => tp.price)
+            };
+          } else {
+            logger.info('N-trades skipped - validation returned no valid TP orders', {
+              channel,
+              symbol,
+              accountName: accountName || 'default',
+              tpQuantities,
+              minOrderVolume: minOrderVolume ?? 0,
+              exchange: 'ctrader'
+            });
+          }
+        }
+
+        if (!nTradeData) {
+          if (isMarketOrder && useLimit) {
           // Convert market to limit at current price for predictable cost and SL/TP support
-          const limitPrice = currentPriceForMarketOrder ?? roundedEntryPrice;
+          const marketLimitPrice = currentPriceForMarketOrder ?? roundedEntryPrice;
           logger.info('Placing cTrader limit order (market converted)', {
             channel,
             symbol,
             volume: qty,
             tradeSide,
-            price: limitPrice,
+            price: marketLimitPrice,
             accountName: accountName || 'default',
             exchange: 'ctrader'
           });
@@ -1084,7 +1242,7 @@ const executeTradeForAccount = async (
             symbol,
             volume: qty,
             tradeSide,
-            price: limitPrice
+            price: marketLimitPrice
           });
         } else if (isMarketOrder && !useLimit) {
           // Actual market order: must use relative SL/TP (absolute rejected by cTrader)
@@ -1143,6 +1301,7 @@ const executeTradeForAccount = async (
             ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
           });
         } else {
+          // Limit order at entry price
           logger.info('Placing cTrader limit order', {
             channel,
             symbol,
@@ -1158,6 +1317,7 @@ const executeTradeForAccount = async (
             tradeSide,
             price: roundedEntryPrice
           });
+        }
         }
         logger.info('cTrader order placed', {
           channel,
@@ -1187,42 +1347,78 @@ const executeTradeForAccount = async (
     const nowUtc = dayjs().toISOString();
     const expiresAt = dayjs(nowUtc).add(entryTimeoutMinutes, 'minutes').toISOString();
 
-    // Insert trade record early so we can update it if needed
-    try {
-      tradeId = await db.insertTrade({
-        channel,
-        message_id: message.message_id,
-        created_at: nowUtc,
-        trading_pair: order.tradingPair,
-        direction: order.signalType, // long/short
-        entry_price: roundedEntryPrice,
-        stop_loss: roundedStopLoss || order.stopLoss,
-        take_profits: JSON.stringify(roundedTPPrices || deduplicatedTPs),
-        leverage: effectiveLeverage,
-        quantity: qty,
-        risk_percentage: riskPercentage,
-        exchange: 'ctrader',
-        account_name: accountName || undefined,
-        order_id: orderId,
-        entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
-        status: 'pending',
-        stop_loss_breakeven: false,
-        expires_at: expiresAt
-      });
-    } catch (error) {
-      logger.warn('Failed to insert trade record early', {
-        channel,
-        symbol,
-        accountName: accountName || 'default',
-        orderId,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      // Continue anyway - we'll insert it later
+    // Insert trade record(s) early so we can update if needed
+    if (nTradeData) {
+      try {
+        for (let i = 0; i < nTradeData.orderIds.length; i++) {
+          const tid = await db.insertTrade({
+            channel,
+            message_id: message.message_id,
+            created_at: nowUtc,
+            trading_pair: order.tradingPair,
+            direction: order.signalType,
+            entry_price: roundedEntryPrice,
+            stop_loss: roundedStopLoss || order.stopLoss,
+            take_profits: JSON.stringify([nTradeData.tpPrices[i]]),
+            leverage: effectiveLeverage,
+            quantity: nTradeData.quantities[i],
+            risk_percentage: riskPercentage,
+            exchange: 'ctrader',
+            account_name: accountName || undefined,
+            order_id: nTradeData.orderIds[i],
+            entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
+            status: 'pending',
+            stop_loss_breakeven: false,
+            expires_at: expiresAt
+          });
+          nTradeData.tradeIds.push(tid);
+        }
+        tradeId = nTradeData.tradeIds[0];
+      } catch (error) {
+        logger.error('Failed to insert N-trade records - cannot proceed', {
+          channel,
+          symbol,
+          accountName: accountName || 'default',
+          error: error instanceof Error ? error.message : String(error)
+        });
+        throw error;
+      }
+    } else {
+      try {
+        tradeId = await db.insertTrade({
+          channel,
+          message_id: message.message_id,
+          created_at: nowUtc,
+          trading_pair: order.tradingPair,
+          direction: order.signalType, // long/short
+          entry_price: roundedEntryPrice,
+          stop_loss: roundedStopLoss || order.stopLoss,
+          take_profits: JSON.stringify(roundedTPPrices || deduplicatedTPs),
+          leverage: effectiveLeverage,
+          quantity: qty,
+          risk_percentage: riskPercentage,
+          exchange: 'ctrader',
+          account_name: accountName || undefined,
+          order_id: orderId,
+          entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
+          status: 'pending',
+          stop_loss_breakeven: false,
+          expires_at: expiresAt
+        });
+      } catch (error) {
+        logger.warn('Failed to insert trade record early', {
+          channel,
+          symbol,
+          accountName: accountName || 'default',
+          orderId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
     }
 
     // Verify stop loss was set, or set it separately if initial order didn't support it (Gap #7)
-    // Note: For limit orders, we can't verify until position exists, so we'll set it separately if needed
-    if (order.stopLoss && order.stopLoss > 0 && !isSimulation && ctraderClient) {
+    // Skip for N-trades - SL is already on each order
+    if (!nTradeData && order.stopLoss && order.stopLoss > 0 && !isSimulation && ctraderClient) {
       // Check if entry order has already filled (market orders or fast-filling limit orders)
       // Resolve position by orderId via deals (exact match) - avoids wrong position when multiple exist per symbol
       let entryFilled = false;
@@ -1322,11 +1518,12 @@ const executeTradeForAccount = async (
     }
 
     // Place take profit orders for market orders (immediate TP placement when entry fills) (Gap #8)
+    // Skip for N-trades - TP is already on each order
     // NOTE: For limit orders that may take hours/days to fill, TP orders are placed by the trade monitor
     // after the entry order fills. This prevents TP orders from being placed before a position exists.
     // Only place TP orders immediately if this was originally a market order (now limit with IOC, fills immediately)
     
-    if (order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder && !isSimulation && ctraderClient) {
+    if (!nTradeData && order.takeProfits && order.takeProfits.length > 0 && roundedTPPrices && isMarketOrder && !isSimulation && ctraderClient) {
       // For limit orders with IOC timeInForce (originally market orders), check if we have a position immediately
       let positionSide: 'BUY' | 'SELL' | null = null;
       let actualEntryPrice: number | undefined;
@@ -1763,18 +1960,32 @@ const executeTradeForAccount = async (
     // TypeScript type guard: tradeId is now guaranteed to be a number
     const finalTradeId: number = tradeId;
 
-    // Store entry order
-    await db.insertOrder({
-      trade_id: finalTradeId,
-      order_type: 'entry',
-      order_id: orderId,
-      price: roundedEntryPrice,
-      quantity: qty,
-      status: 'pending'
-    });
+    // Store entry order(s)
+    if (nTradeData && nTradeData.tradeIds.length > 0) {
+      for (let i = 0; i < nTradeData.tradeIds.length; i++) {
+        await db.insertOrder({
+          trade_id: nTradeData.tradeIds[i],
+          order_type: 'entry',
+          order_id: nTradeData.orderIds[i],
+          price: roundedEntryPrice,
+          quantity: nTradeData.quantities[i],
+          tp_index: i + 1,
+          status: 'pending'
+        });
+      }
+    } else {
+      await db.insertOrder({
+        trade_id: finalTradeId,
+        order_type: 'entry',
+        order_id: orderId,
+        price: roundedEntryPrice,
+        quantity: qty,
+        status: 'pending'
+      });
+    }
 
-    // Store take profit orders (only for simulation - real TPs are placed above for market orders)
-    if (isSimulation) {
+    // Store take profit orders (only for simulation, single-trade - N-trades have TP on each order)
+    if (isSimulation && !nTradeData) {
       for (let i = 0; i < deduplicatedTPs.length; i++) {
         const tpPrice = deduplicatedTPs[i];
         const tpQty = qty / deduplicatedTPs.length; // Distribute quantity evenly

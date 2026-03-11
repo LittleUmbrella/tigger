@@ -46,7 +46,7 @@ export interface Trade {
   exchange: string;
   account_name?: string; // Account name that executed this trade (from accounts config)
   order_id?: string;
-  position_id?: string; // Bybit position ID after entry is filled
+  position_id?: string;
   entry_order_type?: 'market' | 'limit'; // Type of entry order (market or limit)
   direction?: 'long' | 'short'; // Trade direction: long or short
   status: 'pending' | 'active' | 'filled' | 'cancelled' | 'stopped' | 'completed' | 'closed';
@@ -690,7 +690,7 @@ class SQLiteAdapter implements DatabaseAdapter {
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
     `);
     const params = [
       trade.message_id,
