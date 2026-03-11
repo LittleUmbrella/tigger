@@ -62,6 +62,12 @@ export async function cancelCTraderPendingOrders(
           if (orderIdStr) orderIdsToCancel.add(orderIdStr);
         }
       }
+    } else {
+      logger.warn('Skipping cTrader reconciliation - trade has no position_id, orders on exchange may be orphaned', {
+        tradeId: trade.id,
+        pendingDbOrderCount: pendingToCancel.length,
+        exchange: 'ctrader'
+      });
     }
   } catch (error) {
     logger.warn('Failed to fetch exchange orders for reconciliation (will cancel DB orders only)', {

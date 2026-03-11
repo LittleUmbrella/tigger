@@ -1365,9 +1365,12 @@ const executeTradeForAccount = async (
         });
       }
       
-      if (positionSide && positionId) {
+      const positionIdStr = positionId != null
+        ? String(protobufLongToNumber(positionId) ?? positionId)
+        : '';
+      if (positionSide && positionIdStr) {
         // Only place TP orders if entry order has filled and we have position side
-        
+
         // Check if TP orders already exist in database before placing on exchange
         // This prevents race conditions with the monitor that also places TP orders
         let shouldPlaceTPOrders = true;
@@ -1646,7 +1649,7 @@ const executeTradeForAccount = async (
                   volume: volumeLots,
                   tradeSide: tpSide,
                   price: tpOrder.price,
-                  positionId // Link to position (reduce-only-like guard - order modifies this position, not a new one)
+                  positionId: positionIdStr // Link to position (reduce-only-like guard - order modifies this position, not a new one)
                 });
                 
                 tpOrderIds.push({
@@ -1665,7 +1668,7 @@ const executeTradeForAccount = async (
                   tpPrice: tpOrder.price,
                   tpQuantity: tpOrder.quantity,
                   tradeId,
-                  positionId,
+                  positionId: positionIdStr,
                   exchange: 'ctrader'
                 });
               } catch (error) {
@@ -1676,7 +1679,7 @@ const executeTradeForAccount = async (
                   tpIndex: tpOrder.index,
                   tpPrice: tpOrder.price,
                   tradeId,
-                  positionId,
+                  positionId: positionIdStr,
                   exchange: 'ctrader',
                   ...serializeError(error)
                 });
@@ -1698,10 +1701,13 @@ const executeTradeForAccount = async (
                     status: 'pending'
                   });
                 } catch (error) {
-                  logger.warn('Failed to store TP order in database', {
+                  logger.error('cTrader TP order placed on exchange but failed to save to DB - order may be orphaned', {
                     tradeId,
                     accountName: accountName || 'default',
                     tpOrderId: tpOrder.orderId,
+                    tpIndex: tpOrder.index,
+                    tpPrice: tpOrder.price,
+                    exchange: 'ctrader',
                     error: error instanceof Error ? error.message : String(error)
                   });
                 }
@@ -1709,7 +1715,7 @@ const executeTradeForAccount = async (
               await db.updateTrade(tradeId, {
                 status: 'active',
                 entry_filled_at: dayjs().toISOString(),
-                position_id: String(positionId)
+                position_id: positionIdStr
               });
             }
             }
