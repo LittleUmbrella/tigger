@@ -690,7 +690,7 @@ class SQLiteAdapter implements DatabaseAdapter {
         entry_filled_at, exit_price, exit_filled_at, pnl, pnl_percentage,
         stop_loss_breakeven, expires_at, created_at, updated_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${created_at ? '?' : 'CURRENT_TIMESTAMP'}, CURRENT_TIMESTAMP)
     `);
     const params = [
       trade.message_id,
