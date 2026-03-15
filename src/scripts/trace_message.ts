@@ -22,6 +22,7 @@ import { BotConfig, AccountConfig } from '../types/config.js';
 import fs from 'fs-extra';
 import dotenv from 'dotenv';
 import { parseMessage } from '../parsers/signalParser.js';
+import { parseManagementCommand } from '../managers/index.js';
 import { validateBybitSymbol } from '../initiators/symbolValidator.js';
 import dayjs from 'dayjs';
 import path from 'path';
@@ -258,8 +259,17 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
         parserName: parserName || '(none)',
         note: 'Verify parser against full content above - truncated display can lead to incorrect conclusions.'
       };
+      // Check if it's a management command (e.g. "secure half and hold with BE")
+      const managementCommand = await parseManagementCommand(message.content, undefined, message, db);
+      if (managementCommand) {
+        steps[1].details.managementCommandDetected = true;
+        steps[1].details.managementCommandType = managementCommand.type;
+        steps[1].details.managementCommandNote = 'Management commands modify existing trades; they do not create new trades. Orders (partial close, SL update) are not linked to the message in DB. Check Loggly for messageId around message timestamp to verify if processed.';
+        recommendations.push(`This appears to be a management command (${managementCommand.type}). It may have triggered orders on existing trades (partial close, SL to breakeven). Management commands are not linked in DB - check Loggly for messageId:${messageId} channel:${channel} around message time to verify.`);
+      } else {
+        recommendations.push('Message may not be a trade signal (could be management command or unrelated message)');
+      }
       recommendations.push('Check parser configuration for this channel');
-      recommendations.push('Message may not be a trade signal (could be management command or unrelated message)');
       recommendations.push('Full message content is in trace details - verify the parser against it (e.g. npx tsx src/scripts/query_message.ts <id> <channel>)');
       return {
         messageId,

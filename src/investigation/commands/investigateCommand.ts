@@ -17,6 +17,8 @@ import { logger } from '../../utils/logger.js';
 import { traceMessage } from '../../scripts/trace_message.js';
 import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
 import { queryCTraderOrdersForMessage } from '../utils/ctraderOrderQuery.js';
+import { queryCTraderClosingDeals } from '../utils/ctraderManagementExecution.js';
+import { queryBybitClosingExecutions } from '../utils/bybitManagementExecution.js';
 import { getGoldPriceComparison, getGoldPriceComparisonForCTrader } from '../utils/goldPriceCheck.js';
 import { validateBybitSymbol, validateCTraderSymbol } from '../../initiators/symbolValidator.js';
 import fs from 'fs-extra';
@@ -155,6 +157,64 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       try {
         const traceResult = await traceMessage(msgId, ch);
         
+        // When parsing fails with management command, confirm execution (cTrader API first, then Loggly)
+        const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Message Parsing'));
+        if (traceResult.failurePoint === 'Message Parsing' && parsingStep?.details?.managementCommandDetected && ch) {
+          const messageStep = traceResult.steps?.find((s: any) => s.step?.includes('Message Storage'));
+          const timestamp = messageStep?.details?.date || messageStep?.timestamp || new Date().toISOString();
+          const centerMs = new Date(timestamp).getTime();
+          const windowMinutes = 15;
+
+          // Exchange API: query closing deals/executions to confirm positions were modified
+          const isCTrader = await isCTraderChannel(ch);
+          const fromTs = centerMs - windowMinutes * 60 * 1000;
+          const toTs = centerMs + windowMinutes * 60 * 1000;
+          if (isCTrader && ctx.getCTraderClient) {
+            try {
+              const ctraderClient = await ctx.getCTraderClient();
+              if (ctraderClient) {
+                const ctraderResult = await queryCTraderClosingDeals(ctraderClient, fromTs, toTs);
+                (traceResult as any).ctraderManagementExecution = ctraderResult;
+              }
+            } catch {
+              /* ignore */
+            }
+          } else if (ctx.getBybitClient) {
+            try {
+              const bybitClient = await ctx.getBybitClient();
+              if (bybitClient) {
+                const bybitResult = await queryBybitClosingExecutions(bybitClient, fromTs, toTs);
+                (traceResult as any).bybitManagementExecution = bybitResult;
+              }
+            } catch {
+              /* ignore */
+            }
+          }
+
+          // Loggly fallback when cTrader not available or for additional confirmation
+          if (ctx.logglyClient) {
+            try {
+              const timeRange = {
+                from: new Date(centerMs - 30 * 60 * 1000).toISOString(),
+                until: new Date(centerMs + 30 * 60 * 1000).toISOString()
+              };
+              const mgmtQuery = `json.channel:${ch} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader")`;
+              const mgmtResult = await ctx.logglyClient.search({
+                query: mgmtQuery,
+                from: timeRange.from,
+                until: timeRange.until,
+                size: 50
+              });
+              (traceResult as any).managementExecutionLogs = {
+                total_events: mgmtResult.total_events ?? 0,
+                events: mgmtResult.events ?? []
+              };
+            } catch {
+              /* ignore */
+            }
+          }
+        }
+        
         return {
           success: !traceResult.failurePoint,
           message: traceResult.failurePoint 
@@ -284,11 +344,32 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           /* ignore */
         }
 
+        // When management command detected, query for execution logs (positions modified on exchange)
+        let managementExecutionLogs: { total_events: number; events: any[] } = { total_events: 0, events: [] };
+        const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Message Parsing'));
+        if (parsingStep?.details?.managementCommandDetected && channel) {
+          try {
+            const mgmtQuery = `json.channel:${channel} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader")`;
+            const mgmtResult = await ctx.logglyClient!.search({
+              query: mgmtQuery,
+              from: timeRange.from,
+              until: timeRange.until,
+              size: 50
+            });
+            managementExecutionLogs = {
+              total_events: mgmtResult.total_events ?? 0,
+              events: mgmtResult.events ?? []
+            };
+          } catch {
+            /* ignore */
+          }
+        }
+
         const queryUsed = `json.messageId:${messageId} AND json.channel:${channel || ''}`;
         const orderLogsTotal = Object.values(orderLogsByOrderId).reduce((s, o) => s + o.total_events, 0);
         return {
           success: true,
-          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors, ${orderLogsTotal} order logs, ${tpPlacementLogs.total_events} TP placement logs`,
+          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors, ${orderLogsTotal} order logs, ${tpPlacementLogs.total_events} TP placement logs${managementExecutionLogs.total_events > 0 ? `, ${managementExecutionLogs.total_events} management execution logs` : ''}`,
           data: {
             messageLogs,
             messageScopedErrors,
@@ -296,6 +377,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             bybitErrors,
             orderLogsByOrderId,
             tpPlacementLogs,
+            managementExecutionLogs,
             searchParams: { query: queryUsed, from: timeRange.from, until: timeRange.until }
           }
         };
@@ -1117,6 +1199,43 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           if (fullContent) {
             findings.push(`\nFull message content (verify parser against this):\n\`\`\`\n${fullContent}\n\`\`\``);
           }
+          if (parsingStep?.details?.managementCommandDetected) {
+            const ctraderExecution = traceResult?.ctraderManagementExecution;
+            const bybitExecution = traceResult?.bybitManagementExecution;
+            if (ctraderExecution?.closingDealsCount > 0) {
+              const deals = ctraderExecution.closingDeals ?? [];
+              const details = deals.map((d: { dealId: string; positionId: string; volume: number; executionPrice?: number; tradeSide?: string; grossProfit?: number; executionTimestamp?: number; stopLoss?: number; takeProfit?: number; closedBy?: string; orderType?: string }) => {
+                const parts = [`Deal ${d.dealId}`, `pos ${d.positionId}`, `${d.volume} lots`];
+                if (d.executionPrice != null) parts.push(`@ ${d.executionPrice}`);
+                if (d.tradeSide) parts.push(d.tradeSide);
+                if (d.grossProfit != null) parts.push(`P&L ${d.grossProfit}`);
+                if (d.stopLoss != null) parts.push(`SL ${d.stopLoss}`);
+                if (d.takeProfit != null) parts.push(`TP ${d.takeProfit}`);
+                if (d.closedBy) parts.push(`(closed by ${d.closedBy})`);
+                if (d.executionTimestamp) parts.push(`(${new Date(d.executionTimestamp).toISOString()})`);
+                return '  • ' + parts.join(' ');
+              }).join('\n');
+              findings.push(`\n✅ Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified on exchange via cTrader — ${ctraderExecution.closingDealsCount} closing deal(s)\n${details}`);
+            } else if (bybitExecution?.closingExecutionsCount > 0) {
+              findings.push(`\n✅ Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified on exchange via Bybit — ${bybitExecution.closingExecutionsCount} closing execution(s)`);
+            } else if (logglyData?.managementExecutionLogs?.events?.length) {
+              const execEvents = logglyData.managementExecutionLogs.events || [];
+              const positionsClosed = execEvents.filter((e: any) =>
+                (e.event?.json?.message || e.logmsg || '').includes('Positions partially closed')
+              );
+              const exchangeExecuted = execEvents.filter((e: any) =>
+                (e.event?.json?.message || e.logmsg || '').match(/Partial position closed on (cTrader|exchange)|Position closed on cTrader/)
+              );
+              if (positionsClosed.length > 0 || exchangeExecuted.length > 0) {
+                const count = positionsClosed[0]?.event?.json?.count ?? exchangeExecuted.length;
+                findings.push(`\n✅ Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified (Loggly) — ${count} position(s) partially closed`);
+              } else {
+                findings.push(`\n📋 Management command (${parsingStep.details.managementCommandType}) - no exchange execution logs found; positions may or may not have been modified`);
+              }
+            } else {
+              findings.push(`\n📋 Management command (${parsingStep.details.managementCommandType}) - no exchange execution logs found; positions may or may not have been modified`);
+            }
+          }
           if (orderPlacementData?.contradictionWithTrace) {
             recommendations.push('Logs show orders were placed - trace may use different DB. Verify DATABASE_URL.');
           } else {
@@ -1173,6 +1292,50 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   }
 
+  // When parsing fails and management command detected, add finding (exchange API preferred, then Loggly)
+  const traceData = traceResult?.data;
+  const parsingStep = traceData?.steps?.find((s: { step: string }) => s.step?.includes('Message Parsing'));
+  const logglyResult = result.steps.find(s => s.step.id === 'loggly')?.result;
+  const ctraderExecution = traceData?.ctraderManagementExecution;
+  const managementExecutionLogs = logglyResult?.data?.managementExecutionLogs ?? traceData?.managementExecutionLogs;
+  const hasManagementFinding = findings.some((f: string) => f.includes('Management command') && (f.includes('Positions confirmed') || f.includes('no exchange execution')));
+  if (parsingStep?.details?.managementCommandDetected && !hasManagementFinding) {
+    const bybitExecution = traceData?.bybitManagementExecution;
+    if (ctraderExecution?.closingDealsCount > 0) {
+      const deals = ctraderExecution.closingDeals ?? [];
+      const details = deals.map((d: { dealId: string; positionId: string; volume: number; executionPrice?: number; tradeSide?: string; grossProfit?: number; executionTimestamp?: number; stopLoss?: number; takeProfit?: number; closedBy?: string; orderType?: string }) => {
+        const parts = [`Deal ${d.dealId}`, `pos ${d.positionId}`, `${d.volume} lots`];
+        if (d.executionPrice != null) parts.push(`@ ${d.executionPrice}`);
+        if (d.tradeSide) parts.push(d.tradeSide);
+        if (d.grossProfit != null) parts.push(`P&L ${d.grossProfit}`);
+        if (d.stopLoss != null) parts.push(`SL ${d.stopLoss}`);
+        if (d.takeProfit != null) parts.push(`TP ${d.takeProfit}`);
+        if (d.closedBy) parts.push(`(closed by ${d.closedBy})`);
+        if (d.executionTimestamp) parts.push(`(${new Date(d.executionTimestamp).toISOString()})`);
+        return '  • ' + parts.join(' ');
+      }).join('\n');
+      findings.push(`Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified on exchange via cTrader — ${ctraderExecution.closingDealsCount} closing deal(s)\n${details}`);
+    } else if (bybitExecution?.closingExecutionsCount > 0) {
+      findings.push(`Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified on exchange via Bybit — ${bybitExecution.closingExecutionsCount} closing execution(s)`);
+    } else if (managementExecutionLogs?.events?.length) {
+      const execEvents = managementExecutionLogs.events || [];
+      const positionsClosed = execEvents.filter((e: any) =>
+        (e.event?.json?.message || e.logmsg || '').includes('Positions partially closed')
+      );
+      const exchangeExecuted = execEvents.filter((e: any) =>
+        (e.event?.json?.message || e.logmsg || '').match(/Partial position closed on (cTrader|exchange)|Position closed on cTrader/)
+      );
+      if (positionsClosed.length > 0 || exchangeExecuted.length > 0) {
+        const count = positionsClosed[0]?.event?.json?.count ?? exchangeExecuted.length;
+        findings.push(`Management command (${parsingStep.details.managementCommandType}): Positions confirmed modified (Loggly) — ${count} position(s) partially closed`);
+      } else {
+        findings.push(`Management command (${parsingStep.details.managementCommandType}) - manager ran but no exchange execution logs found`);
+      }
+    } else {
+      findings.push(`Management command (${parsingStep.details.managementCommandType}) - may have modified existing trades; check Loggly or exchange deal/execution history to verify`);
+    }
+  }
+
   // Generate next steps
   const nextSteps: string[] = [];
   const failurePoint = analysisResult?.data?.failurePoint || traceResult?.data?.failurePoint;
@@ -1182,7 +1345,8 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       nextSteps.push('/query-loggly "Bybit API error" timeframe:10');
     } else if (failurePoint.includes('Parsing')) {
       const ch = traceResult?.data?.channel || context.args.channel;
-      nextSteps.push(`npx tsx src/scripts/query_message.ts ${context.args.messageId} ${ch || '<channel>'}`);
+      const msgId = context.args.message ?? context.args.messageId;
+      nextSteps.push(`npx tsx src/scripts/query_message.ts ${msgId ?? '<messageId>'} ${ch || '<channel>'}`);
     }
   }
 
