@@ -185,20 +185,6 @@
       "propFirms": ["hyrotrader"]
     },
     {
-      "channel": "2385521106",
-      "harvester": "big_harvester",
-      "parser": "big",
-      "breakevenAfterTPs": 1,
-      "useLimitOrderForBreakeven": false,
-      "entryTimeoutMinutes": 60,
-      "initiator": "bybit",
-      "monitor": "bybit",
-      "maxMessageStalenessMinutes": 5,
-      "baseLeverage": 20,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"]
-    },
-    {
       "channel": "1634731277",
       "harvester": "star_format_harvester",
       "parser": "star_format",
