@@ -8,6 +8,7 @@ import { getSymbolInfo } from '../initiators/symbolValidator.js';
 import { roundPrice, getDecimalPrecision, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import {
   getIsLong,
   checkTradeExpired,
@@ -28,8 +29,6 @@ import {
   TP_PLACEMENT_TIMEOUT_MS
 } from './shared.js';
 
-/** Bybit error codes that warrant a retry (transient: rate limit, server error, timeout) */
-const BYBIT_RETRYABLE_CODES = new Set([10000, 10006, 10016, 10018, 429]);
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
@@ -62,46 +61,36 @@ type TickerDiagnostic = {
 const fetchBybitTickerWithRetry = async (
   bybitClient: RestClientV5,
   category: 'linear' | 'spot',
-  symbol: string,
-  maxRetries = 2
+  symbol: string
 ): Promise<{ response: any; diagnostic: TickerDiagnostic }> => {
-  let lastDiagnostic: TickerDiagnostic = { symbol, category };
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const response = category === 'linear'
-        ? await bybitClient.getTickers({ category: 'linear', symbol })
-        : await bybitClient.getTickers({ category: 'spot', symbol });
-      if (response.retCode === 0) {
-        const listLen = (response.result as { list?: unknown[] })?.list?.length ?? 0;
-        return { response, diagnostic: { symbol, category, retCode: 0, listLength: listLen } };
-      }
-      lastDiagnostic = {
-        symbol,
-        category,
+  const diagnosticBase: TickerDiagnostic = { symbol, category };
+  try {
+    const response = await withBybitRateLimitRetry(
+      () =>
+        (category === 'linear'
+          ? bybitClient.getTickers({ category: 'linear', symbol })
+          : bybitClient.getTickers({ category: 'spot', symbol })) as Promise<{ retCode: number; retMsg?: string; result?: { list?: unknown[] } }>,
+      { label: `getTickers ${category} ${symbol}` }
+    );
+    if (response.retCode === 0) {
+      const listLen = (response.result as { list?: unknown[] })?.list?.length ?? 0;
+      return { response, diagnostic: { ...diagnosticBase, retCode: 0, listLength: listLen } };
+    }
+    return {
+      response,
+      diagnostic: {
+        ...diagnosticBase,
         retCode: response.retCode,
         retMsg: response.retMsg,
         listLength: (response.result as { list?: unknown[] })?.list?.length
-      };
-      if (BYBIT_RETRYABLE_CODES.has(response.retCode) && attempt < maxRetries) {
-        await sleep(500 * attempt);
-        continue;
       }
-      return { response, diagnostic: lastDiagnostic };
-    } catch (error) {
-      lastDiagnostic = {
-        symbol,
-        category,
-        thrown: true,
-        error: serializeErrorForLog(error)
-      };
-      if (attempt < maxRetries) {
-        await sleep(500 * attempt);
-        continue;
-      }
-      return { response: null, diagnostic: lastDiagnostic };
-    }
+    };
+  } catch (error) {
+    return {
+      response: null,
+      diagnostic: { ...diagnosticBase, thrown: true, error: serializeErrorForLog(error) }
+    };
   }
-  return { response: null, diagnostic: lastDiagnostic };
 };
 
 const getCurrentPrice = async (
@@ -392,11 +381,13 @@ const checkEntryFilled = async (
         });
         
         try {
-          const orderInfo = await bybitClient.getActiveOrders({
-            category: 'linear',
-            symbol: symbol,
-            orderId: trade.order_id
-          });
+          const orderInfo = await withBybitRateLimitRetry(() =>
+            bybitClient.getActiveOrders({
+              category: 'linear',
+              symbol: symbol,
+              orderId: trade.order_id
+            })
+          );
           
           if (orderInfo.retCode === 0 && orderInfo.result && orderInfo.result.list && orderInfo.result.list.length > 0) {
             const order = orderInfo.result.list.find((o: any) => {
@@ -415,7 +406,9 @@ const checkEntryFilled = async (
               
               if (orderStatus === 'Filled') {
                 // Get position ID and avg price if available
-                const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+                const positions = await withBybitRateLimitRetry(() =>
+                  bybitClient.getPositionInfo({ category: 'linear', symbol })
+                );
                 if (positions.retCode === 0 && positions.result && positions.result.list) {
                   const position = positions.result.list.find((p: any) =>
                     p.symbol === symbol && parseFloat(getBybitField<string>(p, 'size') || '0') !== 0
@@ -800,7 +793,7 @@ const updateStopLoss = async (
         positionIdx: 0 as 0 | 1 | 2,
         tpslMode: 'Full' as const // Apply stop loss to 100% of position automatically
       };
-      await bybitClient.setTradingStop(stopLossParams);
+      await withBybitRateLimitRetry(() => bybitClient.setTradingStop(stopLossParams));
       
       // Update stop loss order quantity in database for tracking
       // Bybit API automatically covers 100% of position, but we track quantity for consistency
@@ -915,10 +908,9 @@ const placeTakeProfitOrders = async (
     const retryDelay = 1000; // 1 second
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-      positionResponse = await bybitClient.getPositionInfo({
-        category: 'linear',
-        symbol: symbol
-      });
+      positionResponse = await withBybitRateLimitRetry(() =>
+        bybitClient.getPositionInfo({ category: 'linear', symbol })
+      );
 
       if (positionResponse.retCode === 0 && positionResponse.result && positionResponse.result.list) {
         // If we have a position_id, try to find the specific position
@@ -1019,7 +1011,7 @@ const placeTakeProfitOrders = async (
           positionIdx,
           tpslMode: 'Full' as const
         };
-        await bybitClient.setTradingStop(stopLossParams);
+        await withBybitRateLimitRetry(() => bybitClient.setTradingStop(stopLossParams));
         logger.info('Bybit stop loss set on position', {
           tradeId: trade.id,
           symbol,
@@ -1176,7 +1168,7 @@ const placeTakeProfitOrders = async (
         tradingStopParams.takeProfit = bestTpPrice.toString();
       }
       if (tradingStopParams.stopLoss != null || tradingStopParams.takeProfit != null) {
-        await bybitClient.setTradingStop(tradingStopParams);
+        await withBybitRateLimitRetry(() => bybitClient.setTradingStop(tradingStopParams));
         logger.info('Bybit position SL and best TP set via setTradingStop', {
           tradeId: trade.id,
           symbol,
@@ -1215,10 +1207,9 @@ const placeTakeProfitOrders = async (
     // This catches cases where orders were placed but not yet stored in DB
     let exchangeTPOrdersByPrice: Map<number, boolean> = new Map();
     try {
-      const openOrdersResponse = await bybitClient.getActiveOrders({
-        category: 'linear',
-        symbol: symbol
-      });
+      const openOrdersResponse = await withBybitRateLimitRetry(() =>
+        bybitClient.getActiveOrders({ category: 'linear', symbol })
+      );
       
       if (openOrdersResponse.retCode === 0 && openOrdersResponse.result?.list) {
         const openOrders = openOrdersResponse.result.list;
@@ -1319,7 +1310,9 @@ const placeTakeProfitOrders = async (
           tradeDirection: trade.direction
         });
 
-        const tpOrderResponse = await bybitClient.submitOrder(tpOrderParams);
+        const tpOrderResponse = await withBybitRateLimitRetry(() =>
+          bybitClient.submitOrder(tpOrderParams)
+        );
 
         const tpOrderId = getBybitField<string>(tpOrderResponse.result, 'orderId', 'order_id');
         if (tpOrderResponse.retCode === 0 && tpOrderResponse.result && tpOrderId) {

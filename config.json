@@ -8,7 +8,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -20,7 +20,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH_RONNIE"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -32,7 +32,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_BIG"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -52,7 +52,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH_STAR_FORMAT"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -64,7 +64,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -76,7 +76,7 @@
         "apiId": "TG_API_ID",
         "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD_VIP"
       },
-      "pollInterval": 3000,
+      "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
@@ -162,11 +162,11 @@
       "type": "bybit",
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
-      "pollInterval": 3000
+      "pollInterval": 4000
     },
     {
       "type": "ctrader",
-      "pollInterval": 3000
+      "pollInterval": 4000
     }
   ],
   "channels": [

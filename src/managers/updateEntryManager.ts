@@ -3,6 +3,8 @@ import { logger } from '../utils/logger.js';
 import { RestClientV5 } from 'bybit-api';
 import { ParsedOrder } from '../types/order.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 
 /**
  * Manager to update entry price of an existing trade
@@ -51,11 +53,13 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
     } else if (trade.exchange === 'bybit' && bybitClient && trade.order_id) {
       // Cancel the old order
       try {
-        await bybitClient.cancelOrder({
-          category: 'linear',
-          symbol: symbol,
-          orderId: trade.order_id
-        });
+        await withBybitRateLimitRetry(() =>
+          bybitClient.cancelOrder({
+            category: 'linear',
+            symbol: symbol,
+            orderId: trade.order_id
+          })
+        );
         logger.info('Old entry order cancelled', {
           tradeId: trade.id,
           orderId: trade.order_id
@@ -63,7 +67,7 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
       } catch (error) {
         logger.error('Error cancelling old order', {
           tradeId: trade.id,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         // Continue anyway - order might already be filled or cancelled
       }
@@ -74,18 +78,20 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
                         (Math.abs(trade.entry_price - trade.stop_loss) / trade.entry_price);
       const qty = Math.floor((riskAmount / newEntryPrice) * 100) / 100;
 
-      const orderResponse = await bybitClient.submitOrder({
-        category: 'linear',
-        symbol: symbol,
-        side: side,
-        orderType: 'Limit',
-        qty: qty.toString(),
-        price: newEntryPrice.toString(),
-        timeInForce: 'GTC',
-        reduceOnly: false,
-        closeOnTrigger: false,
-        positionIdx: 0
-      });
+      const orderResponse = await withBybitRateLimitRetry(() =>
+        bybitClient.submitOrder({
+          category: 'linear',
+          symbol: symbol,
+          side: side,
+          orderType: 'Limit',
+          qty: qty.toString(),
+          price: newEntryPrice.toString(),
+          timeInForce: 'GTC',
+          reduceOnly: false,
+          closeOnTrigger: false,
+          positionIdx: 0
+        })
+      );
 
       if (orderResponse.retCode === 0 && orderResponse.result) {
         const newOrderId = getBybitField<string>(orderResponse.result, 'orderId', 'order_id') || 'unknown';
@@ -107,7 +113,7 @@ export const updateEntryManager: ManagerFunction = async (context: ManagerContex
     logger.error('Error in updateEntryManager', {
       channel,
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }

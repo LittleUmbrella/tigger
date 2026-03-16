@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /**
@@ -51,7 +52,9 @@ export async function closePosition(
     const symbol = trade.trading_pair.replace('/', '');
     
     // Get current position info
-    const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
+    const positions = await withBybitRateLimitRetry(() =>
+      bybitClient.getPositionInfo({ category: 'linear', symbol })
+    );
 
     if (positions.retCode === 0 && positions.result && positions.result.list) {
       const position = positions.result.list.find((p: any) => {
@@ -65,7 +68,8 @@ export async function closePosition(
         const side = position.side === 'Buy' ? 'Sell' : 'Buy';
         const qty = parseFloat(positionSize || '0');
 
-        const closeOrder = await bybitClient.submitOrder({
+        const closeOrder = await withBybitRateLimitRetry(() =>
+          bybitClient.submitOrder({
           category: 'linear',
           symbol: symbol,
           side: side,
@@ -75,7 +79,8 @@ export async function closePosition(
           reduceOnly: true,
           closeOnTrigger: false,
           positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2
-        });
+        })
+        );
 
         if (closeOrder.retCode === 0 && closeOrder.result) {
           logger.info('Position closed on exchange', {

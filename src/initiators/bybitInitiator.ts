@@ -9,6 +9,7 @@ import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import dayjs from 'dayjs';
@@ -519,7 +520,9 @@ const executeTradeForAccount = async (
     if (isUsingMarketPrice) {
       if (!isSimulation && bybitClient) {
         try {
-          const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
+          const ticker = await withBybitRateLimitRetry(() =>
+            bybitClient.getTickers({ category: 'linear', symbol })
+          );
           if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0 && ticker.result.list[0]?.lastPrice) {
             entryPrice = parseFloat(ticker.result.list[0].lastPrice);
             logger.info('Using current market price for limit order entry', { symbol, entryPrice });
@@ -1046,10 +1049,12 @@ const executeTradeForAccount = async (
       
       try {
         // Get current position for this symbol
-        const positionResponse = await bybitClient.getPositionInfo({
-          category: 'linear',
-          symbol: symbol
-        });
+        const positionResponse = await withBybitRateLimitRetry(() =>
+          bybitClient.getPositionInfo({
+            category: 'linear',
+            symbol: symbol
+          })
+        );
         
         if (positionResponse.retCode === 0 && positionResponse.result?.list) {
           const positions = positionResponse.result.list.filter((p: any) => {
@@ -1068,10 +1073,12 @@ const executeTradeForAccount = async (
         }
         
         // Get pending orders for this symbol
-        const activeOrdersResponse = await bybitClient.getActiveOrders({
-          category: 'linear',
-          symbol: symbol
-        });
+        const activeOrdersResponse = await withBybitRateLimitRetry(() =>
+          bybitClient.getActiveOrders({
+            category: 'linear',
+            symbol: symbol
+          })
+        );
         
         if (activeOrdersResponse.retCode === 0 && activeOrdersResponse.result?.list) {
           const pendingOrders = activeOrdersResponse.result.list.filter((o: any) => {
@@ -1173,7 +1180,9 @@ const executeTradeForAccount = async (
       // This prevents immediate stop loss triggers that would close the position right after opening
       if (roundedStopLoss && roundedStopLoss > 0 && !isSimulation && bybitClient) {
         try {
-          const ticker = await bybitClient.getTickers({ category: 'linear', symbol });
+          const ticker = await withBybitRateLimitRetry(() =>
+            bybitClient.getTickers({ category: 'linear', symbol })
+          );
           if (ticker.retCode === 0 && ticker.result && ticker.result.list && ticker.result.list.length > 0) {
             const currentPrice = parseFloat(ticker.result.list[0].lastPrice || '0');
             
@@ -1328,7 +1337,9 @@ const executeTradeForAccount = async (
       
       while (retryCount <= maxRetries) {
         try {
-          orderResponse = await bybitClient.submitOrder(orderParams);
+          orderResponse = await withBybitRateLimitRetry(() =>
+            bybitClient.submitOrder(orderParams)
+          );
           
           // Check if order was successful
           if (orderResponse?.retCode === 0 && orderResponse?.result) {

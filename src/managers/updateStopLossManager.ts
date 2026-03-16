@@ -1,6 +1,7 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import { ParsedOrder } from '../types/order.js';
 
 /**
@@ -47,13 +48,15 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
       }
       // Update stop loss on exchange - only for open positions
       if (trade.position_id) {
-        await bybitClient.setTradingStop({
-          category: 'linear',
-          symbol: symbol,
-          stopLoss: newOrder.stopLoss.toString(),
-          positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2,
-          tpslMode: 'Full' // Apply stop loss to 100% of position automatically
-        });
+        await withBybitRateLimitRetry(() =>
+          bybitClient.setTradingStop({
+            category: 'linear',
+            symbol: symbol,
+            stopLoss: newOrder.stopLoss.toString(),
+            positionIdx: parseInt(trade.position_id || '0') as 0 | 1 | 2,
+            tpslMode: 'Full' // Apply stop loss to 100% of position automatically
+          })
+        );
       }
 
       // Update database

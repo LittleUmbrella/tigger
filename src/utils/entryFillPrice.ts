@@ -11,6 +11,7 @@ import { getBybitField } from './bybitFieldHelper.js';
 import { normalizeCTraderSymbol } from './ctraderSymbolUtils.js';
 import { logger } from './logger.js';
 import { serializeErrorForLog } from './errorUtils.js';
+import { withBybitRateLimitRetry } from './bybitRateLimitRetry.js';
 import type { RestClientV5 } from 'bybit-api';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
@@ -34,10 +35,12 @@ export async function getEntryFillPrice(
   if (options?.bybitClient && trade.exchange === 'bybit' && trade.position_id) {
     try {
       const symbol = trade.trading_pair.replace('/', '');
-      const positions = await options.bybitClient.getPositionInfo({
-        category: 'linear',
-        symbol,
-      });
+      const positions = await withBybitRateLimitRetry(() =>
+        options.bybitClient!.getPositionInfo({
+          category: 'linear',
+          symbol,
+        })
+      );
       if (positions.retCode === 0 && positions.result?.list) {
         const position = positions.result.list.find((p: any) => {
           const pSize = parseFloat(getBybitField<string>(p, 'size') || '0');
