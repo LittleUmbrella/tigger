@@ -11,6 +11,7 @@ import { getDecimalPrecision } from '../utils/positionSizing.js';
 import { getAssetVariant } from '../utils/assetNormalizer.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { getCachedResponse, setCachedResponse } from '../utils/bybitCache.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 
 export interface SymbolInfo {
   qtyPrecision?: number;
@@ -43,7 +44,7 @@ export async function validateCTraderSymbol(
     }
     return { valid: false, error: `Symbol ${toTry} not found on cTrader` };
   } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
+    const msg = serializeErrorForLog(error);
     return { valid: false, error: msg.includes('not found') ? `Symbol ${symbol} not found on cTrader` : msg };
   }
 }
@@ -78,7 +79,7 @@ export async function getCTraderSymbolInfo(
   } catch (error) {
     logger.warn('Failed to get cTrader symbol info', {
       symbol,
-      error: error instanceof Error ? error.message : String(error),
+      error: serializeErrorForLog(error),
     });
     return null;
   }
@@ -258,7 +259,7 @@ export async function getSymbolInfo(
   } catch (error) {
     logger.warn('Failed to get symbol info', {
       symbol,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
   return null;

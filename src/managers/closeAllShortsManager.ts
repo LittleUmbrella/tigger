@@ -4,6 +4,7 @@ import { closePosition } from './positionUtils.js';
 import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 
 /**
  * Manager to close all short positions
@@ -76,7 +77,7 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
         } catch (error) {
           logger.warn('Error checking position side, including trade', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
           // If we can't check, include it to be safe
           shortTrades.push(trade);
@@ -104,7 +105,7 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
         logger.error('Error closing short position', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -116,7 +117,7 @@ export const closeAllShortsManager: ManagerFunction = async (context: ManagerCon
   } catch (error) {
     logger.error('Error in closeAllShortsManager', {
       channel,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }

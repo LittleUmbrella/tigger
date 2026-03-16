@@ -17,6 +17,7 @@
 import { DatabaseManager, Message, Trade, Order } from '../db/schema.js';
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { BotConfig, AccountConfig } from '../types/config.js';
 import fs from 'fs-extra';
@@ -345,7 +346,7 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
           steps[2].details = {
             symbolValidation: {
               symbol: normalizeBybitSymbol(parsedOrder.tradingPair),
-              error: validationError instanceof Error ? validationError.message : String(validationError)
+              error: serializeErrorForLog(validationError)
             }
           };
           recommendations.push(
@@ -629,7 +630,7 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
   } catch (error) {
     logger.error('Error tracing message', {
       messageId,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   } finally {
@@ -731,7 +732,7 @@ if (isMainModule) {
     .catch(error => {
       logger.error('Fatal error tracing message', {
         messageId,
-        error: error instanceof Error ? error.message : String(error),
+        error: serializeErrorForLog(error),
         stack: error instanceof Error ? error.stack : undefined
       });
       process.exit(1);

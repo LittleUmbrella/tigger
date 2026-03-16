@@ -7,6 +7,7 @@ import { RestClientV5 } from 'bybit-api';
 import { getGoldPriceAtTime } from '../../utils/goldPriceApi.js';
 import type { GoldPriceData } from '../../utils/goldPriceApi.js';
 import { logger } from '../../utils/logger.js';
+import { serializeErrorForLog } from '../../utils/errorUtils.js';
 
 export interface GoldPriceComparison {
   timestamp: string;
@@ -94,7 +95,7 @@ export async function getGoldPriceComparison(
         }
       } catch (error) {
         logger.debug('PAXG execution history failed, will try klines', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
       
@@ -143,14 +144,14 @@ export async function getGoldPriceComparison(
         } catch (klineError) {
           logger.warn('Failed to fetch PAXG price from klines', {
             timestamp: timestamp.toISOString(),
-            error: klineError instanceof Error ? klineError.message : String(klineError)
+            error: serializeErrorForLog(klineError)
           });
         }
       }
     } catch (error) {
       logger.warn('Failed to fetch PAXG price', {
         timestamp: timestamp.toISOString(),
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     }
   }
@@ -171,9 +172,9 @@ export async function getGoldPriceComparison(
   } catch (error) {
     logger.warn('Failed to fetch gold price', {
       timestamp: timestamp.toISOString(),
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
-    result.error = `Gold price fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+    result.error = `Gold price fetch failed: ${serializeErrorForLog(error)}`;
   }
 
   // Fetch XAUT price from Bybit if client is available
@@ -213,7 +214,7 @@ export async function getGoldPriceComparison(
         }
       } catch (error) {
         logger.debug('XAUT execution history failed, trying klines', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
       
@@ -262,14 +263,14 @@ export async function getGoldPriceComparison(
         } catch (klineError) {
           logger.warn('Failed to fetch XAUT price from klines', {
             timestamp: timestamp.toISOString(),
-            error: klineError instanceof Error ? klineError.message : String(klineError)
+            error: serializeErrorForLog(klineError)
           });
         }
       }
     } catch (error) {
       logger.warn('Failed to fetch XAUT price', {
         timestamp: timestamp.toISOString(),
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     }
   }
@@ -344,7 +345,7 @@ async function getGoldPriceFromDukascopy(timestamp: Date): Promise<GoldPriceData
   } catch (error) {
     logger.debug('Dukascopy gold price unavailable', {
       timestamp: timestamp.toISOString(),
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return null;
   }
@@ -426,7 +427,7 @@ async function getGoldPriceFromCTrader(
   } catch (error) {
     logger.warn('Failed to fetch gold price from cTrader', {
       timestamp: timestamp.toISOString(),
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return null;
   }
@@ -497,9 +498,9 @@ export async function getGoldPriceComparisonForCTrader(
     } catch (error) {
       logger.warn('Failed to fetch gold price for cTrader (external fallback)', {
         timestamp: timestamp.toISOString(),
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
-      result.error = `Gold price fetch failed: ${error instanceof Error ? error.message : String(error)}`;
+      result.error = `Gold price fetch failed: ${serializeErrorForLog(error)}`;
     }
   }
 

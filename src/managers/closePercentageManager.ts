@@ -4,6 +4,7 @@ import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { Trade, DatabaseManager } from '../db/schema.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
@@ -89,7 +90,7 @@ export const closePercentageManager: ManagerFunction = async (context: ManagerCo
         logger.error('Error partially closing position', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -102,7 +103,7 @@ export const closePercentageManager: ManagerFunction = async (context: ManagerCo
   } catch (error) {
     logger.error('Error in closePercentageManager', {
       channel,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }
@@ -214,7 +215,7 @@ async function closePercentageOfPosition(
               } catch (error) {
                 logger.warn('Failed to update stop loss order quantity when moving to breakeven', {
                   tradeId: trade.id,
-                  error: error instanceof Error ? error.message : String(error)
+                  error: serializeErrorForLog(error)
                 });
               }
 
@@ -225,7 +226,7 @@ async function closePercentageOfPosition(
             } catch (error) {
               logger.error('Error moving stop loss to entry', {
                 tradeId: trade.id,
-                error: error instanceof Error ? error.message : String(error)
+                error: serializeErrorForLog(error)
               });
             }
           }
@@ -294,7 +295,7 @@ async function closePercentageOfPosition(
         } catch (slError) {
           logger.error('Error moving stop loss to entry on cTrader', {
             tradeId: trade.id,
-            error: slError instanceof Error ? slError.message : String(slError)
+            error: serializeErrorForLog(slError)
           });
         }
       }
@@ -302,7 +303,7 @@ async function closePercentageOfPosition(
       logger.error('Failed to partially close cTrader position', {
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }

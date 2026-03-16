@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
 /**
@@ -42,7 +43,7 @@ export async function closePosition(
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
         positionId: trade.position_id,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }

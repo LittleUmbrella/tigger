@@ -8,6 +8,7 @@
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../../utils/logger.js';
 import { getBybitField } from '../../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../../utils/errorUtils.js';
 
 export interface BybitClosingExecution {
   execId: string;
@@ -82,9 +83,9 @@ export async function queryBybitClosingExecutions(
     }
   } catch (error) {
     logger.warn('Failed to query Bybit closing executions', {
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
-    result.error = error instanceof Error ? error.message : String(error);
+    result.error = serializeErrorForLog(error);
   }
 
   return result;

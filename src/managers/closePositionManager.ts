@@ -2,6 +2,7 @@ import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
 import { closePosition } from './positionUtils.js';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 
 /**
  * Manager to close a specific position by trading pair
@@ -63,7 +64,7 @@ export const closePositionManager: ManagerFunction = async (context: ManagerCont
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
           accountName: trade.account_name,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -77,7 +78,7 @@ export const closePositionManager: ManagerFunction = async (context: ManagerCont
     logger.error('Error in closePositionManager', {
       channel,
       tradingPair: command.tradingPair,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }

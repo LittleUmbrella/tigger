@@ -12,6 +12,7 @@ import { parseMessage } from '../parsers/signalParser.js';
 import { createPropFirmEvaluator, PropFirmEvaluator, EvaluationResult } from './propFirmEvaluator.js';
 import { PropFirmRule, getPropFirmRule, createCustomPropFirmRule } from './propFirmRules.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { InitiatorConfig, ParserConfig, MonitorConfig } from '../types/config.js';
 import { EvaluationConfig } from '../types/config.js';
@@ -234,7 +235,7 @@ export async function runEvaluation(
       logger.error('Failed to initialize mock exchange', {
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       return { success: false, tradeId: trade.id };
     }
@@ -298,7 +299,7 @@ export async function runEvaluation(
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
         progress: `${index + 1}/${mockExchanges.length}`,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       return false;
     }
@@ -442,7 +443,7 @@ export async function runEvaluation(
         } catch (error) {
           logger.warn('Failed to calculate unrealized P&L', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
       }
@@ -792,7 +793,7 @@ async function saveEvaluationResult(
     logger.error('Failed to save evaluation result', {
       channel,
       propFirm: result.propFirmName,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 }

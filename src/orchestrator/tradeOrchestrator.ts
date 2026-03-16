@@ -9,6 +9,7 @@ import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
 import { startCTraderMonitor } from '../monitors/ctraderMonitor.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { registerParser } from '../parsers/parserRegistry.js';
 import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
@@ -207,7 +208,7 @@ export const startTradeOrchestrator = async (
     } catch (error) {
       logger.error('Failed to create cTrader client', {
         accountName,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       return undefined;
     }
@@ -347,7 +348,7 @@ export const startTradeOrchestrator = async (
     } catch (error) {
       logger.error('Failed to start channel set', {
         channel: channelConfig.channel,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     }
   }
@@ -511,7 +512,7 @@ export const startTradeOrchestrator = async (
         logger.error('Error processing edited message', {
           channel,
           messageId: message.message_id,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         // Don't mark as parsed on error - allow retry
       }
@@ -573,7 +574,7 @@ export const startTradeOrchestrator = async (
         logger.error('Error processing management message', {
           channel,
           messageId: message.message_id,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         // Don't mark as parsed on error - allow retry
       }
@@ -801,7 +802,7 @@ export const startTradeOrchestrator = async (
             logger.error('Error processing simulation message', {
               channel: channelConfig.channel,
               messageId: message.message_id,
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
             await db.markMessageParsed(message.id); // Mark as parsed to avoid infinite retry
           }
@@ -812,7 +813,7 @@ export const startTradeOrchestrator = async (
     // Start processing messages
     processSimulationMessages().catch(error => {
       logger.error('Error in simulation message processing', {
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     });
   } else {
@@ -831,7 +832,7 @@ export const startTradeOrchestrator = async (
           ).catch(error => {
             logger.error('Manager error', {
               channel: channelConfig.channel,
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
           });
 
@@ -844,7 +845,7 @@ export const startTradeOrchestrator = async (
           ).catch(error => {
             logger.error('Edited message processing error', {
               channel: channelConfig.channel,
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
           });
 
@@ -853,7 +854,7 @@ export const startTradeOrchestrator = async (
             logger.error('Parser error', {
               channel: channelConfig.channel,
               parserName: parser.name,
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
           });
         }
@@ -922,14 +923,14 @@ export const startTradeOrchestrator = async (
     if (isMaxSpeed) {
       processSimulationTrades().catch(error => {
         logger.error('Error processing simulation trades', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       });
     } else {
       setTimeout(() => {
         processSimulationTrades().catch(error => {
           logger.error('Error processing simulation trades', {
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         });
       }, 2000);
@@ -975,7 +976,7 @@ export const startTradeOrchestrator = async (
           logger.error('Initiator error', {
             channel: channelConfig.channel,
             initiatorName: initiator.name || initiator.type || channelConfig.initiator,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         });
       }
@@ -1014,7 +1015,7 @@ export const startTradeOrchestrator = async (
         await stopHarvester();
       } catch (error) {
         logger.error('Error stopping harvester', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -1025,7 +1026,7 @@ export const startTradeOrchestrator = async (
         await stopMonitor();
       } catch (error) {
         logger.error('Error stopping monitor', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }

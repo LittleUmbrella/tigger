@@ -7,6 +7,7 @@
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../../utils/logger.js';
 import { getBybitField } from '../../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../../utils/errorUtils.js';
 
 export interface OrderDetails {
   orderId: string;
@@ -103,7 +104,7 @@ export async function queryBybitOrder(
     logger.warn('Error checking active orders', { 
       orderId, 
       symbol: normalizedSymbol, 
-      error: error instanceof Error ? error.message : String(error) 
+      error: serializeErrorForLog(error) 
     });
   }
 
@@ -144,9 +145,9 @@ export async function queryBybitOrder(
     logger.warn('Error checking order history', { 
       orderId, 
       symbol: normalizedSymbol, 
-      error: error instanceof Error ? error.message : String(error) 
+      error: serializeErrorForLog(error) 
     });
-    result.error = error instanceof Error ? error.message : String(error);
+    result.error = serializeErrorForLog(error);
   }
 
   // Order not found
@@ -210,7 +211,7 @@ export async function searchRecentOrdersBySymbol(
   } catch (error) {
     logger.warn('Error searching order history', {
       symbol: normalizedSymbol,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 

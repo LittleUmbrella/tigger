@@ -1,5 +1,6 @@
 import { ManagerContext, ManagerFunction } from './managerRegistry.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { ParsedOrder } from '../types/order.js';
 
 /**
@@ -79,7 +80,7 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
       } catch (error) {
         logger.warn('Failed to update stop loss order quantity', {
           tradeId: trade.id,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
 
@@ -122,7 +123,7 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
     logger.error('Error in updateStopLossManager', {
       channel,
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }

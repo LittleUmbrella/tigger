@@ -3,6 +3,7 @@ import { logger } from '../utils/logger.js';
 import { closePosition } from './positionUtils.js';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 
 /**
  * Manager to close all long positions
@@ -75,7 +76,7 @@ export const closeAllLongsManager: ManagerFunction = async (context: ManagerCont
         } catch (error) {
           logger.warn('Error checking position side, including trade', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
           // If we can't check, include it to be safe
           longTrades.push(trade);
@@ -103,7 +104,7 @@ export const closeAllLongsManager: ManagerFunction = async (context: ManagerCont
         logger.error('Error closing long position', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -115,7 +116,7 @@ export const closeAllLongsManager: ManagerFunction = async (context: ManagerCont
   } catch (error) {
     logger.error('Error in closeAllLongsManager', {
       channel,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     throw error;
   }

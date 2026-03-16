@@ -8,12 +8,14 @@ import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuant
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import dayjs from 'dayjs';
 
 /**
  * Serialize error for logging - handles Error instances, objects, and primitives
+ * Returns object for spreading into log calls. Use serializeErrorForLog when you need a string.
  */
 const serializeError = (error: unknown): { error: string; stack?: string } => {
   if (error instanceof Error) {
@@ -892,7 +894,7 @@ const executeTradeForAccount = async (
         logger.warn('Exception while fetching open positions for prop firm validation', {
           channel,
           accountName: accountName || 'default',
-          error: error instanceof Error ? error.message : String(error),
+          error: serializeErrorForLog(error),
           note: 'Prop firm validation will proceed without including existing open positions'
         });
         openWorstCaseLoss = 0;
@@ -1089,7 +1091,7 @@ const executeTradeForAccount = async (
       } catch (error) {
         logger.debug('Could not fetch position/order info for limit check', {
           symbol,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         // Continue anyway - we'll rely on retry logic if needed
       }
@@ -1264,7 +1266,7 @@ const executeTradeForAccount = async (
           logger.warn('Failed to check current price against stop loss, proceeding with order placement', {
             symbol,
             stopLoss: roundedStopLoss,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
       }
@@ -1424,7 +1426,7 @@ const executeTradeForAccount = async (
         } catch (error) {
           // Check if this is a position limit error that we can retry
           if (isPositionLimitError(error) && retryCount < maxRetries) {
-            const errorMsg = error instanceof Error ? error.message : String(error);
+            const errorMsg = serializeErrorForLog(error);
             const recommendedLeverage = parseRecommendedLeverage(errorMsg);
             
             // Position limit error, reduce leverage and retry
@@ -1526,7 +1528,7 @@ const executeTradeForAccount = async (
           channel,
           symbol,
           orderId,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         // Continue anyway - we'll insert it later
       }
@@ -1555,7 +1557,7 @@ const executeTradeForAccount = async (
           logger.debug('Could not check order status for stop loss verification', {
             symbol,
             orderId,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
 
@@ -1602,7 +1604,7 @@ const executeTradeForAccount = async (
               } catch (error) {
                 logger.warn('Failed to update stop loss order quantity', {
                   tradeId,
-                  error: error instanceof Error ? error.message : String(error)
+                  error: serializeErrorForLog(error)
                 });
               }
             }
@@ -1689,7 +1691,7 @@ const executeTradeForAccount = async (
           logger.debug('Could not check position for market order TP placement', {
             channel,
             symbol,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
         
@@ -1814,7 +1816,7 @@ const executeTradeForAccount = async (
                           channel,
                           symbol,
                           tradeId,
-                          error: error instanceof Error ? error.message : String(error)
+                          error: serializeErrorForLog(error)
                         });
                       }
                     }
@@ -1831,7 +1833,7 @@ const executeTradeForAccount = async (
                     tradeId,
                     orderId,
                     parameters: closeOrderParams,
-                    error: error instanceof Error ? error.message : String(error)
+                    error: serializeErrorForLog(error)
                   });
                   throw error;
                 }
@@ -1848,7 +1850,7 @@ const executeTradeForAccount = async (
                       channel,
                       symbol,
                       tradeId,
-                      error: error instanceof Error ? error.message : String(error)
+                      error: serializeErrorForLog(error)
                     });
                   }
                 }

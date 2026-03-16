@@ -7,6 +7,7 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getSymbolInfo } from '../initiators/symbolValidator.js';
 import { roundPrice, getDecimalPrecision, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import {
   getIsLong,
   checkTradeExpired,
@@ -91,7 +92,7 @@ const fetchBybitTickerWithRetry = async (
         symbol,
         category,
         thrown: true,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       };
       if (attempt < maxRetries) {
         await sleep(500 * attempt);
@@ -203,7 +204,7 @@ const getCurrentPrice = async (
     logger.error('Error getting current price from Bybit', {
       tradingPair,
       exchange: 'bybit',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return null;
   }
@@ -379,7 +380,7 @@ const checkEntryFilled = async (
         } catch (error) {
           logger.debug('Error querying order history by orderId', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
         
@@ -442,7 +443,7 @@ const checkEntryFilled = async (
         } catch (error) {
           logger.debug('Error querying active orders', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
         
@@ -506,7 +507,7 @@ const checkEntryFilled = async (
         } catch (error) {
           logger.debug('Error querying order history by orderLinkId', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
         
@@ -567,7 +568,7 @@ const checkEntryFilled = async (
         } catch (error) {
           logger.debug('Error in fallback order search', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
       } else {
@@ -581,7 +582,7 @@ const checkEntryFilled = async (
   } catch (error) {
     logger.error('Error checking entry filled', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return { filled: false };
   }
@@ -742,7 +743,7 @@ const checkPositionClosed = async (
   } catch (error) {
     logger.error('Error checking position closed', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return { closed: false };
   }
@@ -777,7 +778,7 @@ const cancelOrder = async (
     logger.error('Error cancelling Bybit order', {
       tradeId: trade.id,
       parameters: cancelOrderParams,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -820,7 +821,7 @@ const updateStopLoss = async (
         } catch (error) {
           logger.warn('Failed to update stop loss order quantity', {
             tradeId: trade.id,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
         }
       }
@@ -842,7 +843,7 @@ const updateStopLoss = async (
     logger.error('Error updating stop loss', {
       tradeId: trade.id,
       parameters: stopLossParams,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -1033,7 +1034,7 @@ const placeTakeProfitOrders = async (
           stopLoss: trade.stop_loss,
           channel: trade.channel,
           exchange: 'bybit',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -1193,7 +1194,7 @@ const placeTakeProfitOrders = async (
         bestTpPrice,
         channel: trade.channel,
         exchange: 'bybit',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     }
 
@@ -1253,7 +1254,7 @@ const placeTakeProfitOrders = async (
       logger.warn('Could not check exchange for existing TP orders', {
         tradeId: trade.id,
         symbol,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       // Continue anyway - we'll rely on DB check
     }
@@ -1363,7 +1364,7 @@ const placeTakeProfitOrders = async (
           tradeId: trade.id,
           tpIndex: tpOrder.index,
           parameters: tpOrderParams,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -1379,7 +1380,7 @@ const placeTakeProfitOrders = async (
   } catch (error) {
     logger.error('Error placing take profit orders from monitor', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -1549,7 +1550,7 @@ const placeBreakevenLimitOrder = async (
   } catch (error) {
     logger.error('Error placing breakeven stop-limit order', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -1629,7 +1630,7 @@ const checkOrderFilled = async (
       orderId: order.id,
       tradeId: trade.id,
       parameters: cancelOrderParams,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return { filled: false };
   }
@@ -1728,7 +1729,7 @@ const monitorTrade = async (
                 tradeId: trade.id,
                 channel: trade.channel,
                 exchange: 'bybit',
-                error: err instanceof Error ? err.message : String(err)
+                error: serializeErrorForLog(err)
               });
             });
             // Continue to monitor active trade below
@@ -1795,7 +1796,7 @@ const monitorTrade = async (
                 tradeId: trade.id,
                 symbol,
                 exchange: 'bybit',
-                error: historyError instanceof Error ? historyError.message : String(historyError)
+                error: serializeErrorForLog(historyError)
               });
             }
           }
@@ -1805,7 +1806,7 @@ const monitorTrade = async (
           tradeId: trade.id,
           symbol,
           exchange: 'bybit',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -1945,7 +1946,7 @@ const monitorTrade = async (
             tradeId: trade.id,
             channel: trade.channel,
             exchange: 'bybit',
-            error: err instanceof Error ? err.message : String(err)
+            error: serializeErrorForLog(err)
           });
         });
       }
@@ -1979,7 +1980,7 @@ const monitorTrade = async (
                 tradeId: trade.id,
                 channel: trade.channel,
                 exchange: 'bybit',
-                error: err instanceof Error ? err.message : String(err)
+                error: serializeErrorForLog(err)
               });
             });
           }
@@ -2120,7 +2121,7 @@ const monitorTrade = async (
     logger.error('Error monitoring Bybit trade', {
       tradeId: trade.id,
       exchange: 'bybit',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -2197,7 +2198,7 @@ export const startTradeMonitor = async (
               tradeId: trade.id,
               channel,
               exchange: 'bybit',
-              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+              error: serializeErrorForLog(result.reason)
             });
           }
         }
@@ -2213,7 +2214,7 @@ export const startTradeMonitor = async (
         logger.error('Error in Bybit monitor loop', {
           channel,
           exchange: 'bybit',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         if (!isMaxSpeed) {
           await sleep(pollInterval * 2);
@@ -2227,7 +2228,7 @@ export const startTradeMonitor = async (
     logger.error('Fatal error in Bybit monitor loop', {
       channel,
       exchange: 'bybit',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   });
 

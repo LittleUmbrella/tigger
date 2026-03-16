@@ -14,6 +14,7 @@
 import { CommandContext, CommandResult } from '../commandRegistry.js';
 import { WorkflowEngine, WorkflowStep, createWorkflowContext } from '../workflowEngine.js';
 import { logger } from '../../utils/logger.js';
+import { serializeErrorForLog } from '../../utils/errorUtils.js';
 import { traceMessage } from '../../scripts/trace_message.js';
 import { queryBybitOrdersForMessage } from '../utils/bybitOrderQuery.js';
 import { queryCTraderOrdersForMessage } from '../utils/ctraderOrderQuery.js';
@@ -226,12 +227,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       } catch (error) {
         logger.error('Error in trace step', {
           messageId: msgId,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Failed to trace message',
-          error: error instanceof Error ? error.message : String(error),
+          error: serializeErrorForLog(error),
           data: { messageId: msgId, channel: ch }
         };
       }
@@ -383,12 +384,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       } catch (error) {
         logger.error('Error querying Loggly', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Failed to query Loggly',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         };
       }
     }
@@ -485,12 +486,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       } catch (error) {
         logger.error('Error in order placement cross-check', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Failed to cross-check order placement',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         };
       }
     }
@@ -548,11 +549,11 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             data: { orders: orderDetails, foundCount: found.length, notFoundCount: notFound.length }
           };
         } catch (error) {
-          logger.error('Error querying cTrader orders', { error: error instanceof Error ? error.message : String(error) });
+          logger.error('Error querying cTrader orders', { error: serializeErrorForLog(error) });
           return {
             success: false,
             message: 'Failed to query cTrader orders',
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           };
         }
       }
@@ -601,12 +602,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       } catch (error) {
         logger.error('Error querying Bybit orders', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Failed to query Bybit orders',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         };
       }
     }
@@ -675,12 +676,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         } catch (error) {
           logger.error('cTrader symbol validation error', {
             tradingPair,
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
           return {
             success: false,
             message: 'cTrader symbol validation failed',
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           };
         }
       }
@@ -723,12 +724,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
       } catch (error) {
         logger.error('Symbol validation error', {
           symbol,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Symbol validation failed',
-          error: error instanceof Error ? error.message : String(error),
+          error: serializeErrorForLog(error),
           data: { symbol }
         };
       }
@@ -823,12 +824,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           };
         } catch (error) {
           logger.error('Error checking cTrader gold prices', {
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           });
           return {
             success: false,
             message: 'Failed to check gold prices',
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           };
         }
       }
@@ -848,12 +849,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         };
       } catch (error) {
         logger.error('Error checking gold prices', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         return {
           success: false,
           message: 'Failed to check gold prices',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         };
       }
     }

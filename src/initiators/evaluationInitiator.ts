@@ -7,6 +7,7 @@
 
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo, getCTraderSymbolInfo } from './symbolValidator.js';
 import { getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
@@ -114,7 +115,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
         logger.warn('Failed to get current price from price provider', {
           tradingPair: order.tradingPair,
           normalizedTradingPair,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -235,7 +236,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
   } catch (error) {
     logger.warn('Failed to store entry order', {
       tradeId,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 
@@ -253,7 +254,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     } catch (error) {
       logger.warn('Failed to store stop loss order', {
         tradeId,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
     }
   }
@@ -297,7 +298,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
         logger.warn('Failed to store take profit order', {
           tradeId,
           tpIndex: i,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }

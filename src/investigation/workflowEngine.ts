@@ -10,6 +10,7 @@ import { LogglyApiClient, createLogglyApiClient, getLogglyConfigStatus } from '.
 import { RestClientV5 } from 'bybit-api';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { traceMessage } from '../scripts/trace_message.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -128,7 +129,7 @@ export class WorkflowEngine {
         logger.error('Error executing workflow step', {
           stepId: step.id,
           stepName: step.name,
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
 
         stepResults.push({
@@ -136,7 +137,7 @@ export class WorkflowEngine {
           result: {
             success: false,
             message: 'Step execution failed',
-            error: error instanceof Error ? error.message : String(error)
+            error: serializeErrorForLog(error)
           },
           timestamp: new Date().toISOString()
         });

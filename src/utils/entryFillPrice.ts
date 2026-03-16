@@ -10,6 +10,7 @@ import { Trade, DatabaseManager } from '../db/schema.js';
 import { getBybitField } from './bybitFieldHelper.js';
 import { normalizeCTraderSymbol } from './ctraderSymbolUtils.js';
 import { logger } from './logger.js';
+import { serializeErrorForLog } from './errorUtils.js';
 import type { RestClientV5 } from 'bybit-api';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
@@ -70,7 +71,7 @@ export async function getEntryFillPrice(
     } catch (err) {
       logger.debug('Could not fetch Bybit position for fill price', {
         tradeId: trade.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: serializeErrorForLog(err),
       });
     }
   }
@@ -100,7 +101,7 @@ export async function getEntryFillPrice(
     } catch (err) {
       logger.debug('Could not fetch cTrader position for fill price', {
         tradeId: trade.id,
-        error: err instanceof Error ? err.message : String(err),
+        error: serializeErrorForLog(err),
       });
     }
   }
