@@ -148,7 +148,7 @@
       "testnet": false,
       "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
       "riskPercentage": 1,
-      "accounts": ["demo", "hyrotrader_challenge1"]
+      "accounts": ["hyrotrader_challenge1"]
     },
     {
       "name": "ctrader",
