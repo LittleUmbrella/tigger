@@ -1,6 +1,7 @@
 import { MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import dayjs from 'dayjs';
 import { CTraderClient } from '../clients/ctraderClient.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -66,7 +67,7 @@ const getCurrentPrice = async (
     logger.error('Error getting current price from cTrader', {
       tradingPair,
       exchange: 'ctrader',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
     return null;
   }
@@ -135,7 +136,7 @@ const getClosedPositionInfoFromDeals = async (
   } catch (error) {
     logger.debug('Error getting closed position info from deals', {
       positionId,
-      error: error instanceof Error ? error.message : String(error),
+      error: serializeErrorForLog(error),
       exchange: 'ctrader'
     });
     return { closed: false };
@@ -220,7 +221,7 @@ const checkEntryFilled = async (
               symbol,
               attempt,
               maxRetries,
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
             if (attempt < maxRetries) await sleep(retryDelay);
           }
@@ -420,7 +421,7 @@ const checkEntryFilled = async (
             tradeId: trade.id,
             symbol,
             orderId: trade.order_id,
-            error: error instanceof Error ? error.message : String(error),
+            error: serializeErrorForLog(error),
             exchange: 'ctrader'
           });
           // Fallback: when getOpenOrders times out/fails, check deal history for fill+close
@@ -470,7 +471,7 @@ const checkEntryFilled = async (
   } catch (error) {
     logger.error('Error checking cTrader entry filled', {
       tradeId: trade.id,
-      error: error instanceof Error ? error.message : String(error),
+      error: serializeErrorForLog(error),
       exchange: 'ctrader'
     });
     return { filled: false };
@@ -604,7 +605,7 @@ const checkPositionClosed = async (
               symbol,
               attempt,
               maxRetries,
-              error: error instanceof Error ? error.message : String(error),
+              error: serializeErrorForLog(error),
               exchange: 'ctrader'
             });
             if (attempt < maxRetries) await sleep(retryDelay);
@@ -682,7 +683,7 @@ const checkPositionClosed = async (
     logger.error('Error checking cTrader position closed', {
       tradeId: trade.id,
       positionId: trade.position_id,
-      error: error instanceof Error ? error.message : String(error),
+      error: serializeErrorForLog(error),
       stack: error instanceof Error ? error.stack : undefined,
       exchange: 'ctrader'
     });
@@ -715,7 +716,7 @@ const cancelOrder = async (
       tradeId: trade.id,
       exchange: 'ctrader',
       orderId: trade.order_id,
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   }
 };
@@ -907,7 +908,7 @@ const checkOrderFilled = async (
       orderType: order.order_type,
       tradeId: trade.id,
       exchange: 'ctrader',
-      error: error instanceof Error ? error.message : String(error),
+      error: serializeErrorForLog(error),
       stack: error instanceof Error ? error.stack : undefined
     });
     return { filled: false };
@@ -987,7 +988,7 @@ const monitorTrade = async (
       } catch (error) {
         logger.debug('Failed to fetch reconcile, will fetch per-check', {
           tradeId: trade.id,
-          error: error instanceof Error ? error.message : String(error),
+          error: serializeErrorForLog(error),
           exchange: 'ctrader'
         });
       }
@@ -1045,7 +1046,7 @@ const monitorTrade = async (
         logger.debug('Error checking cTrader positions for pending trade', {
           tradeId: trade.id,
           exchange: 'ctrader',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
     }
@@ -1193,7 +1194,7 @@ const monitorTrade = async (
         } catch (err) {
           logger.warn('Failed to fetch open orders for fill check, will fetch per-order', {
             tradeId: trade.id,
-            error: err instanceof Error ? err.message : String(err),
+            error: serializeErrorForLog(err),
             exchange: 'ctrader'
           });
         }
@@ -1292,7 +1293,7 @@ const monitorTrade = async (
     logger.error('Error monitoring cTrader trade', {
       tradeId: trade.id,
       exchange: 'ctrader',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   } finally {
     const totalElapsedMs = Date.now() - monitorStart;
@@ -1362,7 +1363,7 @@ export const startCTraderMonitor = async (
       logger.error('Failed to initialize cTrader client', {
         channel,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1418,7 +1419,7 @@ export const startCTraderMonitor = async (
               tradeId: trade.id,
               channel,
               exchange: 'ctrader',
-              error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+              error: serializeErrorForLog(result.reason)
             });
           }
         }
@@ -1432,7 +1433,7 @@ export const startCTraderMonitor = async (
         logger.error('Error in cTrader monitor loop', {
           channel,
           exchange: 'ctrader',
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
         if (!isMaxSpeed) {
           await sleep(pollInterval * 2);
@@ -1445,7 +1446,7 @@ export const startCTraderMonitor = async (
     logger.error('Fatal error in cTrader monitor loop', {
       channel,
       exchange: 'ctrader',
-      error: error instanceof Error ? error.message : String(error)
+      error: serializeErrorForLog(error)
     });
   });
 

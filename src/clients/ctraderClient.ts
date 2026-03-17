@@ -1,4 +1,5 @@
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
 
 /**
@@ -79,7 +80,7 @@ export class CTraderClient {
       });
     } catch (error) {
       logger.error('Failed to connect to cTrader OpenAPI', {
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -130,8 +131,7 @@ export class CTraderClient {
       }
     } catch (error) {
       logger.error('Failed to authenticate with cTrader OpenAPI', {
-        error: error instanceof Error ? error.message : String(error),
-        errorString: String(error),
+        error: serializeErrorForLog(error),
         errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined,
         stack: error instanceof Error ? error.stack : undefined
       });
@@ -158,7 +158,7 @@ export class CTraderClient {
       return response;
     } catch (error) {
       logger.error('Failed to get account list', {
-        error: error instanceof Error ? error.message : String(error),
+        error: serializeErrorForLog(error),
         note: 'This might require account authentication. Try using CTraderConnection.getAccessTokenAccounts() if you have an access token.'
       });
       throw error;
@@ -186,8 +186,7 @@ export class CTraderClient {
       return response;
     } catch (error) {
       logger.error('Failed to get account info', {
-        error: error instanceof Error ? error.message : String(error),
-        errorString: String(error),
+        error: serializeErrorForLog(error),
         errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined
       });
       throw error;
@@ -277,7 +276,7 @@ export class CTraderClient {
           symbol: params.symbol,
           from: new Date(currentFrom).toISOString(),
           to: new Date(currentTo).toISOString(),
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
 
@@ -379,7 +378,7 @@ export class CTraderClient {
           symbol: params.symbol,
           from: new Date(currentFrom).toISOString(),
           to: new Date(currentTo).toISOString(),
-          error: error instanceof Error ? error.message : String(error),
+          error: serializeErrorForLog(error),
         });
       }
 
@@ -517,7 +516,7 @@ export class CTraderClient {
         symbol,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -596,7 +595,7 @@ export class CTraderClient {
         volume: params.volume,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -696,7 +695,7 @@ export class CTraderClient {
         price: params.price,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -773,7 +772,7 @@ export class CTraderClient {
         stopPrice: params.stopPrice,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -900,7 +899,7 @@ export class CTraderClient {
       logger.error('Failed to get open positions', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -928,7 +927,7 @@ export class CTraderClient {
       logger.error('Failed to get open orders', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -991,7 +990,7 @@ export class CTraderClient {
       logger.error('Failed to get deal list', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1058,7 +1057,7 @@ export class CTraderClient {
       logger.error('Failed to get deal list by position', {
         positionId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1124,7 +1123,7 @@ export class CTraderClient {
       logger.error('Failed to get closed orders', {
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1154,7 +1153,7 @@ export class CTraderClient {
         orderId,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1188,7 +1187,7 @@ export class CTraderClient {
         takeProfit: params.takeProfit,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1255,7 +1254,7 @@ export class CTraderClient {
         positionId,
         accountId: this.config.accountId,
         exchange: 'ctrader',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       throw error;
     }
@@ -1412,7 +1411,7 @@ export class CTraderClient {
             }
             resolve({
               reason: 'subscribe_failed',
-              error: error instanceof Error ? error.message : String(error)
+              error: serializeErrorForLog(error)
             });
           }
         });
@@ -1420,7 +1419,7 @@ export class CTraderClient {
     } catch (error) {
       return {
         reason: 'symbol_lookup',
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       };
     }
   }
@@ -1434,7 +1433,7 @@ export class CTraderClient {
         await this.connection.close();
       } catch (error) {
         logger.warn('Error closing cTrader connection', {
-          error: error instanceof Error ? error.message : String(error)
+          error: serializeErrorForLog(error)
         });
       }
       this.connection = null;
