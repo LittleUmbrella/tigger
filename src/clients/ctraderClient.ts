@@ -1077,18 +1077,55 @@ export class CTraderClient {
   }
 
   /**
-   * Resolve positionId from an entry orderId via deal history.
-   * When an entry order fills, it creates a deal; the deal links orderId → positionId.
-   * Use this to find the exact position created by our order (avoids symbol-based find
-   * which can return the wrong position when multiple positions exist for the same symbol).
+   * Get order details and related deals by order ID. Direct lookup - no time window needed.
+   * Uses ProtoOAOrderDetailsReq.
+   */
+  async getOrderDetails(orderId: string): Promise<{ order: any; deals: any[] } | null> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+    try {
+      const response = await this.connection.sendCommand('ProtoOAOrderDetailsReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        orderId: parseInt(orderId, 10)
+      });
+      const order = response?.order;
+      const deals = response?.deal || [];
+      if (!order) return null;
+      return {
+        order,
+        deals: deals.map((d: any) => {
+          const oid = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+          const pid = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
+          return { ...d, orderId: oid != null ? String(oid) : d.orderId, positionId: pid != null ? String(pid) : d.positionId };
+        })
+      };
+    } catch (error: any) {
+      const code = error?.errorCode ?? error?.error_code;
+      if (code === 'ORDER_NOT_FOUND' || (typeof code === 'string' && code.includes('ORDER_NOT_FOUND'))) {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Resolve positionId from an entry orderId.
+   * Prefers ProtoOAOrderDetailsReq (direct order ID lookup, no time window).
+   * Falls back to getDealList for orders not found (e.g. very old).
    */
   async getPositionIdByEntryOrderId(
     orderId: string,
     fromTimestamp?: number,
     toTimestamp?: number
   ): Promise<string | null> {
+    const details = await this.getOrderDetails(orderId);
+    if (details && details.deals.length > 0) {
+      const posId = details.deals[0].positionId;
+      return posId != null ? String(posId) : null;
+    }
     const to = toTimestamp ?? Date.now();
-    const from = fromTimestamp ?? to - 5 * 60 * 1000; // default: last 5 min
+    const from = fromTimestamp ?? to - 24 * 60 * 60 * 1000;
     const deals = await this.getDealList(from, to);
     const deal = deals.find((d: any) => String(d.orderId) === String(orderId));
     const posId = deal?.positionId;

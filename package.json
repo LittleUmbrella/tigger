@@ -26,6 +26,7 @@
     "cancel-ctrader-order": "tsx src/scripts/cancel_ctrader_order.ts",
     "open-ctrader-trade": "tsx src/scripts/open_ctrader_trade.ts",
     "troubleshoot-trade": "tsx src/scripts/troubleshoot_trade.ts",
+    "debug-ctrader-closures": "tsx src/scripts/debug_ctrader_trade_closures.ts",
     "trace-message": "tsx src/scripts/trace_message.ts",
     "investigate": "tsx src/investigation/cli.ts",
     "query-loggly": "tsx src/scripts/query_loggly.ts",

@@ -726,3 +726,20 @@ message ProtoOADealListByPositionIdRes {
     repeated ProtoOADeal deal = 3; // The list of deals.
     required bool hasMore = 4; // If TRUE then the number of records by filter is larger than chunkSize, the response contains the number of records that is equal to chunkSize.
 }
+
+/** Request for getting Order and its related Deals by order ID. No time window needed. */
+message ProtoOAOrderDetailsReq {
+    optional ProtoOAPayloadType payloadType = 1 [default = PROTO_OA_ORDER_DETAILS_REQ];
+
+    required int64 ctidTraderAccountId = 2; // Unique identifier of the trader's account.
+    required int64 orderId = 3; // The unique ID of the Order.
+}
+
+/** Response to the ProtoOAOrderDetailsReq request. */
+message ProtoOAOrderDetailsRes {
+    optional ProtoOAPayloadType payloadType = 1 [default = PROTO_OA_ORDER_DETAILS_RES];
+
+    required int64 ctidTraderAccountId = 2; // Unique identifier of the trader's account.
+    required ProtoOAOrder order = 3; // Order details.
+    repeated ProtoOADeal deal = 4; // All Deals created by filling the specified Order.
+}
