@@ -562,6 +562,50 @@ const checkPositionClosed = async (
       }
       
       return { closed: false };
+    } else if (ctraderClient && trade.order_id && !trade.position_id) {
+      // Active trade with order_id but no position_id - order may have filled and position closed on exchange
+      const [fromTs, toTs] = capDealHistoryWindow(
+        trade.entry_filled_at
+          ? new Date(trade.entry_filled_at).getTime()
+          : new Date(trade.created_at).getTime(),
+        Date.now()
+      );
+      const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
+        trade.order_id,
+        fromTs,
+        toTs
+      );
+      if (!resolvedPositionId) {
+        logger.debug('Cannot resolve position from order_id for close check', {
+          tradeId: trade.id,
+          orderId: trade.order_id,
+          exchange: 'ctrader'
+        });
+        return { closed: false };
+      }
+      const closedInfo = await getClosedPositionInfoFromDeals(
+        ctraderClient,
+        resolvedPositionId,
+        fromTs,
+        toTs
+      );
+      if (closedInfo.closed) {
+        logger.info('cTrader position closed (resolved via order_id, position_id was null)', {
+          tradeId: trade.id,
+          symbol: trade.trading_pair,
+          orderId: trade.order_id,
+          positionId: resolvedPositionId,
+          exitPrice: closedInfo.exitPrice,
+          pnl: closedInfo.pnl,
+          exchange: 'ctrader'
+        });
+        return {
+          closed: true,
+          exitPrice: closedInfo.exitPrice,
+          pnl: closedInfo.pnl,
+        };
+      }
+      return { closed: false };
     } else if (ctraderClient && trade.position_id) {
       const symbol = normalizeCTraderSymbol(trade.trading_pair);
       
@@ -932,6 +976,48 @@ const monitorTrade = async (
   const monitorStart = Date.now();
 
   try {
+    // Single reconcile fetch - do early for active trades to detect closed-on-exchange before logging
+    let cachedPositions: any[] | undefined;
+    let cachedOrders: any[] | undefined;
+    if (!isSimulation && ctraderClient) {
+      t0 = Date.now();
+      try {
+        const reconciled = await ctraderClient.getOpenPositionsAndOrders();
+        cachedPositions = reconciled.positions;
+        cachedOrders = reconciled.orders;
+        timings.reconcile = Date.now() - t0;
+
+        // Early exit for active trades closed on exchange - avoid "Monitoring" log spam
+        if (trade.status === 'active' || trade.status === 'filled') {
+          const positionResult = await checkPositionClosed(
+            trade,
+            ctraderClient,
+            isSimulation,
+            priceProvider,
+            cachedPositions
+          );
+          if (positionResult.closed) {
+            logger.info('cTrader trade closed on exchange - updated (skipping monitor)', {
+              tradeId: trade.id,
+              symbol: trade.trading_pair,
+              orderId: trade.order_id,
+              exitPrice: positionResult.exitPrice,
+              pnl: positionResult.pnl,
+              exchange: 'ctrader'
+            });
+            await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
+            return;
+          }
+        }
+      } catch (error) {
+        logger.debug('Failed to fetch reconcile, will fetch per-check', {
+          tradeId: trade.id,
+          error: serializeErrorForLog(error),
+          exchange: 'ctrader'
+        });
+      }
+    }
+
     logger.info('Monitoring cTrader trade', {
       tradeId: trade.id,
       status: trade.status,
@@ -975,24 +1061,6 @@ const monitorTrade = async (
     }
     timings.checkTradeExpired = Date.now() - t0;
 
-    // Single reconcile fetch for positions+orders - avoids timeout when trade already closed
-    let cachedPositions: any[] | undefined;
-    let cachedOrders: any[] | undefined;
-    if (!isSimulation && ctraderClient) {
-      t0 = Date.now();
-      try {
-        const reconciled = await ctraderClient.getOpenPositionsAndOrders();
-        cachedPositions = reconciled.positions;
-        cachedOrders = reconciled.orders;
-        timings.reconcile = Date.now() - t0;
-      } catch (error) {
-        logger.debug('Failed to fetch reconcile, will fetch per-check', {
-          tradeId: trade.id,
-          error: serializeErrorForLog(error),
-          exchange: 'ctrader'
-        });
-      }
-    }
     t0 = Date.now();
 
     // For pending trades, check if position already exists
