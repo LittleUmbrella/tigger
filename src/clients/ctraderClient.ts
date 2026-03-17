@@ -779,6 +779,59 @@ export class CTraderClient {
   }
 
   /**
+   * Get open positions and orders in a single reconcile call.
+   * Use when monitor needs both - avoids duplicate reconcile timeouts for closed trades.
+   */
+  async getOpenPositionsAndOrders(): Promise<{ positions: any[]; orders: any[] }> {
+    const response = await this.getReconcile();
+    const positions = response?.position || [];
+    const orders = response?.order || [];
+
+    let enrichedPositions = positions;
+    if (positions.length > 0) {
+      const symbolList = await this.connection!.sendCommand('ProtoOASymbolsListReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
+      });
+      const symbols = symbolList?.symbol || [];
+      const symbolIdToName = new Map<number, string>();
+      for (const s of symbols) {
+        const id = typeof s.symbolId === 'object' && s.symbolId?.low != null ? s.symbolId.low : s.symbolId;
+        if (s.symbolName != null) symbolIdToName.set(id, s.symbolName);
+      }
+      enrichedPositions = positions.map((p: any) => {
+        const symbolId = p.tradeData?.symbolId;
+        const id = typeof symbolId === 'object' && symbolId?.low != null ? symbolId.low : symbolId;
+        const symbolName = id != null ? symbolIdToName.get(id) : undefined;
+        const volume = p.tradeData?.volume;
+        const vol = typeof volume === 'object' && volume?.low != null ? volume.low : volume;
+        const tradeSide = p.tradeData?.tradeSide;
+        const side = typeof tradeSide === 'number' ? (tradeSide === 1 ? 'BUY' : tradeSide === 2 ? 'SELL' : undefined) ?? tradeSide : tradeSide;
+        return {
+          ...p,
+          symbolName: symbolName ?? p.symbolName,
+          symbol: symbolName ?? p.symbol,
+          volume: vol ?? p.volume,
+          quantity: vol ?? p.quantity,
+          tradeSide: side ?? p.tradeSide,
+          side: side ?? p.side,
+          positionId: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+          id: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+          stopLoss: p.stopLoss,
+          avgPrice: p.price ?? p.avgPrice,
+          averagePrice: p.price ?? p.averagePrice
+        };
+      });
+    }
+
+    const enrichedOrders = orders.map((o: any) => {
+      const orderId = typeof o.orderId === 'object' && o.orderId?.low != null ? o.orderId.low : o.orderId;
+      return { ...o, orderId: orderId != null ? String(orderId) : o.orderId, id: orderId ?? o.id };
+    });
+
+    return { positions: enrichedPositions, orders: enrichedOrders };
+  }
+
+  /**
    * Get open positions (uses ProtoOAReconcileReq; positions have tradeData.symbolId, we enrich with symbolName)
    */
   async getOpenPositions(): Promise<any[]> {

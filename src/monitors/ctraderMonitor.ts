@@ -21,6 +21,14 @@ import {
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
+/** Max deal history window (7 days) - caps slow API scans when trade already closed */
+const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] => {
+  if (toTs - fromTs <= DEAL_HISTORY_MAX_WINDOW_MS) return [fromTs, toTs];
+  return [toTs - DEAL_HISTORY_MAX_WINDOW_MS, toTs];
+};
+
 /**
  * Get current price from cTrader
  */
@@ -65,15 +73,95 @@ const getCurrentPrice = async (
 };
 
 /**
+ * Extract exit price and PNL from cTrader closing deals (position history).
+ * Used when getOpenPositions times out or position was already closed by the exchange.
+ * Only returns closed: true when total closed volume >= opening volume (handles partial closes).
+ */
+const getClosedPositionInfoFromDeals = async (
+  ctraderClient: CTraderClient,
+  positionId: string,
+  fromTimestamp: number,
+  toTimestamp: number
+): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
+  try {
+    const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
+    const deals = await ctraderClient.getDealListByPositionId(positionId, fromTimestamp, toTimestamp);
+    const closingDeals = deals.filter((d: any) => {
+      const detail = d.closePositionDetail ?? d.close_position_detail;
+      return detail != null;
+    });
+    const openingDeals = deals.filter((d: any) => {
+      const detail = d.closePositionDetail ?? d.close_position_detail;
+      return detail == null;
+    });
+    if (closingDeals.length === 0) return { closed: false };
+
+    const openingVolume = openingDeals.reduce((sum: number, d: any) => {
+      const v = d.volume ?? d.filledVolume ?? d.filled_volume ?? 0;
+      return sum + (Number(toNum(v)) || 0);
+    }, 0);
+    if (openingVolume === 0) return { closed: false };
+    const closingVolume = closingDeals.reduce((sum: number, d: any) => {
+      const v = d.volume ?? d.filledVolume ?? d.filled_volume ?? d.closePositionDetail?.closedVolume ?? d.close_position_detail?.closedVolume ?? 0;
+      return sum + (Number(toNum(v)) || 0);
+    }, 0);
+    const tolerance = Math.max(1, Math.floor(openingVolume * 0.001));
+    if (closingVolume < openingVolume - tolerance) {
+      return { closed: false };
+    }
+
+    let totalPnl = 0;
+    let totalClosedVol = 0;
+    let weightedPriceSum = 0;
+    for (const d of closingDeals) {
+      const detail = d.closePositionDetail ?? d.close_position_detail;
+      const vol = d.volume ?? d.filledVolume ?? d.filled_volume ?? detail?.closedVolume ?? 0;
+      const volNum = Number(toNum(vol)) || 0;
+      const grossProfit = detail?.grossProfit ?? detail?.gross_profit ?? 0;
+      const moneyDigits = detail?.moneyDigits ?? detail?.money_digits ?? 2;
+      const raw = protobufLongToNumber(grossProfit) ?? 0;
+      totalPnl += raw / Math.pow(10, moneyDigits);
+      const execPrice = d.executionPrice ?? d.execution_price ?? 0;
+      const priceNum = typeof execPrice === 'number' ? execPrice : parseFloat(execPrice ?? '0');
+      weightedPriceSum += priceNum * volNum;
+      totalClosedVol += volNum;
+    }
+    const exitPrice = totalClosedVol > 0 ? weightedPriceSum / totalClosedVol : undefined;
+    return {
+      closed: true,
+      exitPrice: exitPrice != null && exitPrice > 0 ? exitPrice : undefined,
+      pnl: totalPnl !== 0 ? totalPnl : undefined,
+    };
+  } catch (error) {
+    logger.debug('Error getting closed position info from deals', {
+      positionId,
+      error: error instanceof Error ? error.message : String(error),
+      exchange: 'ctrader'
+    });
+    return { closed: false };
+  }
+};
+
+/**
  * Check if entry order is filled for cTrader
  * Implements advanced order querying with multiple fallback strategies (Gap #5)
+ * Uses position/deal history when open positions time out or exchange already closed the trade.
  */
 const checkEntryFilled = async (
   trade: Trade,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider
-): Promise<{ filled: boolean; positionId?: string; filledAt?: string; filledPrice?: number }> => {
+  priceProvider?: HistoricalPriceProvider,
+  preFetched?: { positions: any[]; orders: any[] }
+): Promise<{
+  filled: boolean;
+  positionId?: string;
+  filledAt?: string;
+  filledPrice?: number;
+  alreadyClosed?: boolean;
+  exitPrice?: number;
+  pnl?: number;
+}> => {
   try {
     if (isSimulation) {
       if (priceProvider) {
@@ -103,34 +191,38 @@ const checkEntryFilled = async (
       
       // Strategy 1: Check positions first (most reliable indicator)
       let positions: any[] = [];
-      const maxRetries = 3;
-      const retryDelay = 1000;
-      
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          positions = await ctraderClient.getOpenPositions();
-          logger.info('cTrader positions received', {
-            tradeId: trade.id,
-            symbol,
-            positionsCount: positions.length,
-            channel: trade.channel,
-            exchange: 'ctrader'
-          });
-          
-          if (positions.length >= 0) {
-            break; // Got response, exit retry loop
-          }
-        } catch (error) {
-          logger.debug('Error getting positions, retrying', {
-            tradeId: trade.id,
-            symbol,
-            attempt,
-            maxRetries,
-            error: error instanceof Error ? error.message : String(error)
-          });
-          
-          if (attempt < maxRetries) {
-            await sleep(retryDelay);
+      if (preFetched) {
+        positions = preFetched.positions;
+        logger.info('cTrader positions (pre-fetched)', {
+          tradeId: trade.id,
+          symbol,
+          positionsCount: positions.length,
+          channel: trade.channel,
+          exchange: 'ctrader'
+        });
+      } else {
+        const maxRetries = 1;
+        const retryDelay = 1000;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            positions = await ctraderClient.getOpenPositions();
+            logger.info('cTrader positions received', {
+              tradeId: trade.id,
+              symbol,
+              positionsCount: positions.length,
+              channel: trade.channel,
+              exchange: 'ctrader'
+            });
+            break;
+          } catch (error) {
+            logger.debug('Error getting positions, retrying', {
+              tradeId: trade.id,
+              symbol,
+              attempt,
+              maxRetries,
+              error: error instanceof Error ? error.message : String(error)
+            });
+            if (attempt < maxRetries) await sleep(retryDelay);
           }
         }
       }
@@ -187,7 +279,7 @@ const checkEntryFilled = async (
         });
         
         try {
-          const openOrders = await ctraderClient.getOpenOrders();
+          const openOrders = preFetched?.orders ?? (await ctraderClient.getOpenOrders());
           logger.info('cTrader open orders received', {
             tradeId: trade.id,
             symbol,
@@ -220,7 +312,7 @@ const checkEntryFilled = async (
             });
             
             // Strategy 3: Re-check positions (position might have been created after initial check)
-            const positionsAgain = await ctraderClient.getOpenPositions();
+            const positionsAgain = preFetched ? preFetched.positions : await ctraderClient.getOpenPositions();
             const positionAgain = positionsAgain.find((p: any) => {
               const positionSymbol = p.symbolName || p.symbol;
               const volume = Math.abs(p.volume || p.quantity || 0);
@@ -253,7 +345,42 @@ const checkEntryFilled = async (
               };
             }
             
-            // Order filled but position closed already (edge case)
+            // Order filled but position closed already - verify via deal/position history
+            const [fromTs, toTs] = capDealHistoryWindow(
+              new Date(trade.created_at).getTime(),
+              Date.now()
+            );
+            const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
+              trade.order_id!,
+              fromTs,
+              toTs
+            );
+            if (resolvedPositionId) {
+              const closedInfo = await getClosedPositionInfoFromDeals(
+                ctraderClient,
+                resolvedPositionId,
+                fromTs,
+                toTs
+              );
+              if (closedInfo.closed) {
+                logger.info('Order filled, position already closed (from deal history)', {
+                  tradeId: trade.id,
+                  symbol,
+                  orderId: trade.order_id,
+                  positionId: resolvedPositionId,
+                  exitPrice: closedInfo.exitPrice,
+                  pnl: closedInfo.pnl,
+                  exchange: 'ctrader'
+                });
+                return {
+                  filled: true,
+                  positionId: resolvedPositionId,
+                  alreadyClosed: true,
+                  exitPrice: closedInfo.exitPrice,
+                  pnl: closedInfo.pnl,
+                };
+              }
+            }
             logger.debug('Order not found and no position - assuming filled but position closed', {
               tradeId: trade.id,
               symbol,
@@ -289,13 +416,47 @@ const checkEntryFilled = async (
             }
           }
         } catch (error) {
-          logger.debug('Error checking cTrader orders', {
+          logger.debug('Error checking cTrader orders, trying deal history fallback', {
             tradeId: trade.id,
             symbol,
             orderId: trade.order_id,
             error: error instanceof Error ? error.message : String(error),
             exchange: 'ctrader'
           });
+          // Fallback: when getOpenOrders times out/fails, check deal history for fill+close
+          const [fromTs, toTs] = capDealHistoryWindow(
+            new Date(trade.created_at).getTime(),
+            Date.now()
+          );
+          const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
+            trade.order_id!,
+            fromTs,
+            toTs
+          );
+          if (resolvedPositionId) {
+            const closedInfo = await getClosedPositionInfoFromDeals(
+              ctraderClient,
+              resolvedPositionId,
+              fromTs,
+              toTs
+            );
+            if (closedInfo.closed) {
+              logger.info('Order filled, position closed (from deal history, after open orders failed)', {
+                tradeId: trade.id,
+                symbol,
+                orderId: trade.order_id,
+                positionId: resolvedPositionId,
+                exchange: 'ctrader'
+              });
+              return {
+                filled: true,
+                positionId: resolvedPositionId,
+                alreadyClosed: true,
+                exitPrice: closedInfo.exitPrice,
+                pnl: closedInfo.pnl,
+              };
+            }
+          }
         }
       } else {
         logger.debug('No order ID available, checking positions only', {
@@ -324,7 +485,8 @@ const checkPositionClosed = async (
   trade: Trade,
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
-  priceProvider?: HistoricalPriceProvider
+  priceProvider?: HistoricalPriceProvider,
+  preFetchedPositions?: any[]
 ): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
   try {
     logger.debug('Checking if cTrader position is closed', {
@@ -410,39 +572,42 @@ const checkPositionClosed = async (
         exchange: 'ctrader'
       });
       
-      // Get positions with retry logic (Gap #4)
+      // Get positions - use pre-fetched when available to avoid duplicate reconcile
       let positions: any[] = [];
-      const maxRetries = 3;
-      const retryDelay = 1000;
-      
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          positions = await ctraderClient.getOpenPositions();
-          
-          logger.info('cTrader positions received for close check', {
-            tradeId: trade.id,
-            symbol,
-            positionId: trade.position_id,
-            positionsCount: positions.length,
-            channel: trade.channel,
-            exchange: 'ctrader'
-          });
-          
-          if (positions.length >= 0) {
-            break; // Got response, exit retry loop
-          }
-        } catch (error) {
-          logger.debug('Error getting positions for close check, retrying', {
-            tradeId: trade.id,
-            symbol,
-            attempt,
-            maxRetries,
-            error: error instanceof Error ? error.message : String(error),
-            exchange: 'ctrader'
-          });
-          
-          if (attempt < maxRetries) {
-            await sleep(retryDelay);
+      if (preFetchedPositions) {
+        positions = preFetchedPositions;
+        logger.info('cTrader positions for close check (pre-fetched)', {
+          tradeId: trade.id,
+          symbol,
+          positionId: trade.position_id,
+          positionsCount: positions.length,
+          exchange: 'ctrader'
+        });
+      } else {
+        const maxRetries = 1;
+        const retryDelay = 1000;
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            positions = await ctraderClient.getOpenPositions();
+            logger.info('cTrader positions received for close check', {
+              tradeId: trade.id,
+              symbol,
+              positionId: trade.position_id,
+              positionsCount: positions.length,
+              channel: trade.channel,
+              exchange: 'ctrader'
+            });
+            break;
+          } catch (error) {
+            logger.debug('Error getting positions for close check, retrying', {
+              tradeId: trade.id,
+              symbol,
+              attempt,
+              maxRetries,
+              error: error instanceof Error ? error.message : String(error),
+              exchange: 'ctrader'
+            });
+            if (attempt < maxRetries) await sleep(retryDelay);
           }
         }
       }
@@ -477,10 +642,24 @@ const checkPositionClosed = async (
           exchange: 'ctrader',
           note: 'Position not found or volume is zero - position is closed'
         });
-        // Try to get closed position info from deal history or similar
-        // cTrader API might have a way to get closed positions
-        // For now, return closed without exit price/PNL
-        return { closed: true };
+        // Get exit price/PNL from position deal history (capped to avoid slow scans)
+        const [fromTs, toTs] = capDealHistoryWindow(
+          trade.entry_filled_at
+            ? new Date(trade.entry_filled_at).getTime()
+            : new Date(trade.created_at).getTime(),
+          Date.now()
+        );
+        const closedInfo = await getClosedPositionInfoFromDeals(
+          ctraderClient,
+          trade.position_id!,
+          fromTs,
+          toTs
+        );
+        return {
+          closed: true,
+          exitPrice: closedInfo.exitPrice,
+          pnl: closedInfo.pnl,
+        };
       } else {
         logger.debug('Position still open', {
           tradeId: trade.id,
@@ -795,11 +974,30 @@ const monitorTrade = async (
     }
     timings.checkTradeExpired = Date.now() - t0;
 
-    // For pending trades, check if position already exists
+    // Single reconcile fetch for positions+orders - avoids timeout when trade already closed
+    let cachedPositions: any[] | undefined;
+    let cachedOrders: any[] | undefined;
+    if (!isSimulation && ctraderClient) {
+      t0 = Date.now();
+      try {
+        const reconciled = await ctraderClient.getOpenPositionsAndOrders();
+        cachedPositions = reconciled.positions;
+        cachedOrders = reconciled.orders;
+        timings.reconcile = Date.now() - t0;
+      } catch (error) {
+        logger.debug('Failed to fetch reconcile, will fetch per-check', {
+          tradeId: trade.id,
+          error: error instanceof Error ? error.message : String(error),
+          exchange: 'ctrader'
+        });
+      }
+    }
     t0 = Date.now();
+
+    // For pending trades, check if position already exists
     if (trade.status === 'pending' && !isSimulation && ctraderClient) {
       try {
-        const positions = await ctraderClient.getOpenPositions();
+        const positions = cachedPositions ?? await ctraderClient.getOpenPositions();
         const symbol = normalizeCTraderSymbol(trade.trading_pair);
         const position = positions.find((p: any) => {
           const positionSymbol = p.symbolName || p.symbol;
@@ -910,7 +1108,13 @@ const monitorTrade = async (
         exchange: 'ctrader'
       });
       
-      const entryResult = await checkEntryFilled(trade, ctraderClient, isSimulation, priceProvider);
+      const entryResult = await checkEntryFilled(
+        trade,
+        ctraderClient,
+        isSimulation,
+        priceProvider,
+        cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined
+      );
       logger.debug('cTrader entry fill check result', {
         tradeId: trade.id,
         filled: entryResult.filled,
@@ -920,6 +1124,30 @@ const monitorTrade = async (
       
       if (entryResult.filled) {
         const fillPrice = entryResult.filledPrice;
+        if (entryResult.alreadyClosed) {
+          logger.info('cTrader entry filled but position already closed by exchange (from deal history)', {
+            tradeId: trade.id,
+            tradingPair: trade.trading_pair,
+            positionId: entryResult.positionId,
+            exitPrice: entryResult.exitPrice,
+            pnl: entryResult.pnl,
+            channel: trade.channel,
+            exchange: 'ctrader'
+          });
+          const fillTime = entryResult.filledAt ?? dayjs().toISOString();
+          const resolvedEntryPrice = fillPrice ?? trade.entry_price;
+          await db.updateTrade(trade.id, {
+            entry_filled_at: fillTime,
+            position_id: entryResult.positionId,
+            entry_price: resolvedEntryPrice,
+          });
+          trade.entry_filled_at = fillTime;
+          trade.position_id = entryResult.positionId;
+          trade.entry_price = resolvedEntryPrice;
+          await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
+          await updateTradeOnPositionClosed(trade, db, entryResult.exitPrice, entryResult.pnl);
+          return;
+        }
         logger.info('cTrader entry order filled', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
@@ -955,12 +1183,11 @@ const monitorTrade = async (
     if (trade.status === 'active' || trade.status === 'filled') {
       const orders = await db.getOrdersByTradeId(trade.id);
 
-      // Check SL/TP orders for fills
+      // Check SL/TP orders for fills - use pre-fetched orders when available
       const pendingOrders = orders.filter(o => o.status === 'pending');
-      // Fetch open orders ONCE and reuse - avoid N reconcile calls (was causing 60s timeout for trades with multiple orders)
-      let cachedOpenOrders: any[] | undefined;
-      t0 = Date.now();
-      if (pendingOrders.length > 0 && ctraderClient) {
+      let cachedOpenOrders: any[] | undefined = cachedOrders;
+      if (cachedOpenOrders === undefined && pendingOrders.length > 0 && ctraderClient) {
+        t0 = Date.now();
         try {
           cachedOpenOrders = await ctraderClient.getOpenOrders();
         } catch (err) {
@@ -970,8 +1197,8 @@ const monitorTrade = async (
             exchange: 'ctrader'
           });
         }
+        timings.fetchOpenOrders = Date.now() - t0;
       }
-      timings.fetchOpenOrders = Date.now() - t0;
 
       t0 = Date.now();
       for (const order of pendingOrders) {
@@ -1017,9 +1244,15 @@ const monitorTrade = async (
       }
       timings.checkOrderFillsLoop = Date.now() - t0;
 
-      // Check if position is closed (pass db for fallback when position_id missing - detects orphans)
+      // Check if position is closed (use pre-fetched positions when available)
       t0 = Date.now();
-      const positionResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
+      const positionResult = await checkPositionClosed(
+        trade,
+        ctraderClient,
+        isSimulation,
+        priceProvider,
+        cachedPositions
+      );
       timings.checkPositionClosed = Date.now() - t0;
         if (positionResult.closed) {
         logger.info('cTrader position closed', {
@@ -1041,7 +1274,13 @@ const monitorTrade = async (
           exchange: 'ctrader'
         });
         
-        const stopLossResult = await checkPositionClosed(trade, ctraderClient, isSimulation, priceProvider);
+        const stopLossResult = await checkPositionClosed(
+          trade,
+          ctraderClient,
+          isSimulation,
+          priceProvider,
+          cachedPositions
+        );
         if (stopLossResult.closed) {
           await updateTradeOnStopLossHit(trade, db, stopLossResult.exitPrice, stopLossResult.pnl);
         } else {
