@@ -115,6 +115,8 @@ export interface MonitorConfig {
   ctraderSpotPriceTimeoutMs?: number;
   /** cTrader only: max retries for getCurrentPrice (default 3) */
   ctraderSpotPriceMaxRetries?: number;
+  /** cTrader only: max concurrent trades to monitor per poll (default 2). Limits historical API burst to stay under 5 req/sec. */
+  ctraderMonitorConcurrency?: number;
 }
 
 export interface AccountFilterRule {

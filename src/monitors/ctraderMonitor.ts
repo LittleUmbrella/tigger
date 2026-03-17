@@ -1,3 +1,4 @@
+import pLimit from 'p-limit';
 import { MonitorConfig } from '../types/config.js';
 import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
@@ -1440,6 +1441,8 @@ export const startCTraderMonitor = async (
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
+  const concurrency = monitorConfig.ctraderMonitorConcurrency ?? 2;
+  const limit = pLimit(concurrency);
 
   const monitorLoop = async (): Promise<void> => {
     const isMaxSpeed = speedMultiplier !== undefined && (speedMultiplier === 0 || speedMultiplier === Infinity || !isFinite(speedMultiplier));
@@ -1448,34 +1451,36 @@ export const startCTraderMonitor = async (
       try {
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'ctrader');
         
-        // Process each trade in parallel with per-trade timeout - prevents one stuck trade from blocking others
-        const tradeTasks = trades.map(async (trade) => {
-          const accountCTraderClient = getCTraderClient
-            ? await getCTraderClient(trade.account_name)
-            : ctraderClient;
-          if (!accountCTraderClient) {
-            logger.warn('No cTrader client for trade - cannot check position or cancel orders', {
-              tradeId: trade.id,
-              channel,
-              accountName: trade.account_name ?? '(none)',
-              exchange: 'ctrader'
-            });
-          }
-          return Promise.race([
-            monitorTrade(
-              channel,
-              entryTimeoutMinutes,
-              trade,
-              db,
-              accountCTraderClient,
-              isSimulation,
-              priceProvider
-            ),
-            new Promise<void>((_, reject) =>
-              setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
-            )
-          ]);
-        });
+        // Process trades with limited concurrency - avoids bursting cTrader historical API (5 req/sec limit)
+        const tradeTasks = trades.map((trade) =>
+          limit(async () => {
+            const accountCTraderClient = getCTraderClient
+              ? await getCTraderClient(trade.account_name)
+              : ctraderClient;
+            if (!accountCTraderClient) {
+              logger.warn('No cTrader client for trade - cannot check position or cancel orders', {
+                tradeId: trade.id,
+                channel,
+                accountName: trade.account_name ?? '(none)',
+                exchange: 'ctrader'
+              });
+            }
+            return Promise.race([
+              monitorTrade(
+                channel,
+                entryTimeoutMinutes,
+                trade,
+                db,
+                accountCTraderClient,
+                isSimulation,
+                priceProvider
+              ),
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
+              )
+            ]);
+          })
+        );
 
         const results = await Promise.allSettled(tradeTasks);
         for (let i = 0; i < results.length; i++) {
