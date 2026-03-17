@@ -882,14 +882,33 @@ export class CTraderClient {
     }
 
     try {
-      const response = await this.connection.sendCommand('ProtoOADealListReq', {
-        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-        fromTimestamp,
-        toTimestamp,
-        maxRows
-      });
+      const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+      const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
+      const allDeals: any[] = [];
+      let currentTo = toTimestamp;
+      let hasMore = true;
 
-      const deals = response?.deal || [];
+      while (hasMore) {
+        const response = await this.connection.sendCommand('ProtoOADealListReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+          fromTimestamp,
+          toTimestamp: currentTo,
+          maxRows
+        });
+
+        const deals = response?.deal || [];
+        allDeals.push(...deals);
+        hasMore = response?.hasMore === true && deals.length > 0;
+        if (hasMore && deals.length > 0) {
+          const oldestTs = Math.min(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
+          currentTo = oldestTs - 1;
+          if (currentTo < fromTimestamp) hasMore = false;
+        } else {
+          hasMore = false;
+        }
+      }
+
+      const deals = allDeals;
       return deals.map((d: any) => {
         const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
         const positionId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
@@ -904,6 +923,73 @@ export class CTraderClient {
     } catch (error) {
       logger.error('Failed to get deal list', {
         accountId: this.config.accountId,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Get deals for a specific position within a time window.
+   * Uses ProtoOADealListByPositionIdReq.
+   */
+  async getDealListByPositionId(
+    positionId: string,
+    fromTimestamp: number,
+    toTimestamp: number
+  ): Promise<any[]> {
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    const maxWindow = 604800000; // 1 week
+    if (toTimestamp - fromTimestamp > maxWindow) {
+      toTimestamp = fromTimestamp + maxWindow;
+    }
+
+    try {
+      const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+      const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
+      const allDeals: any[] = [];
+      let currentFrom = fromTimestamp;
+      let hasMore = true;
+
+      while (hasMore) {
+        const response = await this.connection.sendCommand('ProtoOADealListByPositionIdReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+          positionId: parseInt(positionId, 10),
+          fromTimestamp: currentFrom,
+          toTimestamp
+        });
+
+        const deals = response?.deal || [];
+        allDeals.push(...deals);
+        hasMore = response?.hasMore === true && deals.length > 0;
+        if (hasMore && deals.length > 0) {
+          const lastTs = Math.max(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
+          currentFrom = lastTs + 1;
+          if (currentFrom >= toTimestamp) hasMore = false;
+        } else {
+          hasMore = false;
+        }
+      }
+
+      const deals = allDeals;
+      return deals.map((d: any) => {
+        const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+        const posId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
+        return {
+          ...d,
+          orderId: orderId != null ? String(orderId) : d.orderId,
+          positionId: posId != null ? String(posId) : d.positionId,
+          dealStatus: d.dealStatus ?? d.deal_status,
+          executionPrice: d.executionPrice ?? d.execution_price
+        };
+      });
+    } catch (error) {
+      logger.error('Failed to get deal list by position', {
+        positionId,
         exchange: 'ctrader',
         error: error instanceof Error ? error.message : String(error)
       });

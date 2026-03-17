@@ -10,10 +10,19 @@
 import 'dotenv/config';
 import Database from 'better-sqlite3';
 import { Pool } from 'pg';
-import { readFileSync } from 'fs';
-import { join } from 'path';
+import fs from 'fs-extra';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import config from '../../config.json';
 import { calculatePositionSize } from '../utils/positionSizing.js';
+import { parseManagementCommand } from '../managers/managementParser.js';
+import { queryCTraderClosingDeals, queryCTraderPositionClosingDeals, queryCTraderPositionSlLevel } from '../investigation/utils/ctraderManagementExecution.js';
+import { queryBybitClosingExecutions } from '../investigation/utils/bybitManagementExecution.js';
+import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
+import { RestClientV5 } from 'bybit-api';
+import dayjs from 'dayjs';
+
+const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
 // Database connection based on config
 let db: Database.Database | Pool;
@@ -33,7 +42,7 @@ if (config.database.type === 'postgresql') {
 
 interface Trade {
   id: number;
-  message_id: number;
+  message_id: string;
   channel: string;
   trading_pair: string;
   leverage: number;
@@ -47,14 +56,18 @@ interface Trade {
   direction: string | null;
   status: string;
   created_at: string;
+  entry_filled_at?: string | null;
+  exit_filled_at?: string | null;
+  position_id?: string | null;
 }
 
 interface Message {
   id: number;
-  message_id: number;
+  message_id: string;
   channel: string;
   content: string;
   date: string;
+  reply_to_message_id?: string | null;
 }
 
 async function queryTrade(tradeId: number): Promise<Trade | null> {
@@ -74,7 +87,10 @@ async function queryTrade(tradeId: number): Promise<Trade | null> {
       account_name,
       direction,
       status,
-      created_at
+      created_at,
+      entry_filled_at,
+      exit_filled_at,
+      position_id
     FROM trades
     WHERE id = $1
   `;
@@ -87,7 +103,7 @@ async function queryTrade(tradeId: number): Promise<Trade | null> {
   }
 }
 
-async function queryMessage(messageId: number, channel: string): Promise<Message | null> {
+async function queryMessage(messageId: string, channel: string): Promise<Message | null> {
   const query = `
     SELECT 
       id,
@@ -98,13 +114,107 @@ async function queryMessage(messageId: number, channel: string): Promise<Message
     FROM messages
     WHERE message_id = $1 AND channel = $2
   `;
-  
+
   if (isPostgres) {
     const result = await (db as Pool).query(query, [messageId, channel]);
     return result.rows[0] || null;
   } else {
     return (db as Database.Database).prepare(query.replace(/\$1/g, '?').replace(/\$2/g, '?')).get(messageId, channel) as Message | null;
   }
+}
+
+async function queryMessagesInWindow(channel: string, startDate: string, endDate: string): Promise<Message[]> {
+  const query = `
+    SELECT id, message_id, channel, content, date, reply_to_message_id
+    FROM messages
+    WHERE channel = $1 AND date >= $2 AND date <= $3
+    ORDER BY date ASC
+  `;
+
+  if (isPostgres) {
+    const result = await (db as Pool).query(query, [channel, startDate, endDate]);
+    return result.rows || [];
+  } else {
+    const stmt = (db as Database.Database)
+      .prepare(query.replace(/\$1/g, '?').replace(/\$2/g, '?').replace(/\$3/g, '?'));
+    return (stmt.all(channel, startDate, endDate) as Message[]) || [];
+  }
+}
+
+/** Normalize trading pair for comparison (XAUUSD, XAU/USD, BTCUSDT, BTC/USDT -> canonical form) */
+function normalizePairForMatch(pair: string): string {
+  const s = (pair || '').replace(/\//g, '').toUpperCase();
+  if (s === 'XAUUSD') return 'XAUUSD';
+  return s.replace(/USDT$/, '') + 'USDT';
+}
+
+/** Check if a management command could apply to this trade */
+function commandAppliesToTrade(cmd: { type: string; tradingPair?: string }, trade: Trade): boolean {
+  if (cmd.type === 'close_all_trades' || cmd.type === 'close_all_longs' || cmd.type === 'close_all_shorts') {
+    if (cmd.type === 'close_all_longs' && trade.direction !== 'long') return false;
+    if (cmd.type === 'close_all_shorts' && trade.direction !== 'short') return false;
+    return true;
+  }
+  if (cmd.type === 'close_percentage' || cmd.type === 'close_position') {
+    if (!cmd.tradingPair) return true; // Unspecified = could apply to any
+    return normalizePairForMatch(cmd.tradingPair) === normalizePairForMatch(trade.trading_pair);
+  }
+  return false;
+}
+
+async function getCTraderClientForTrade(accountName?: string | null): Promise<CTraderClient | undefined> {
+  const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+  if (!(await fs.pathExists(configPath))) return undefined;
+  const cfg = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+  const account = cfg?.accounts?.find((a: any) =>
+    a.exchange === 'ctrader' && (accountName ? a.name === accountName : true)
+  ) ?? cfg?.accounts?.find((a: any) => a.exchange === 'ctrader');
+  const envKey = account?.envVarNames?.apiKey ?? account?.envVars?.apiKey;
+  const envSecret = account?.envVarNames?.apiSecret ?? account?.envVars?.apiSecret;
+  const envToken = account?.envVarNames?.accessToken ?? account?.envVars?.accessToken;
+  const envAccountId = account?.envVarNames?.accountId ?? account?.envVars?.accountId;
+  const clientId = envKey ? process.env[envKey] : process.env.CTRADER_CLIENT_ID;
+  const clientSecret = envSecret ? process.env[envSecret] : process.env.CTRADER_CLIENT_SECRET;
+  const accessToken = envToken ? process.env[envToken] : process.env.CTRADER_ACCESS_TOKEN;
+  const accountId = envAccountId ? process.env[envAccountId] : process.env.CTRADER_ACCOUNT_ID;
+  if (!clientId || !clientSecret || !accessToken || !accountId) return undefined;
+  const clientConfig: CTraderClientConfig = {
+    clientId,
+    clientSecret,
+    accessToken,
+    accountId,
+    environment: account?.demo ? 'demo' : 'live'
+  };
+  const client = new CTraderClient(clientConfig);
+  try {
+    await client.connect();
+    await client.authenticate();
+    return client;
+  } catch {
+    return undefined;
+  }
+}
+
+async function getBybitClientForTrade(accountName?: string | null): Promise<RestClientV5 | undefined> {
+  const configPath = process.env.CONFIG_PATH || path.join(projectRoot, 'config.json');
+  if (!(await fs.pathExists(configPath))) return undefined;
+  const cfg = JSON.parse(await fs.readFile(configPath, 'utf-8'));
+  const account = cfg?.accounts?.find((a: any) =>
+    (accountName ? a.name === accountName : true) && a.exchange !== 'ctrader'
+  ) ?? cfg?.accounts?.find((a: any) => !a.exchange || a.exchange === 'bybit');
+  const envKey = account?.envVarNames?.apiKey ?? account?.envVars?.apiKey;
+  const envSecret = account?.envVarNames?.apiSecret ?? account?.envVars?.apiSecret;
+  const apiKey = envKey ? process.env[envKey] : process.env.BYBIT_API_KEY;
+  const apiSecret = envSecret ? process.env[envSecret] : process.env.BYBIT_API_SECRET;
+  if (!apiKey || !apiSecret) return undefined;
+  const demo = account?.demo || false;
+  const baseUrl = demo ? 'https://api-demo.bybit.com' : undefined;
+  return new RestClientV5({
+    key: apiKey,
+    secret: apiSecret,
+    testnet: account?.testnet || false,
+    ...(baseUrl && { baseUrl })
+  });
 }
 
 function calculateExpectedQuantity(trade: Trade, accountBalance: number, baseLeverage?: number, originalStopLoss?: number) {
@@ -342,9 +452,12 @@ async function main() {
       }
     }
     
-    // Check if stop loss equals entry (breakeven)
+    // Original (pre-BE) stop loss — for SL verification narrative and "SL not reset" check
     let originalStopLoss: number | undefined;
-    if (trade.stop_loss === trade.entry_price) {
+    const tol = Math.max(0.01, (trade.entry_price || 0) * 0.0001);
+    if (trade.stop_loss != null && Math.abs(trade.stop_loss - trade.entry_price) >= tol) {
+      originalStopLoss = trade.stop_loss;
+    } else if (trade.stop_loss === trade.entry_price) {
       console.log('\n⚠️  Stop loss equals entry price - likely moved to breakeven');
       console.log('   Querying original message to find initial stop loss...');
       
@@ -384,7 +497,203 @@ async function main() {
     console.log(`Channel: ${trade.channel}`);
     console.log(`Base Leverage: ${baseLeverage || 'Not configured'}`);
     console.log(`Risk Percentage: ${riskPercentage}%`);
-    
+
+    // Management commands (like message investigation): messages that could have affected this trade
+    console.log('\n=== Management Commands ===');
+    const windowStart = trade.entry_filled_at || trade.created_at;
+    if (windowStart) {
+      const startDate = dayjs(windowStart).subtract(5, 'minute').toISOString();
+      const endDate = (trade.exit_filled_at ? dayjs(trade.exit_filled_at) : dayjs()).add(10, 'minute').toISOString();
+      const windowMessages = await queryMessagesInWindow(trade.channel, startDate, endDate);
+      const applicable: Array<{ date: string; content: string; cmd: { type: string; tradingPair?: string; percentage?: number; moveStopLossToEntry?: boolean } }> = [];
+      for (const m of windowMessages) {
+        const cmd = await parseManagementCommand(m.content, undefined, undefined, undefined);
+        if (cmd && commandAppliesToTrade(cmd, trade)) {
+          applicable.push({
+            date: m.date,
+            content: m.content,
+            cmd: {
+              type: cmd.type,
+              tradingPair: cmd.tradingPair,
+              percentage: (cmd as any).percentage,
+              moveStopLossToEntry: (cmd as any).moveStopLossToEntry
+            }
+          });
+        }
+      }
+      if (applicable.length > 0) {
+        console.log(`Found ${applicable.length} message(s) that may be management commands affecting this trade:`);
+        applicable.forEach((a, i) => {
+          const opts: string[] = [];
+          if (a.cmd.percentage) opts.push(`${a.cmd.percentage}%`);
+          if (a.cmd.moveStopLossToEntry) opts.push('SL→BE');
+          const optsStr = opts.length ? ` [${opts.join(', ')}]` : '';
+          console.log(`  ${i + 1}. ${a.date} | ${a.cmd.type}${optsStr}`);
+          console.log(`     "${(a.content || '').slice(0, 80)}${(a.content || '').length > 80 ? '...' : ''}"`);
+        });
+
+        // Verify execution by querying the exchange
+        const fromTs = dayjs(windowStart).subtract(5, 'minute').valueOf();
+        const toTs = (trade.exit_filled_at ? dayjs(trade.exit_filled_at) : dayjs()).add(10, 'minute').valueOf();
+        let executionConfirmed = false;
+        let executionDetail = '';
+
+        if (trade.exchange === 'ctrader') {
+          const ctraderClient = await getCTraderClientForTrade(trade.account_name);
+          if (ctraderClient) {
+            try {
+              const posId = trade.position_id ? String(trade.position_id) : '';
+              let relevantDeals: Array<{ dealId: string; volume: number; executionPrice?: number; grossProfit?: number; orderType?: string; closedBy?: string }>;
+
+              if (posId) {
+                const posResult = await queryCTraderPositionClosingDeals(ctraderClient, posId, fromTs, toTs, {
+                  entryPrice: trade.entry_price,
+                  isLong: (trade.direction ?? '').toLowerCase() === 'long'
+                });
+                relevantDeals = posResult.closingDeals ?? [];
+                if (posResult.error) {
+                  executionDetail = ` (position deals error: ${posResult.error})`;
+                } else if (relevantDeals.length > 0) {
+                  executionConfirmed = true;
+                  executionDetail = ` — ${relevantDeals.length} closing deal(s) for this position (pos ${posId})`;
+                  console.log(`\n  === Position closed by ===`);
+                  relevantDeals.forEach((d) => {
+                    const reason = d.closedBy ? ` [${d.closedBy}]` : d.orderType ? ` [${d.orderType}]` : '';
+                    const parts = [`Deal ${d.dealId}`, `${d.volume} lots`, `${d.orderType ?? '?'}${reason}`];
+                    if (d.executionPrice != null) parts.push(`@ ${d.executionPrice}`);
+                    if (d.grossProfit != null) parts.push(`P&L ${d.grossProfit}${(d as any).grossProfitEstimated ? ' (est.)' : ''}`);
+                    console.log(`     • ${parts.join(' ')}`);
+                  });
+                } else {
+                  const accountResult = await queryCTraderClosingDeals(ctraderClient, fromTs, toTs);
+                  relevantDeals = (accountResult.closingDeals ?? []).filter((d: any) => String(d.positionId) === posId);
+                  if (relevantDeals.length > 0) {
+                    executionConfirmed = true;
+                    executionDetail = ` — ${relevantDeals.length} closing deal(s) from account history (pos ${posId})`;
+                    console.log(`\n  === Position closed by (from account history) ===`);
+                    relevantDeals.forEach((d) => {
+                      const reason = d.closedBy ? ` [${d.closedBy}]` : d.orderType ? ` [${d.orderType}]` : '';
+                      const parts = [`Deal ${d.dealId}`, `${d.volume} lots`, `${d.orderType ?? '?'}${reason}`];
+                      if (d.executionPrice != null) parts.push(`@ ${d.executionPrice}`);
+                      if (d.grossProfit != null) parts.push(`P&L ${d.grossProfit}${(d as any).grossProfitEstimated ? ' (est.)' : ''}`);
+                      console.log(`     • ${parts.join(' ')}`);
+                    });
+                  } else {
+                    executionDetail = ` — no closing deals found for position ${posId}`;
+                  }
+                }
+              } else {
+                const result = await queryCTraderClosingDeals(ctraderClient, fromTs, toTs);
+                relevantDeals = result.closingDeals ?? [];
+                if (result.error) executionDetail = ` (query error: ${result.error})`;
+                else if (relevantDeals.length > 0) {
+                  executionConfirmed = true;
+                  executionDetail = ` — ${result.closingDealsCount} closing deal(s) in window`;
+                } else executionDetail = ' — no closing deals in window';
+              }
+
+              // Verify SL→BE: check position's SL/TP orders (linked by positionId), not the close orders
+              const anyHadSlToBe = applicable.some((a) => a.cmd.moveStopLossToEntry);
+              if (anyHadSlToBe && trade.entry_price && trade.position_id) {
+                const takeProfits = JSON.parse(trade.take_profits || '[]') as number[];
+                const slResult = await queryCTraderPositionSlLevel(
+                  ctraderClient,
+                  String(trade.position_id),
+                  trade.entry_price,
+                  fromTs,
+                  toTs,
+                  { originalStopLoss, tpPrices: takeProfits }
+                );
+                if (slResult.error) {
+                  console.log(`\n  ⚠️ SL→BE verification failed: ${slResult.error}`);
+                } else if (slResult.verified) {
+                  console.log(`\n  ✅ SL moved to breakeven confirmed — position's SL order shows stopLoss @ ${trade.entry_price}`);
+                } else if (slResult.ordersWithSl.length > 0) {
+                  const slVals = slResult.ordersWithSl.map((o) => o.stopLoss).join(', ');
+                  console.log(`\n  ⚠️ SL→BE not verified — position SL orders have stopLoss: ${slVals} (entry: ${trade.entry_price})`);
+                } else {
+                  const dbShowsBe = Math.abs((trade.stop_loss ?? 0) - trade.entry_price) < Math.max(0.01, trade.entry_price * 0.0001);
+                  if (dbShowsBe) {
+                    console.log(`\n  ✅ SL moved to breakeven — DB shows stop at entry (manager sets this after modifyPosition succeeds)`);
+                  } else {
+                    console.log(`\n  ⚠️ SL→BE not verifiable — no position SL orders found in closed orders for pos ${trade.position_id}`);
+                    console.log(`  💡 To find why: check logs for "Error moving stop loss to entry on cTrader" or "modifyPosition"`);
+                    console.log(`     Full investigation: npm run investigate -- /investigate message:${trade.message_id} channel:${trade.channel}`);
+                  }
+                }
+                if (slResult.narrative) {
+                  if (slResult.narrative.closedAtTp) {
+                    console.log(`  ℹ️  Narrative: Position closed at TP — SL was never hit`);
+                  }
+                  if (slResult.narrative.slMatchesOriginal && slResult.narrative.closingOrderSl != null) {
+                    console.log(`  ⚠️  Narrative: Closing order had SL @ ${slResult.narrative.closingOrderSl} (original) — SL may not have been reset; examine logs`);
+                  } else if (slResult.narrative.closingOrderSl != null && !slResult.verified) {
+                    console.log(`  ℹ️  Narrative: Closing order had SL @ ${slResult.narrative.closingOrderSl}`);
+                  }
+                }
+                // Infer narrative from closing deals when position-deal narrative is empty
+                const takeProfitsForNarrative = JSON.parse(trade.take_profits || '[]') as number[];
+                const tolNarrative = Math.max(0.01, (trade.entry_price || 0) * 0.0001);
+                const closedAtTpFromDeals = takeProfitsForNarrative.length > 0 && relevantDeals.some(
+                  (d: any) => d.executionPrice != null && takeProfitsForNarrative.some((tp: number) => Math.abs(d.executionPrice - tp) < tolNarrative)
+                );
+                if (closedAtTpFromDeals && !slResult.narrative?.closedAtTp) {
+                  console.log(`  ℹ️  Narrative: Position closed at TP — SL was never hit`);
+                }
+              }
+            } catch (err) {
+              executionDetail = ` (error: ${err instanceof Error ? err.message : String(err)})`;
+            }
+          } else {
+            executionDetail = ' (cTrader client not available)';
+          }
+          if (ctraderClient) {
+            await ctraderClient.disconnect().catch(() => {});
+          }
+        } else {
+          const bybitClient = await getBybitClientForTrade(trade.account_name);
+          const symbol = (trade.trading_pair || '').replace('/', '');
+          const bybitSymbol = symbol.endsWith('USDT') ? symbol : symbol + 'USDT';
+          if (bybitClient) {
+            try {
+              const result = await queryBybitClosingExecutions(bybitClient, fromTs, toTs, bybitSymbol);
+              if (result.error) {
+                executionDetail = ` (query error: ${result.error})`;
+              } else               if (result.closingExecutionsCount > 0) {
+                executionConfirmed = true;
+                executionDetail = ` — ${result.closingExecutionsCount} closing execution(s)`;
+                result.closingExecutions.slice(0, 5).forEach((e) => {
+                  console.log(`     • ${e.execId} | ${e.closedSize} closed @ ${e.execPrice || '?'}`);
+                });
+                const anyHadSlToBe = applicable.some((a) => a.cmd.moveStopLossToEntry);
+                if (anyHadSlToBe) {
+                  console.log(`\n  ⚠️ SL→BE not verifiable — Bybit execution history does not include stop loss level`);
+                }
+              } else {
+                executionDetail = ' — no closing executions in window';
+              }
+            } catch (err) {
+              executionDetail = ` (error: ${err instanceof Error ? err.message : String(err)})`;
+            }
+          } else {
+            executionDetail = ' (Bybit client not available)';
+          }
+        }
+
+        if (executionConfirmed) {
+          console.log(`\n  ✅ Management command executed on exchange${executionDetail}`);
+        } else {
+          console.log(`\n  ⚠️ Exchange verification: no execution found${executionDetail}`);
+          console.log('     Management command may not have run, or effect may be on a different position.');
+        }
+        console.log('  For full investigation: npm run investigate -- /investigate message:<id> channel:<channel>');
+      } else {
+        console.log('No management commands found in message window.');
+      }
+    } else {
+      console.log('No entry_filled_at or created_at - cannot scope message window.');
+    }
+
     // Use provided balance or prompt for it
     if (balanceArg) {
       const balance = parseFloat(balanceArg);

@@ -1,6 +1,10 @@
+import { EventEmitter } from 'events';
 import winston, { format } from 'winston';
 import { Loggly } from 'winston-loggly-bulk';
 import redact from 'fast-redact';
+
+// Winston + Loggly transport add multiple streams; raise default to avoid MaxListenersExceededWarning
+(EventEmitter as typeof EventEmitter & { defaultMaxListeners: number }).defaultMaxListeners = 20;
 
 // Keys or paths to redact fully
 const redactPaths = ['password', 'token', 'key', 'secret', 'user.password', 'auth.token'];

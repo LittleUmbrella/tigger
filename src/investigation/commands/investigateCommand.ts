@@ -51,6 +51,52 @@ function extractOrderIdsFromTrace(traceResult: any): string[] {
 }
 
 /**
+ * Extract trade IDs from trace for trade-scoped Loggly error searches
+ */
+function extractTradeIdsFromTrace(traceResult: any): string[] {
+  const trades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades || [];
+  const ids: (number | string)[] = trades.map((t: any) => t.id).filter((id: any): id is number | string => id != null);
+  return [...new Set(ids.map((id) => String(id)))];
+}
+
+/** Known error patterns and their diagnosis/recommendations */
+const ERROR_DIAGNOSES: Array<{
+  pattern: RegExp | string;
+  diagnosis: string;
+  recommendation?: string;
+}> = [
+  {
+    pattern: /Error moving stop loss to entry on cTrader|Failed to modify position/i,
+    diagnosis: 'cTrader rejected SL update (likely TRADING_BAD_STOPS: SL too close to price)',
+    recommendation: 'Fixed in closePercentageManager: SL is now nudged by slDistance/1 tick. Ensure latest deploy.'
+  },
+  {
+    pattern: /TRADING_BAD_STOPS/i,
+    diagnosis: 'cTrader: Stop loss violates broker min distance or directional rules',
+    recommendation: 'SL must be strictly below entry (long) or above (short). Use slDistance from symbol info.'
+  },
+  {
+    pattern: /Failed to execute trade for account/i,
+    diagnosis: 'Trade initiation failed for one or more accounts',
+    recommendation: 'Check balance, margin, symbol validity, and exchange connectivity.'
+  },
+  {
+    pattern: /Failed to create order|order creation failed/i,
+    diagnosis: 'Order placement rejected by exchange',
+    recommendation: 'Check symbol, quantity, price precision, and account permissions.'
+  }
+];
+
+function diagnoseError(message: string, errorExcerpt: string): { diagnosis?: string; recommendation?: string } {
+  const combined = `${message} ${errorExcerpt}`;
+  for (const { pattern, diagnosis, recommendation } of ERROR_DIAGNOSES) {
+    const matches = typeof pattern === 'string' ? combined.includes(pattern) : pattern.test(combined);
+    if (matches) return { diagnosis, recommendation };
+  }
+  return {};
+}
+
+/**
  * Extract TP order IDs from trace (from TP/SL Orders steps) for Loggly searches
  */
 function extractTpOrderIdsFromTrace(traceResult: any): string[] {
@@ -68,28 +114,50 @@ function extractTpOrderIdsFromTrace(traceResult: any): string[] {
 }
 
 /**
- * Build TP placement analysis from trace and DB orders
+ * Build TP placement analysis from trace and DB orders.
+ *
+ * cTrader one-per-TP mode: When channel uses cTrader with multiple trades (one per TP),
+ * each entry order has SL+TP built-in. No separate take_profit orders exist. We treat
+ * the presence of an entry order as TP placed for that trade.
  */
 function buildTpPlacementAnalysis(
   traceResult: any,
   dbOrdersByTradeId: Record<number, Array<{ order_type: string; price?: number; tp_index?: number }>>
-): Array<{ tradeId: number; expectedCount: number; actualCount: number; expectedPrices: number[]; actualPrices: number[]; status: string }> {
+): Array<{ tradeId: number; expectedCount: number; actualCount: number; expectedPrices: number[]; actualPrices: number[]; status: string; ctraderOnePerTp?: boolean }> {
   const trades = traceResult?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details?.trades || [];
+  const isCTrader = trades.length > 0 && trades[0]?.exchange === 'ctrader';
+  /** cTrader one-per-TP: multiple trades from same message, each with exactly 1 TP - TP is on entry order */
+  const isCTraderOnePerTp = isCTrader && trades.length > 1 && trades.every((t: any) => (Array.isArray(t.takeProfits) ? t.takeProfits : []).length === 1);
+
   return trades.map((t: any) => {
     const expectedPrices: number[] = Array.isArray(t.takeProfits) ? t.takeProfits : [];
     const orders = (t.id != null ? dbOrdersByTradeId[t.id] : []) || [];
     const tpOrders = orders.filter((o) => o.order_type === 'take_profit');
-    const actualPrices = tpOrders
-      .sort((a, b) => (a.tp_index ?? 0) - (b.tp_index ?? 0))
-      .map((o) => o.price)
-      .filter((p): p is number => p != null);
+    const entryOrders = orders.filter((o) => o.order_type === 'entry');
+
+    let actualPrices: number[];
+    let actualCount: number;
+
+    if (isCTraderOnePerTp && expectedPrices.length === 1) {
+      // cTrader one-per-TP: TP is built into the entry order; no separate take_profit orders
+      const hasEntryWithTp = entryOrders.length > 0;
+      actualCount = hasEntryWithTp ? 1 : 0;
+      actualPrices = hasEntryWithTp ? expectedPrices : [];
+    } else {
+      actualPrices = tpOrders
+        .sort((a, b) => (a.tp_index ?? 0) - (b.tp_index ?? 0))
+        .map((o) => o.price)
+        .filter((p): p is number => p != null);
+      actualCount = tpOrders.length;
+    }
+
     const expectedCount = expectedPrices.length;
-    const actualCount = tpOrders.length;
     let status: string;
     if (expectedCount === 0) status = 'No TPs configured';
     else if (actualCount >= expectedCount) {
       const pricesMatch = expectedPrices.every((p, j) => Math.abs((actualPrices[j] ?? 0) - p) < 0.01);
       status = pricesMatch ? `${actualCount}/${expectedCount} placed correctly` : `${actualCount}/${expectedCount} placed (verify prices)`;
+      if (isCTraderOnePerTp) status += ' (TP on entry order)';
     } else {
       status = `${actualCount}/${expectedCount} placed — missing ${expectedCount - actualCount}`;
     }
@@ -99,7 +167,8 @@ function buildTpPlacementAnalysis(
       actualCount,
       expectedPrices,
       actualPrices,
-      status
+      status,
+      ctraderOnePerTp: isCTraderOnePerTp || undefined
     };
   });
 }
@@ -199,7 +268,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
                 from: new Date(centerMs - 30 * 60 * 1000).toISOString(),
                 until: new Date(centerMs + 30 * 60 * 1000).toISOString()
               };
-              const mgmtQuery = `json.channel:${ch} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader")`;
+              const mgmtQuery = `json.channel:${ch} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader" OR "Error moving stop loss" OR "Stop loss moved to entry")`;
               const mgmtResult = await ctx.logglyClient.search({
                 query: mgmtQuery,
                 from: timeRange.from,
@@ -324,6 +393,25 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           }
         }
 
+        // Query for trade-scoped errors (e.g. "Error moving stop loss" logs tradeId but not always messageId)
+        const tradeIds = extractTradeIdsFromTrace(traceResult);
+        const tradeErrorsByTradeId: Record<string, { total_events: number; events: any[] }> = {};
+        for (const tradeId of tradeIds) {
+          try {
+            const result = await ctx.logglyClient!.searchErrorsAroundTime(
+              timestamp,
+              windowMinutes,
+              `json.tradeId:${tradeId}`
+            );
+            tradeErrorsByTradeId[tradeId] = {
+              total_events: result.total_events ?? 0,
+              events: result.events ?? []
+            };
+          } catch {
+            tradeErrorsByTradeId[tradeId] = { total_events: 0, events: [] };
+          }
+        }
+
         // Query for TP placement logs (take profit order placement success/failure)
         const tpPlacementQuery =
           channel && String(channel).trim()
@@ -345,17 +433,17 @@ export async function investigateCommandHandler(context: CommandContext): Promis
           /* ignore */
         }
 
-        // When management command detected, query for execution logs (positions modified on exchange)
+        // Management execution logs (partial closes, SL moves) - use wider window (6h) since
+        // management commands can be sent as replies hours after the signal
         let managementExecutionLogs: { total_events: number; events: any[] } = { total_events: 0, events: [] };
-        const parsingStep = traceResult.steps?.find((s: any) => s.step?.includes('Message Parsing'));
-        if (parsingStep?.details?.managementCommandDetected && channel) {
+        if (channel && tradeIds.length > 0) {
           try {
-            const mgmtQuery = `json.channel:${channel} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader")`;
+            const mgmtQuery = `json.channel:${channel} (Partially OR "Positions partially closed" OR "Partial position closed" OR "Position closed on cTrader" OR "Error moving stop loss" OR "Stop loss moved to entry" OR "Failed to modify position")`;
             const mgmtResult = await ctx.logglyClient!.search({
               query: mgmtQuery,
-              from: timeRange.from,
-              until: timeRange.until,
-              size: 50
+              from: orderTimeRange.from,
+              until: orderTimeRange.until,
+              size: 100
             });
             managementExecutionLogs = {
               total_events: mgmtResult.total_events ?? 0,
@@ -368,15 +456,17 @@ export async function investigateCommandHandler(context: CommandContext): Promis
 
         const queryUsed = `json.messageId:${messageId} AND json.channel:${channel || ''}`;
         const orderLogsTotal = Object.values(orderLogsByOrderId).reduce((s, o) => s + o.total_events, 0);
+        const tradeErrorsTotal = Object.values(tradeErrorsByTradeId).reduce((s, t) => s + t.total_events, 0);
         return {
           success: true,
-          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${bybitErrors.total_events} Bybit errors, ${orderLogsTotal} order logs, ${tpPlacementLogs.total_events} TP placement logs${managementExecutionLogs.total_events > 0 ? `, ${managementExecutionLogs.total_events} management execution logs` : ''}`,
+          message: `Found ${messageLogs.total_events} message logs, ${messageScopedErrors.total_events} message-scoped errors, ${tradeErrorsTotal} trade-scoped errors, ${bybitErrors.total_events} Bybit errors, ${orderLogsTotal} order logs, ${tpPlacementLogs.total_events} TP placement logs${managementExecutionLogs.total_events > 0 ? `, ${managementExecutionLogs.total_events} management execution logs` : ''}`,
           data: {
             messageLogs,
             messageScopedErrors,
             errorLogs,
             bybitErrors,
             orderLogsByOrderId,
+            tradeErrorsByTradeId,
             tpPlacementLogs,
             managementExecutionLogs,
             searchParams: { query: queryUsed, from: timeRange.from, until: timeRange.until }
@@ -908,30 +998,70 @@ export async function investigateCommandHandler(context: CommandContext): Promis
 
       // Log confirmation - use logs to confirm root cause when available
       if (logglyData) {
-        // Prefer message-scoped errors; fall back to general errors (some logs e.g. "Failed to execute trade" may not include messageId)
         const msgScoped = logglyData.messageScopedErrors?.events || [];
         const allErrors = logglyData.errorLogs?.events || [];
         const channel = ctx.args.channel;
+        const channelStr = channel ? String(channel) : '';
         const msgErrors = msgScoped.length > 0
           ? msgScoped
-          : channel ? allErrors.filter((e: any) => {
+          : channelStr ? allErrors.filter((e: any) => {
               const ch = e.event?.channel ?? e.event?.json?.channel;
-              return ch === channel || ch === String(channel);
+              return ch === channelStr || ch === channel;
             }) : allErrors;
         const msgLogs = logglyData.messageLogs?.events || [];
 
-        if (msgLogs.length > 0 || msgErrors.length > 0) {
+        // Collect all error events (message, trade, order, management) and deduplicate
+        const seenIds = new Set<string>();
+        const allErrorEvents: Array<{ event: any; source: string; tradeId?: string; orderId?: string }> = [];
+        const addErrors = (events: any[], source: string, tradeId?: string, orderId?: string) => {
+          for (const e of events || []) {
+            const id = e.id ?? `${source}:${JSON.stringify(e.event?.message ?? e.logmsg ?? '')}`;
+            if (seenIds.has(id)) continue;
+            const msg = e.event?.message ?? e.event?.json?.message ?? e.logmsg ?? '';
+            const isError = (e.event?.level ?? e.event?.json?.level) === 'error' ||
+              /Error|Failed|error|failed/.test(msg);
+            if (isError || source === 'messageScoped' || source === 'tradeScoped') {
+              seenIds.add(id);
+              allErrorEvents.push({ event: e, source, tradeId, orderId });
+            }
+          }
+        };
+        addErrors(msgErrors, 'messageScoped');
+        const tradeErrorsByTradeId = logglyData.tradeErrorsByTradeId as Record<string, { events: any[] }> | undefined;
+        if (tradeErrorsByTradeId) {
+          for (const [tid, data] of Object.entries(tradeErrorsByTradeId)) {
+            addErrors(data?.events || [], 'tradeScoped', tid);
+          }
+        }
+        const orderLogsByOrderId = logglyData.orderLogsByOrderId as Record<string, { total_events: number; events: any[] }> | undefined;
+        if (orderLogsByOrderId) {
+          for (const [oid, data] of Object.entries(orderLogsByOrderId)) {
+            const errs = (data?.events || []).filter((e: any) => {
+              const m = e.event?.message ?? e.logmsg ?? '';
+              return (e.event?.level ?? e.event?.json?.level) === 'error' || /Error|Failed/.test(m);
+            });
+            addErrors(errs, 'orderScoped', undefined, oid);
+          }
+        }
+        const mgmtLogs = logglyData.managementExecutionLogs as { events: any[] } | undefined;
+        const mgmtErrors = (mgmtLogs?.events || []).filter((e: any) => {
+          const m = e.event?.message ?? e.logmsg ?? '';
+          return /Error moving stop loss|Failed to modify position/.test(m);
+        });
+        addErrors(mgmtErrors, 'management');
+
+        if (msgLogs.length > 0 || allErrorEvents.length > 0) {
           findings.push('\n📋 Log confirmation:');
 
           // Trade Creation failure: surface "Failed to execute trade" and "Trade initiation completed"
           if (failurePoint?.includes('Trade Creation')) {
             const failedExecuteLogs = msgErrors.filter((e: any) =>
-              e.event?.message?.includes('Failed to execute trade for account') ||
-              e.logmsg?.includes('Failed to execute trade')
+              (e.event?.message ?? e.logmsg ?? '').includes('Failed to execute trade for account') ||
+              (e.logmsg ?? '').includes('Failed to execute trade')
             );
             const completionLogs = msgLogs.filter((m: any) =>
-              m.event?.message?.includes('Trade initiation completed for all accounts') ||
-              m.logmsg?.includes('Trade initiation completed')
+              (m.event?.message ?? m.logmsg ?? '').includes('Trade initiation completed for all accounts') ||
+              (m.logmsg ?? '').includes('Trade initiation completed')
             );
 
             if (failedExecuteLogs.length > 0) {
@@ -939,7 +1069,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
               failedExecuteLogs.slice(0, 3).forEach((log: any, i: number) => {
                 const err = log.event?.error || log.event?.json?.error || log.logmsg || '';
                 const accountName = log.event?.accountName || log.event?.json?.accountName || '';
-                const excerpt = err.length > 200 ? err.substring(0, 200) + '...' : err;
+                const excerpt = String(err).length > 200 ? String(err).substring(0, 200) + '...' : String(err);
                 findings.push(`    ${i + 1}. ${accountName}: ${excerpt}`);
               });
             }
@@ -960,26 +1090,48 @@ export async function investigateCommandHandler(context: CommandContext): Promis
             findings.push(`  Found ${logglyData.bybitErrors.events.length} Bybit API error log(s)`);
           }
 
-          if (msgErrors.length > 0 && !failurePoint?.includes('Trade Creation')) {
-            findings.push(`  Found ${msgErrors.length} error log(s) for this message`);
+          // Report all errors with details and diagnosis
+          if (allErrorEvents.length > 0) {
+            findings.push(`  Found ${allErrorEvents.length} error log(s) for this message or its trades:`);
+            allErrorEvents.slice(0, 10).forEach(({ event: e, source, tradeId, orderId }, i: number) => {
+              const msg = e.event?.message ?? e.event?.json?.message ?? (e.logmsg ?? '').substring(0, 150);
+              const err = e.event?.error ?? e.event?.json?.error ?? '';
+              const errStr = typeof err === 'object' ? JSON.stringify(err).substring(0, 120) : String(err).substring(0, 120);
+              const ts = e.event?.timestamp ?? e.event?.json?.timestamp ?? '';
+              let line = `    ${i + 1}. [${source}] ${msg}`;
+              if (errStr) line += ` — ${errStr}`;
+              if (tradeId) line += ` (tradeId=${tradeId})`;
+              if (orderId) line += ` (orderId=${orderId})`;
+              if (ts) line += ` @ ${ts}`;
+              findings.push(line);
+              const { diagnosis, recommendation } = diagnoseError(msg, errStr);
+              if (diagnosis) {
+                findings.push(`       💡 Diagnosis: ${diagnosis}`);
+                if (recommendation && !recommendations.includes(recommendation)) {
+                  recommendations.push(recommendation);
+                }
+              }
+            });
+            if (allErrorEvents.length > 10) {
+              findings.push(`    ... and ${allErrorEvents.length - 10} more. Check Loggly for full details.`);
+            }
           }
 
           // Order-specific logs (cancellations, etc.) - surfaced when message logs exist
-        const orderLogsByOrderId = logglyData.orderLogsByOrderId as Record<string, { total_events: number; events: any[] }> | undefined;
-        if (orderLogsByOrderId && Object.keys(orderLogsByOrderId).length > 0) {
-          for (const [orderId, data] of Object.entries(orderLogsByOrderId)) {
-            if (data.total_events > 0) {
-              const cancelLogs = (data.events || []).filter(
-                (e: any) =>
-                  (e.event?.message ?? e.logmsg ?? '').includes('cancelled') ||
-                  (e.event?.message ?? e.logmsg ?? '').includes('cancelling') ||
-                  (e.event?.message ?? e.logmsg ?? '').includes('Order cancelled')
-              );
-              const ts = cancelLogs[0]?.event?.timestamp ?? cancelLogs[0]?.timestamp;
-              findings.push(`  Order ${orderId}: ${data.total_events} log(s)${cancelLogs.length > 0 ? ` — ${cancelLogs.length} cancellation(s) at ${ts || '(see logs)'}` : ''}`);
+          if (orderLogsByOrderId && Object.keys(orderLogsByOrderId).length > 0) {
+            for (const [orderId, data] of Object.entries(orderLogsByOrderId)) {
+              if (data.total_events > 0) {
+                const cancelLogs = (data.events || []).filter(
+                  (e: any) =>
+                    (e.event?.message ?? e.logmsg ?? '').includes('cancelled') ||
+                    (e.event?.message ?? e.logmsg ?? '').includes('cancelling') ||
+                    (e.event?.message ?? e.logmsg ?? '').includes('Order cancelled')
+                );
+                const ts = cancelLogs[0]?.event?.timestamp ?? cancelLogs[0]?.timestamp;
+                findings.push(`  Order ${orderId}: ${data.total_events} log(s)${cancelLogs.length > 0 ? ` — ${cancelLogs.length} cancellation(s) at ${ts || '(see logs)'}` : ''}`);
+              }
             }
           }
-        }
         } else {
           const params = logglyData.searchParams;
           findings.push('\n📋 Log confirmation: No logs found for this message');
@@ -1059,8 +1211,12 @@ export async function investigateCommandHandler(context: CommandContext): Promis
         }
         const tpAnalysis = buildTpPlacementAnalysis(traceResult, dbOrdersByTradeId);
         const hasTps = tpAnalysis.some((a) => a.expectedCount > 0);
+        const isCTraderOnePerTp = tpAnalysis.some((a) => a.ctraderOnePerTp);
         if (hasTps) {
           findings.push('\n📈 TP Placement:');
+          if (isCTraderOnePerTp) {
+            findings.push('  (cTrader one-per-TP: each trade has TP built into entry order)');
+          }
           tpAnalysis.forEach((a, i) => {
             const tradeNum = i + 1;
             if (a.expectedCount > 0) {
@@ -1071,7 +1227,7 @@ export async function investigateCommandHandler(context: CommandContext): Promis
               }
             }
           });
-        const missingTpTradeIds = tpAnalysis.filter((a) => a.expectedCount > 0 && a.actualCount < a.expectedCount).map((a) => a.tradeId);
+        const missingTpTradeIds = tpAnalysis.filter((a) => a.expectedCount > 0 && a.actualCount < a.expectedCount && !a.ctraderOnePerTp).map((a) => a.tradeId);
         if (missingTpTradeIds.length > 0) {
           recommendations.push(`Run npm run fix-trade-tps <tradeId> (e.g. ${missingTpTradeIds[0]}) to place missing TP orders`);
         }
