@@ -8,6 +8,36 @@ import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { Trade, DatabaseManager } from '../db/schema.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
+import { protobufLongToNumber } from '../utils/protobufLong.js';
+
+/**
+ * Get minimum SL nudge for cTrader (from ProtoOASymbol slDistance when available).
+ * slDistance = min allowed distance between SL and current market price.
+ * Returns at least tickSize when slDistance is absent or zero.
+ */
+function getCTraderMinSlNudge(
+  symbolInfo: any,
+  entryPrice: number,
+  digits: number,
+  tickSize: number
+): number {
+  const rawSl = symbolInfo?.slDistance;
+  const slDistance = typeof rawSl === 'number' ? rawSl : (typeof rawSl === 'object' && rawSl != null ? (protobufLongToNumber(rawSl) ?? 0) : 0);
+  if (slDistance == null || slDistance <= 0) return tickSize;
+
+  const rawDistType = symbolInfo?.distanceSetIn ?? symbolInfo?.distance_set_in;
+  const distType = typeof rawDistType === 'number' ? rawDistType : (typeof rawDistType === 'object' && rawDistType?.low != null ? rawDistType.low : 1);
+  // ProtoOASymbolDistanceType: SYMBOL_DISTANCE_IN_POINTS = 1, SYMBOL_DISTANCE_IN_PERCENTAGE = 2
+  let minDist: number;
+  if (distType === 2) {
+    // Percentage: slDistance as basis points or percent. Assume 1 = 0.01% (1 bp), 100 = 1%
+    minDist = entryPrice * (slDistance / 10000);
+  } else {
+    // Points: 1 point = smallest price unit = 10^(-digits)
+    minDist = slDistance * Math.pow(10, -digits);
+  }
+  return Math.max(tickSize, minDist);
+}
 
 /**
  * Manager to close a percentage of a position
@@ -280,13 +310,14 @@ async function closePercentageOfPosition(
       if (moveStopLossToEntry) {
         try {
           const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
-          // cTrader can reject SL exactly at entry (TRADING_BAD_STOPS). Nudge SL by 1 tick
-          // in the safe direction: LONG = below entry, SHORT = above entry.
+          // cTrader can reject SL exactly at entry (TRADING_BAD_STOPS). Nudge SL by at least
+          // the API's slDistance (when provided) or 1 tick, in the safe direction.
           const rawDigits = symbolInfo?.digits;
           const digits = typeof rawDigits === 'number' ? rawDigits : (typeof rawDigits === 'object' && rawDigits?.low != null ? rawDigits.low : 2);
           const tickSize = Math.pow(10, -digits);
+          const minNudge = getCTraderMinSlNudge(symbolInfo, bePrice, digits, tickSize);
           const isLong = trade.direction === 'long' || (trade.stop_loss != null && trade.stop_loss < trade.entry_price);
-          const rawSlPrice = isLong ? bePrice - tickSize : bePrice + tickSize;
+          const rawSlPrice = isLong ? bePrice - minNudge : bePrice + minNudge;
           const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
           await ctraderClient.modifyPosition({
             positionId: trade.position_id,
@@ -299,7 +330,7 @@ async function closePercentageOfPosition(
           logger.info('Stop loss moved to entry on cTrader', {
             tradeId: trade.id,
             bePrice,
-            slPrice: slPrice !== bePrice ? slPrice : undefined
+            slPrice
           });
         } catch (slError) {
           logger.error('Error moving stop loss to entry on cTrader', {
