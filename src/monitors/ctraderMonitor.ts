@@ -1055,7 +1055,7 @@ const monitorTrade = async (
     t0 = Date.now();
     const currentPrice = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
     if (!currentPrice) {
-      logger.warn('Could not get current price for cTrader trade', {
+      logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
         tradeId: trade.id,
         tradingPair: trade.trading_pair,
         exchange: 'ctrader'
@@ -1343,9 +1343,12 @@ export const startCTraderMonitor = async (
       clientSecret: clientSecret || '',
       accessToken,
       accountId,
-      environment: 'demo' as 'demo' | 'live'
+      environment: 'demo' as 'demo' | 'live',
+      ...(monitorConfig.ctraderSymbolMap && Object.keys(monitorConfig.ctraderSymbolMap).length > 0 && { symbolMap: monitorConfig.ctraderSymbolMap }),
+      ...(monitorConfig.ctraderSpotPriceTimeoutMs != null && { spotPriceTimeoutMs: monitorConfig.ctraderSpotPriceTimeoutMs }),
+      ...(monitorConfig.ctraderSpotPriceMaxRetries != null && { spotPriceMaxRetries: monitorConfig.ctraderSpotPriceMaxRetries })
     };
-    
+
     ctraderClient = new CTraderClient(clientConfig);
     try {
       await ctraderClient.connect();

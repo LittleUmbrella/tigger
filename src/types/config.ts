@@ -111,6 +111,10 @@ export interface MonitorConfig {
   ctraderUseTickData?: boolean;
   /** cTrader only: map canonical symbols to broker-specific names (e.g. {"XAUUSD": "GOLD"} if broker uses GOLD) */
   ctraderSymbolMap?: Record<string, string>;
+  /** cTrader only: timeout in ms for spot price subscription (default 8000) */
+  ctraderSpotPriceTimeoutMs?: number;
+  /** cTrader only: max retries for getCurrentPrice (default 3) */
+  ctraderSpotPriceMaxRetries?: number;
 }
 
 export interface AccountFilterRule {

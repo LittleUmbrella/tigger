@@ -82,6 +82,12 @@ export const startTradeOrchestrator = async (
   const bybitClientMap = new Map<string, RestClientV5>();
   // Create cTrader client map (keyed by account name)
   const ctraderClientMap = new Map<string, CTraderClient>();
+
+  // Merge cTrader monitor options from all ctrader monitors (symbol map, timeout, retries)
+  const ctraderMonitors = config.monitors?.filter((m: { type?: string }) => m.type === 'ctrader') ?? [];
+  const ctraderSymbolMap = Object.assign({}, ...ctraderMonitors.map((m: { ctraderSymbolMap?: Record<string, string> }) => m.ctraderSymbolMap ?? {}));
+  const ctraderSpotPriceTimeoutMs = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceTimeoutMs?: number }).ctraderSpotPriceTimeoutMs : undefined;
+  const ctraderSpotPriceMaxRetries = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceMaxRetries?: number }).ctraderSpotPriceMaxRetries : undefined;
   
   const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RestClientV5 | undefined => {
     const key = accountName || 'default';
@@ -195,7 +201,10 @@ export const startTradeOrchestrator = async (
       accessToken,
       refreshToken,
       accountId,
-      environment
+      environment,
+      ...(Object.keys(ctraderSymbolMap).length > 0 && { symbolMap: ctraderSymbolMap }),
+      ...(ctraderSpotPriceTimeoutMs != null && { spotPriceTimeoutMs: ctraderSpotPriceTimeoutMs }),
+      ...(ctraderSpotPriceMaxRetries != null && { spotPriceMaxRetries: ctraderSpotPriceMaxRetries })
     };
 
     const client = new CTraderClient(clientConfig);

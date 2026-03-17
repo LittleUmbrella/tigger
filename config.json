@@ -166,7 +166,8 @@
     },
     {
       "type": "ctrader",
-      "pollInterval": 4000
+      "pollInterval": 4000,
+      "_comment": "Optional: ctraderSymbolMap {\"XAUUSD\":\"GOLD\"}, ctraderSpotPriceTimeoutMs (default 8000), ctraderSpotPriceMaxRetries (default 3)"
     }
   ],
   "channels": [

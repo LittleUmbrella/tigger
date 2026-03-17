@@ -23,6 +23,10 @@ export interface CTraderClientConfig {
   port?: number;
   /** Map canonical symbol names to broker-specific names (e.g. {"XAUUSD": "GOLD"}) */
   symbolMap?: Record<string, string>;
+  /** Timeout in ms for spot price subscription (default 8000) */
+  spotPriceTimeoutMs?: number;
+  /** Max retries for getCurrentPrice (default 3) */
+  spotPriceMaxRetries?: number;
 }
 
 /**
@@ -31,11 +35,16 @@ export interface CTraderClientConfig {
  * Uses our local CTraderConnection implementation which handles
  * the low-level protocol communication (Protobuf over TCP/WebSocket).
  */
+/** Result of a spot price fetch - used to coalesce concurrent requests */
+type SpotPriceResult = { bid: number; ask: number } | null;
+
 export class CTraderClient {
   private config: CTraderClientConfig;
   private connection: CTraderConnection | null = null;
   private connected: boolean = false;
   private authenticated: boolean = false;
+  /** Coalesce concurrent getCurrentPrice calls per symbol - one subscription, all callers share result */
+  private inFlightSpotRequests = new Map<string, Promise<SpotPriceResult>>();
 
   constructor(config: CTraderClientConfig) {
     this.config = {
@@ -440,7 +449,12 @@ export class CTraderClient {
           }
           if (lightSymbol) {
             if (sym !== symbol || variant !== symbol) {
-              logger.debug('Resolved cTrader symbol', { requested: symbol, resolved: lightSymbol.symbolName });
+              const viaMap = this.config.symbolMap?.[symbol] === sym;
+              logger.debug('Resolved cTrader symbol', {
+                requested: symbol,
+                resolved: lightSymbol.symbolName,
+                ...(viaMap && { viaSymbolMap: true })
+              });
             }
             break;
           }
@@ -1249,7 +1263,8 @@ export class CTraderClient {
 
   /**
    * Get current price for a symbol
-   * Subscribes to spot events and waits for the first spot event which contains current prices
+   * Subscribes to spot events and waits for the first spot event which contains current prices.
+   * Concurrent calls for the same symbol share one subscription (coalesced).
    * @param side - When provided, returns ask for 'buy' and bid for 'sell' to improve fill probability
    *               on limit orders. When omitted, returns mid price (bid+ask)/2.
    */
@@ -1262,24 +1277,80 @@ export class CTraderClient {
       throw new Error('Account ID is required to get current price');
     }
 
+    const timeoutMs = this.config.spotPriceTimeoutMs ?? 8000;
+    const maxRetries = this.config.spotPriceMaxRetries ?? 3;
+
+    // Coalesce concurrent requests for same symbol - one subscription, all share result
+    let promise = this.inFlightSpotRequests.get(symbol);
+    if (!promise) {
+      promise = this.fetchSpotPriceWithRetry(symbol, timeoutMs, maxRetries);
+      this.inFlightSpotRequests.set(symbol, promise);
+      promise.finally(() => this.inFlightSpotRequests.delete(symbol));
+    }
+
+    const result = await promise;
+    if (!result) return null;
+
+    if (side === 'buy') return result.ask;
+    if (side === 'sell') return result.bid;
+    return (result.bid + result.ask) / 2;
+  }
+
+  /**
+   * Fetch spot bid/ask with retries and diagnostics.
+   * Used internally by getCurrentPrice (coalesced per symbol).
+   */
+  private async fetchSpotPriceWithRetry(
+    symbol: string,
+    timeoutMs: number,
+    maxRetries: number
+  ): Promise<SpotPriceResult> {
+    let lastReason: 'timeout' | 'subscribe_failed' | 'empty_spot_event' | 'symbol_lookup' | undefined;
+    let lastError: string | undefined;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      const result = await this.fetchSpotPriceOnce(symbol, timeoutMs);
+      if (result && 'bid' in result && 'ask' in result) {
+        return result;
+      }
+      const fail = result as { reason?: string; error?: string };
+      lastReason = fail?.reason as typeof lastReason;
+      lastError = fail?.error;
+      if (attempt < maxRetries) {
+        logger.debug('Retrying cTrader spot price fetch', { symbol, attempt, reason: lastReason });
+      }
+    }
+
+    logger.warn('cTrader getCurrentPrice failed after retries', {
+      symbol,
+      attempts: maxRetries,
+      reason: lastReason,
+      error: lastError,
+      exchange: 'ctrader'
+    });
+    return null;
+  }
+
+  /**
+   * Single attempt to fetch spot price. Returns {bid,ask} or failure info.
+   */
+  private async fetchSpotPriceOnce(
+    symbol: string,
+    timeoutMs: number
+  ): Promise<SpotPriceResult | { reason: string; error?: string }> {
     try {
       const symbolInfo = await this.getSymbolInfo(symbol);
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
 
-      // Set up listener BEFORE subscribing (spot events can arrive immediately after subscription)
       const connection = this.connection;
-      if (!connection) {
-        return null;
-      }
+      if (!connection) return { reason: 'symbol_lookup', error: 'No connection' };
 
       const accountId = this.config.accountId;
-      if (!accountId) {
-        return null;
-      }
+      if (!accountId) return { reason: 'symbol_lookup', error: 'No account ID' };
 
-      return new Promise<number | null>((resolve) => {
+      return new Promise<SpotPriceResult | { reason: string; error?: string }>((resolve) => {
         let listenerId: string | undefined;
         let resolved = false;
         const timeout = setTimeout(() => {
@@ -1288,61 +1359,47 @@ export class CTraderClient {
           }
           if (!resolved) {
             resolved = true;
-            resolve(null);
+            resolve({ reason: 'timeout', error: `No spot event within ${timeoutMs}ms` });
           }
-        }, 5000); // 5 second timeout
+        }, timeoutMs);
 
-        // Listen for spot events using the connection's on method
-        // Pass the payload name, not the type number
-        // The event is wrapped in a CTraderEvent with descriptor containing the actual data
         const idResult = connection.on('ProtoOASpotEvent', (ctraderEvent: any) => {
           if (resolved) return;
-          
-          // Extract the actual event data from the descriptor
+
           const event = ctraderEvent.descriptor || ctraderEvent;
           const eventSymbolId = typeof event.symbolId === 'object' && event.symbolId.low !== undefined
             ? event.symbolId.low
             : event.symbolId;
-          
+
           if (eventSymbolId === symbolId) {
             resolved = true;
             clearTimeout(timeout);
-            
-            // Remove the listener
+
+            const id = idResult;
             if (typeof id === 'string') {
               connection.removeEventListener(id);
             }
-            
-            // Prices are in 1/100_000 of unit (e.g., 1.23 -> 123000)
+
             const bid = event.bid ? event.bid / 100000 : null;
             const ask = event.ask ? event.ask / 100000 : null;
-            
+
             if (bid && ask) {
-              // Use side-appropriate price for better fill probability on limit orders
-              if (side === 'buy') {
-                resolve(ask);
-              } else if (side === 'sell') {
-                resolve(bid);
-              } else {
-                resolve((bid + ask) / 2); // Mid price when no side specified
-              }
+              resolve({ bid, ask });
             } else if (bid) {
-              resolve(bid);
+              resolve({ bid, ask: bid });
             } else if (ask) {
-              resolve(ask);
+              resolve({ bid: ask, ask });
             } else {
-              resolve(null);
+              resolve({ reason: 'empty_spot_event', error: 'Spot event had no bid or ask' });
             }
           }
         });
 
-        // Store listenerId for cleanup on timeout
         const id = idResult;
         if (typeof id === 'string') {
           listenerId = id;
         }
 
-        // Now subscribe to spot events (listener is already set up)
         connection.sendCommand('ProtoOASubscribeSpotsReq', {
           ctidTraderAccountId: parseInt(accountId, 10),
           symbolId: [symbolId]
@@ -1353,16 +1410,18 @@ export class CTraderClient {
             if (listenerId) {
               connection.removeEventListener(listenerId);
             }
-            resolve(null);
+            resolve({
+              reason: 'subscribe_failed',
+              error: error instanceof Error ? error.message : String(error)
+            });
           }
         });
       });
     } catch (error) {
-      logger.debug('Failed to get current price', {
-        symbol,
+      return {
+        reason: 'symbol_lookup',
         error: error instanceof Error ? error.message : String(error)
-      });
-      return null;
+      };
     }
   }
 
