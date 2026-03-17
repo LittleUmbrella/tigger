@@ -1422,17 +1422,24 @@ export class CTraderClient {
           ctidTraderAccountId: parseInt(accountId, 10),
           symbolId: [symbolId]
         }).catch((error) => {
-          if (!resolved) {
-            resolved = true;
-            clearTimeout(timeout);
-            if (listenerId) {
-              connection.removeEventListener(listenerId);
-            }
-            resolve({
-              reason: 'subscribe_failed',
-              error: serializeErrorForLog(error)
-            });
+          if (resolved) return;
+          const obj = error as { errorCode?: unknown; error_code?: unknown } | null;
+          const errStr = obj && typeof obj === 'object'
+            ? String(obj.errorCode ?? obj.error_code ?? '')
+            : '';
+          if (errStr === 'ALREADY_SUBSCRIBED') {
+            // Subscription from prior attempt or call is active - keep waiting for spot event
+            return;
           }
+          resolved = true;
+          clearTimeout(timeout);
+          if (listenerId) {
+            connection.removeEventListener(listenerId);
+          }
+          resolve({
+            reason: 'subscribe_failed',
+            error: serializeErrorForLog(error)
+          });
         });
       });
     } catch (error) {
