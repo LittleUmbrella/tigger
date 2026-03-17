@@ -7,6 +7,7 @@ import {
 } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
+import { serializeErrorForLog } from '../utils/errorUtils.js';
 import dayjs from 'dayjs';
 import { parseMessage } from '../parsers/signalParser.js';
 import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
@@ -342,7 +343,7 @@ export const processMessages = async (
             tradingPair: parsed.tradingPair,
             signalType: parsed.signalType,
             isRetryable,
-            error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError)
+            error: serializeErrorForLog(initiatorError)
           });
 
           // Mark message as parsed for non-retryable errors to prevent infinite retries
@@ -355,7 +356,7 @@ export const processMessages = async (
               tradingPair: parsed.tradingPair,
               signalType: parsed.signalType,
               initiatorName,
-              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError),
+              error: serializeErrorForLog(initiatorError),
               errorType: 'non-retryable',
               reason: 'Permanent failure - will not succeed on retry'
             });
@@ -367,7 +368,7 @@ export const processMessages = async (
               tradingPair: parsed.tradingPair,
               signalType: parsed.signalType,
               initiatorName,
-              error: initiatorError instanceof Error ? initiatorError.message : String(initiatorError),
+              error: serializeErrorForLog(initiatorError),
               errorType: 'retryable',
               reason: 'Temporary failure - will retry on next iteration'
             });
@@ -390,7 +391,7 @@ export const processMessages = async (
         channel,
         messageId: message.message_id,
         initiatorName,
-        error: error instanceof Error ? error.message : String(error)
+        error: serializeErrorForLog(error)
       });
       // Don't mark as parsed on unexpected errors - allow retry
     }
