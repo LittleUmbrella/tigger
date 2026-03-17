@@ -6,3 +6,6 @@ data/
 .env-investigation
 *.log
 .DS_Store
+
+# Investigation reports (e.g. MESSAGE_<id>_INVESTIGATION.md)
+*INVESTIGATION.md
