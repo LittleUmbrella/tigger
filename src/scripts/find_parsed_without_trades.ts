@@ -6,6 +6,7 @@
 
 import { DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
+import { BotConfig } from '../types/config.js';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -31,8 +32,19 @@ async function main() {
   await db.initialize();
 
   try {
-    // Get all parsed messages
-    const channels = ['2427485240', '3241720654', '2394142145'];
+    const configPath = path.join(projectRoot, 'config.json');
+    if (!fs.existsSync(configPath)) {
+      throw new Error('config.json not found');
+    }
+    const config: BotConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    const channels = (config.channels ?? []).map(c => String(c.channel));
+
+    if (channels.length === 0) {
+      console.log('No channels configured');
+      return;
+    }
+
+    // Get all parsed messages without trades
     const results: Array<{
       messageId: string;
       channel: string;
