@@ -1,5 +1,6 @@
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { withCTraderRateLimitRetry } from '../utils/ctraderRateLimitRetry.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
 
 /**
@@ -936,6 +937,7 @@ export class CTraderClient {
   /**
    * Get deal history (executions) within a time window.
    * Uses ProtoOADealListReq. Deals include orderId - useful to find if an order was filled.
+   * Wrapped with rate limit retry (cTrader historical limit: 5 req/sec).
    */
   async getDealList(fromTimestamp: number, toTimestamp: number, maxRows: number = 1000): Promise<any[]> {
     if (!this.authenticated || !this.connection) {
@@ -948,44 +950,49 @@ export class CTraderClient {
     }
 
     try {
-      const { protobufLongToNumber } = await import('../utils/protobufLong.js');
-      const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
-      const allDeals: any[] = [];
-      let currentTo = toTimestamp;
-      let hasMore = true;
+      return await withCTraderRateLimitRetry(
+        async () => {
+          const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+          const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
+          const allDeals: any[] = [];
+          let currentTo = toTimestamp;
+          let hasMore = true;
 
-      while (hasMore) {
-        const response = await this.connection.sendCommand('ProtoOADealListReq', {
-          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-          fromTimestamp,
-          toTimestamp: currentTo,
-          maxRows
-        });
+          while (hasMore) {
+            const response = await this.connection!.sendCommand('ProtoOADealListReq', {
+              ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+              fromTimestamp,
+              toTimestamp: currentTo,
+              maxRows
+            });
 
-        const deals = response?.deal || [];
-        allDeals.push(...deals);
-        hasMore = response?.hasMore === true && deals.length > 0;
-        if (hasMore && deals.length > 0) {
-          const oldestTs = Math.min(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
-          currentTo = oldestTs - 1;
-          if (currentTo < fromTimestamp) hasMore = false;
-        } else {
-          hasMore = false;
-        }
-      }
+            const deals = response?.deal || [];
+            allDeals.push(...deals);
+            hasMore = response?.hasMore === true && deals.length > 0;
+            if (hasMore && deals.length > 0) {
+              const oldestTs = Math.min(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
+              currentTo = oldestTs - 1;
+              if (currentTo < fromTimestamp) hasMore = false;
+            } else {
+              hasMore = false;
+            }
+          }
 
-      const deals = allDeals;
-      return deals.map((d: any) => {
-        const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
-        const positionId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
-        return {
-          ...d,
-          orderId: orderId != null ? String(orderId) : d.orderId,
-          positionId: positionId != null ? String(positionId) : d.positionId,
-          dealStatus: d.dealStatus ?? d.deal_status,
-          executionPrice: d.executionPrice ?? d.execution_price
-        };
-      });
+          const deals = allDeals;
+          return deals.map((d: any) => {
+            const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+            const positionId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
+            return {
+              ...d,
+              orderId: orderId != null ? String(orderId) : d.orderId,
+              positionId: positionId != null ? String(positionId) : d.positionId,
+              dealStatus: d.dealStatus ?? d.deal_status,
+              executionPrice: d.executionPrice ?? d.execution_price
+            };
+          });
+        },
+        { label: 'getDealList' }
+      );
     } catch (error) {
       logger.error('Failed to get deal list', {
         accountId: this.config.accountId,
@@ -999,6 +1006,7 @@ export class CTraderClient {
   /**
    * Get deals for a specific position within a time window.
    * Uses ProtoOADealListByPositionIdReq.
+   * Wrapped with rate limit retry (cTrader historical limit: 5 req/sec).
    */
   async getDealListByPositionId(
     positionId: string,
@@ -1015,44 +1023,49 @@ export class CTraderClient {
     }
 
     try {
-      const { protobufLongToNumber } = await import('../utils/protobufLong.js');
-      const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
-      const allDeals: any[] = [];
-      let currentFrom = fromTimestamp;
-      let hasMore = true;
+      return await withCTraderRateLimitRetry(
+        async () => {
+          const { protobufLongToNumber } = await import('../utils/protobufLong.js');
+          const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
+          const allDeals: any[] = [];
+          let currentFrom = fromTimestamp;
+          let hasMore = true;
 
-      while (hasMore) {
-        const response = await this.connection.sendCommand('ProtoOADealListByPositionIdReq', {
-          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-          positionId: parseInt(positionId, 10),
-          fromTimestamp: currentFrom,
-          toTimestamp
-        });
+          while (hasMore) {
+            const response = await this.connection!.sendCommand('ProtoOADealListByPositionIdReq', {
+              ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+              positionId: parseInt(positionId, 10),
+              fromTimestamp: currentFrom,
+              toTimestamp
+            });
 
-        const deals = response?.deal || [];
-        allDeals.push(...deals);
-        hasMore = response?.hasMore === true && deals.length > 0;
-        if (hasMore && deals.length > 0) {
-          const lastTs = Math.max(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
-          currentFrom = lastTs + 1;
-          if (currentFrom >= toTimestamp) hasMore = false;
-        } else {
-          hasMore = false;
-        }
-      }
+            const deals = response?.deal || [];
+            allDeals.push(...deals);
+            hasMore = response?.hasMore === true && deals.length > 0;
+            if (hasMore && deals.length > 0) {
+              const lastTs = Math.max(...deals.map((d: any) => Number(toNum(d.executionTimestamp ?? d.execution_timestamp) ?? 0)));
+              currentFrom = lastTs + 1;
+              if (currentFrom >= toTimestamp) hasMore = false;
+            } else {
+              hasMore = false;
+            }
+          }
 
-      const deals = allDeals;
-      return deals.map((d: any) => {
-        const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
-        const posId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
-        return {
-          ...d,
-          orderId: orderId != null ? String(orderId) : d.orderId,
-          positionId: posId != null ? String(posId) : d.positionId,
-          dealStatus: d.dealStatus ?? d.deal_status,
-          executionPrice: d.executionPrice ?? d.execution_price
-        };
-      });
+          const deals = allDeals;
+          return deals.map((d: any) => {
+            const orderId = typeof d.orderId === 'object' && d.orderId?.low != null ? d.orderId.low : d.orderId;
+            const posId = typeof d.positionId === 'object' && d.positionId?.low != null ? d.positionId.low : d.positionId;
+            return {
+              ...d,
+              orderId: orderId != null ? String(orderId) : d.orderId,
+              positionId: posId != null ? String(posId) : d.positionId,
+              dealStatus: d.dealStatus ?? d.deal_status,
+              executionPrice: d.executionPrice ?? d.execution_price
+            };
+          });
+        },
+        { label: 'getDealListByPositionId' }
+      );
     } catch (error) {
       logger.error('Failed to get deal list by position', {
         positionId,
@@ -1085,6 +1098,7 @@ export class CTraderClient {
   /**
    * Get closed orders (cancelled, filled, expired) within a time window.
    * Uses ProtoOAOrderListReq. Max window 1 week (604800000 ms).
+   * Wrapped with rate limit retry (cTrader historical limit: 5 req/sec).
    */
   async getClosedOrders(fromTimestamp: number, toTimestamp: number): Promise<any[]> {
     if (!this.authenticated || !this.connection) {
@@ -1097,28 +1111,33 @@ export class CTraderClient {
     }
 
     try {
-      const response = await this.connection.sendCommand('ProtoOAOrderListReq', {
-        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
-        fromTimestamp,
-        toTimestamp
-      });
+      return await withCTraderRateLimitRetry(
+        async () => {
+          const response = await this.connection!.sendCommand('ProtoOAOrderListReq', {
+            ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+            fromTimestamp,
+            toTimestamp
+          });
 
-      const orders = response?.order || [];
-      return orders.map((o: any) => {
-        const orderId = typeof o.orderId === 'object' && o.orderId?.low != null ? o.orderId.low : o.orderId;
-        const status = o.orderStatus ?? o.order_status ?? 'unknown';
-        const statusStr = typeof status === 'number'
-          ? ['', 'ACCEPTED', 'FILLED', 'REJECTED', 'EXPIRED', 'CANCELLED'][status] || String(status)
-          : String(status);
-        return {
-          ...o,
-          orderId: orderId != null ? String(orderId) : o.orderId,
-          id: orderId ?? o.id,
-          orderStatus: statusStr,
-          limitPrice: o.limitPrice ?? o.limit_price,
-          executionPrice: o.executionPrice ?? o.execution_price
-        };
-      });
+          const orders = response?.order || [];
+          return orders.map((o: any) => {
+            const orderId = typeof o.orderId === 'object' && o.orderId?.low != null ? o.orderId.low : o.orderId;
+            const status = o.orderStatus ?? o.order_status ?? 'unknown';
+            const statusStr = typeof status === 'number'
+              ? ['', 'ACCEPTED', 'FILLED', 'REJECTED', 'EXPIRED', 'CANCELLED'][status] || String(status)
+              : String(status);
+            return {
+              ...o,
+              orderId: orderId != null ? String(orderId) : o.orderId,
+              id: orderId ?? o.id,
+              orderStatus: statusStr,
+              limitPrice: o.limitPrice ?? o.limit_price,
+              executionPrice: o.executionPrice ?? o.execution_price
+            };
+          });
+        },
+        { label: 'getClosedOrders' }
+      );
     } catch (error) {
       logger.error('Failed to get closed orders', {
         accountId: this.config.accountId,
