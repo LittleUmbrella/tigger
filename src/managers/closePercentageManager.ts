@@ -280,21 +280,32 @@ async function closePercentageOfPosition(
       if (moveStopLossToEntry) {
         try {
           const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
+          // cTrader can reject SL exactly at entry (TRADING_BAD_STOPS). Nudge SL by 1 tick
+          // in the safe direction: LONG = below entry, SHORT = above entry.
+          const rawDigits = symbolInfo?.digits;
+          const digits = typeof rawDigits === 'number' ? rawDigits : (typeof rawDigits === 'object' && rawDigits?.low != null ? rawDigits.low : 2);
+          const tickSize = Math.pow(10, -digits);
+          const isLong = trade.direction === 'long' || (trade.stop_loss != null && trade.stop_loss < trade.entry_price);
+          const rawSlPrice = isLong ? bePrice - tickSize : bePrice + tickSize;
+          const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
           await ctraderClient.modifyPosition({
             positionId: trade.position_id,
-            stopLoss: bePrice
+            stopLoss: slPrice
           });
           await db.updateTrade(trade.id, {
-            stop_loss: bePrice,
+            stop_loss: slPrice,
             stop_loss_breakeven: true
           });
           logger.info('Stop loss moved to entry on cTrader', {
             tradeId: trade.id,
-            bePrice
+            bePrice,
+            slPrice: slPrice !== bePrice ? slPrice : undefined
           });
         } catch (slError) {
           logger.error('Error moving stop loss to entry on cTrader', {
             tradeId: trade.id,
+            channel: trade.channel,
+            messageId: trade.message_id,
             error: serializeErrorForLog(slError)
           });
         }
