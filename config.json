@@ -55,7 +55,7 @@
       "pollInterval": 4000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
+      "maxMessageAgeMinutes": 120
     },
     {
       "name": "ctrader_gold_harvester",
