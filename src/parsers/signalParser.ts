@@ -14,6 +14,7 @@ import { bigParser } from './bigParser.js';
 import { goldScalpsParser } from './goldScalpsParser.js';
 import { starFormatParser } from './starFormatParser.js';
 import { ctraderGoldParser } from './ctraderGoldParser.js';
+import { stevenParser } from './stevenParser.js';
 import { fxcmChartParser } from './fxcmChartParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 
@@ -28,6 +29,7 @@ registerParser('big', bigParser);
 registerParser('gold_scalps', goldScalpsParser);
 registerParser('star_format', starFormatParser);
 registerParser('ctrader_gold', ctraderGoldParser);
+registerParser('steven', stevenParser);
 registerParser('fxcm_chart', fxcmChartParser);
 
 /**
