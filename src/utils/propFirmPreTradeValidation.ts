@@ -110,7 +110,24 @@ async function buildAccountState(
 }
 
 /**
+ * Resolve the challenge initial balance for a prop firm config.
+ * For drawdown %, we use the challenge starting capital (e.g. $10k), NOT the current exchange balance.
+ */
+function resolveChallengeInitialBalance(
+  propFirmConfig: string | CustomPropFirmConfig
+): number {
+  if (typeof propFirmConfig === 'string') {
+    const rule = getPropFirmRule(propFirmConfig);
+    return rule?.initialBalance ?? 10000;
+  }
+  return propFirmConfig.initialBalance ?? getPropFirmRule(propFirmConfig.name)?.initialBalance ?? 10000;
+}
+
+/**
  * Check if a trade would violate prop firm rules if it resulted in total loss
+ *
+ * @param currentBalanceFromExchange - When provided (live trading), use as source of truth for current balance.
+ *   Prop firm drawdown % is always calculated against the challenge initial balance (e.g. $10k), not current balance.
  */
 export async function validateTradeAgainstPropFirms(
   db: DatabaseManager,
@@ -122,7 +139,8 @@ export async function validateTradeAgainstPropFirms(
   quantity: number,
   leverage: number,
   additionalWorstCaseLoss: number = 0,
-  dayStartBalance: number | undefined = undefined
+  dayStartBalance: number | undefined = undefined,
+  currentBalanceFromExchange?: number
 ): Promise<PreTradeValidationResult[]> {
   const results: PreTradeValidationResult[] = [];
   
@@ -130,25 +148,31 @@ export async function validateTradeAgainstPropFirms(
   const potentialLoss = calculatePotentialLoss(entryPrice, stopLoss, quantity);
   const totalWorstCaseLoss = potentialLoss + additionalWorstCaseLoss;
   
-  // Build current account state
-  const accountState = await buildAccountState(db, channel, initialBalance);
+  // Challenge initial balance for drawdown % (e.g. $10k for Hyrotrader) - NOT current exchange balance
+  const challengeInitialBalance = propFirmConfigs.length > 0
+    ? resolveChallengeInitialBalance(propFirmConfigs[0])
+    : initialBalance;
+  
+  // Build account state from trades (peak balance, daily PnL). Use challenge initial for consistency.
+  const accountState = await buildAccountState(db, channel, challengeInitialBalance);
+  
+  // For live trading: exchange balance is source of truth. Otherwise use DB-derived balance.
+  const currentBalance = currentBalanceFromExchange ?? accountState.currentBalance;
   
   // Validate against each prop firm
   for (const propFirmConfig of propFirmConfigs) {
     let rule: PropFirmRule | null = null;
     
     if (typeof propFirmConfig === 'string') {
-      // Predefined prop firm
-      rule = getPropFirmRule(propFirmConfig, {
-        initialBalance
-      });
+      // Predefined prop firm: use rule's default initialBalance (challenge start), NOT exchange balance
+      rule = getPropFirmRule(propFirmConfig);
     } else {
-      // Custom prop firm configuration
+      // Custom prop firm configuration: use config.initialBalance or challenge default
       rule = createCustomPropFirmRule(
         propFirmConfig.name,
         propFirmConfig.displayName || propFirmConfig.name,
         {
-          initialBalance: propFirmConfig.initialBalance || initialBalance,
+          initialBalance: propFirmConfig.initialBalance ?? resolveChallengeInitialBalance(propFirmConfig),
           profitTarget: propFirmConfig.profitTarget,
           maxDrawdown: propFirmConfig.maxDrawdown,
           dailyDrawdown: propFirmConfig.dailyDrawdown,
@@ -194,17 +218,17 @@ export async function validateTradeAgainstPropFirms(
     }
     
     // Simulate the trade as a total loss and check drawdown rules
-    const simulatedBalance = accountState.currentBalance - totalWorstCaseLoss;
-    const simulatedPeakBalance = Math.max(accountState.peakBalance, accountState.currentBalance);
+    const simulatedBalance = currentBalance - totalWorstCaseLoss;
+    const simulatedPeakBalance = Math.max(accountState.peakBalance, currentBalance);
     
-    // Check maxDrawdown rule
+    // Check maxDrawdown rule (drawdown % is vs challenge initial balance, e.g. $10k)
     if (rule.maxDrawdown !== undefined) {
       const drawdown = simulatedPeakBalance - simulatedBalance;
       const drawdownPercentage = (drawdown / rule.initialBalance) * 100;
       
       if (drawdownPercentage > rule.maxDrawdown) {
         violations.push(
-          `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (current balance: ${accountState.currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+          `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
         );
       }
     }
@@ -220,8 +244,8 @@ export async function validateTradeAgainstPropFirms(
         ? (rule.dailyDrawdown / 100) * (dayStartBalance ?? rule.initialBalance)
         : (rule.dailyDrawdown / 100) * (
             accountState.dailyPnL.has(today)
-              ? accountState.currentBalance - (accountState.dailyPnL.get(today) || 0)
-              : accountState.currentBalance
+              ? currentBalance - (accountState.dailyPnL.get(today) || 0)
+              : currentBalance
           );
       
       if (simulatedDailyPnL < -dailyDrawdownLimit) {

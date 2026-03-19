@@ -199,7 +199,7 @@
       "maxMessageStalenessMinutes": 5,
       "baseLeverage": 20,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"]
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000}]
     },
     {
       "channel": "1634731277",
@@ -213,7 +213,7 @@
       "maxMessageStalenessMinutes": 5,
       "baseLeverage": 3,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"]
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000}]
     },
     {
       "channel": "3469900302",
@@ -229,7 +229,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"],
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -249,7 +249,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"],
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -268,7 +268,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"],
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       }
@@ -286,7 +286,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": ["hyrotrader"],
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },

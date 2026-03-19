@@ -855,7 +855,8 @@ const executeTradeForAccount = async (
         qty,
         effectiveLeverage,
         openWorstCaseLoss,
-        dayStartBalance
+        dayStartBalance,
+        balance // Use exchange balance as source of truth for current balance (drawdown % uses challenge initial)
       );
       
       // Check if any prop firm would be violated
