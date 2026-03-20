@@ -92,6 +92,12 @@ export class CTraderClient {
   private authenticated: boolean = false;
   /** Coalesce concurrent getCurrentPrice calls per symbol - one subscription, all callers share result */
   private inFlightSpotRequests = new Map<string, Promise<SpotPriceResult>>();
+  /**
+   * Broker symbol metadata (id, volumes, etc.) rarely changes for an account; long TTL avoids repeat SymbolsList/SymbolById
+   * traffic. Cleared on disconnect.
+   */
+  private symbolInfoCache = new Map<string, { expiresAt: number; data: any }>();
+  private static readonly SYMBOL_INFO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
   constructor(config: CTraderClientConfig) {
     this.config = {
@@ -462,6 +468,12 @@ export class CTraderClient {
       throw new Error('Account ID is required to get symbol info');
     }
 
+    const now = Date.now();
+    const cached = this.symbolInfoCache.get(symbol);
+    if (cached && cached.expiresAt > now) {
+      return cached.data;
+    }
+
     try {
       const accountIdNum = parseInt(this.config.accountId, 10);
       if (isNaN(accountIdNum)) {
@@ -556,6 +568,10 @@ export class CTraderClient {
       const result = fullSymbol
         ? { ...lightSymbol, ...fullSymbol, symbolName: symbol }
         : { ...lightSymbol, symbolName: symbol };
+      this.symbolInfoCache.set(symbol, {
+        expiresAt: now + CTraderClient.SYMBOL_INFO_CACHE_TTL_MS,
+        data: result
+      });
       return result;
     } catch (error) {
       logger.error('Failed to get symbol info', {
@@ -1451,9 +1467,10 @@ export class CTraderClient {
   ): Promise<SpotPriceResult | { reason: string; error?: string }> {
     try {
       const symbolInfo = await this.getSymbolInfo(symbol);
-      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId.low !== undefined
-        ? symbolInfo.symbolId.low
-        : symbolInfo.symbolId;
+      const symbolId = protobufLongToNumber(symbolInfo.symbolId);
+      if (symbolId == null || !Number.isFinite(symbolId)) {
+        return { reason: 'symbol_lookup', error: 'Invalid symbolId' };
+      }
 
       const connection = this.connection;
       if (!connection) return { reason: 'symbol_lookup', error: 'No connection' };
@@ -1461,79 +1478,97 @@ export class CTraderClient {
       const accountId = this.config.accountId;
       if (!accountId) return { reason: 'symbol_lookup', error: 'No account ID' };
 
-      return new Promise<SpotPriceResult | { reason: string; error?: string }>((resolve) => {
+      return await new Promise<SpotPriceResult | { reason: string; error?: string }>((resolve) => {
         let listenerId: string | undefined;
         let resolved = false;
-        const timeout = setTimeout(() => {
-          if (!resolved && listenerId) {
-            connection.removeEventListener(listenerId);
+        let spotWaitTimer: ReturnType<typeof setTimeout> | undefined;
+
+        const isAlreadySubscribedError = (error: unknown): boolean => {
+          const obj = error as { errorCode?: unknown; error_code?: unknown } | null;
+          if (!obj || typeof obj !== 'object') return false;
+          const code = obj.errorCode ?? obj.error_code;
+          if (code === 113) return true;
+          const s = code != null ? String(code) : '';
+          return s === 'ALREADY_SUBSCRIBED' || s === '113';
+        };
+
+        const clearSpotWait = () => {
+          if (spotWaitTimer !== undefined) {
+            clearTimeout(spotWaitTimer);
+            spotWaitTimer = undefined;
           }
-          if (!resolved) {
-            resolved = true;
-            resolve({ reason: 'timeout', error: `No spot event within ${timeoutMs}ms` });
-          }
-        }, timeoutMs);
+        };
+
+        const startSpotWaitTimer = () => {
+          if (resolved || spotWaitTimer !== undefined) return;
+          spotWaitTimer = setTimeout(() => {
+            if (!resolved && listenerId) {
+              connection.removeEventListener(listenerId);
+            }
+            if (!resolved) {
+              resolved = true;
+              resolve({ reason: 'timeout', error: `No spot event within ${timeoutMs}ms` });
+            }
+          }, timeoutMs);
+        };
 
         const idResult = connection.on('ProtoOASpotEvent', (ctraderEvent: any) => {
           if (resolved) return;
 
           const event = ctraderEvent.descriptor || ctraderEvent;
-          const eventSymbolId = typeof event.symbolId === 'object' && event.symbolId.low !== undefined
-            ? event.symbolId.low
-            : event.symbolId;
+          const eventSymbolId = protobufLongToNumber(event.symbolId);
+          if (eventSymbolId !== symbolId) return;
 
-          if (eventSymbolId === symbolId) {
-            resolved = true;
-            clearTimeout(timeout);
+          resolved = true;
+          clearSpotWait();
 
-            const id = idResult;
-            if (typeof id === 'string') {
-              connection.removeEventListener(id);
-            }
+          const id = idResult;
+          if (typeof id === 'string') {
+            connection.removeEventListener(id);
+          }
 
-            const bid = event.bid ? event.bid / 100000 : null;
-            const ask = event.ask ? event.ask / 100000 : null;
+          const bid = event.bid ? event.bid / CTRADER_PRICE_SCALE : null;
+          const ask = event.ask ? event.ask / CTRADER_PRICE_SCALE : null;
 
-            if (bid && ask) {
-              resolve({ bid, ask });
-            } else if (bid) {
-              resolve({ bid, ask: bid });
-            } else if (ask) {
-              resolve({ bid: ask, ask });
-            } else {
-              resolve({ reason: 'empty_spot_event', error: 'Spot event had no bid or ask' });
-            }
+          if (bid && ask) {
+            resolve({ bid, ask });
+          } else if (bid) {
+            resolve({ bid, ask: bid });
+          } else if (ask) {
+            resolve({ bid: ask, ask });
+          } else {
+            resolve({ reason: 'empty_spot_event', error: 'Spot event had no bid or ask' });
           }
         });
 
-        const id = idResult;
-        if (typeof id === 'string') {
-          listenerId = id;
+        if (typeof idResult === 'string') {
+          listenerId = idResult;
         }
 
-        connection.sendCommand('ProtoOASubscribeSpotsReq', {
-          ctidTraderAccountId: parseInt(accountId, 10),
-          symbolId: [symbolId]
-        }).catch((error) => {
-          if (resolved) return;
-          const obj = error as { errorCode?: unknown; error_code?: unknown } | null;
-          const errStr = obj && typeof obj === 'object'
-            ? String(obj.errorCode ?? obj.error_code ?? '')
-            : '';
-          if (errStr === 'ALREADY_SUBSCRIBED') {
-            // Subscription from prior attempt or call is active - keep waiting for spot event
-            return;
-          }
-          resolved = true;
-          clearTimeout(timeout);
-          if (listenerId) {
-            connection.removeEventListener(listenerId);
-          }
-          resolve({
-            reason: 'subscribe_failed',
-            error: serializeErrorForLog(error)
+        void connection
+          .sendCommand('ProtoOASubscribeSpotsReq', {
+            ctidTraderAccountId: parseInt(accountId, 10),
+            symbolId: [symbolId]
+          })
+          .then(() => {
+            if (!resolved) startSpotWaitTimer();
+          })
+          .catch((error) => {
+            if (resolved) return;
+            if (isAlreadySubscribedError(error)) {
+              startSpotWaitTimer();
+              return;
+            }
+            resolved = true;
+            clearSpotWait();
+            if (listenerId) {
+              connection.removeEventListener(listenerId);
+            }
+            resolve({
+              reason: 'subscribe_failed',
+              error: serializeErrorForLog(error)
+            });
           });
-        });
       });
     } catch (error) {
       return {
@@ -1558,6 +1593,7 @@ export class CTraderClient {
       this.connection = null;
       this.connected = false;
       this.authenticated = false;
+      this.symbolInfoCache.clear();
     }
   }
 
