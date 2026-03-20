@@ -1448,6 +1448,17 @@ export class CTraderClient {
       }
     }
 
+    const fallback = await this.getCurrentPriceFromLatestTrendbar(symbol);
+    if (fallback) {
+      logger.warn('cTrader getCurrentPrice: spot stream failed; using M1 close fallback', {
+        symbol,
+        attempts: maxRetries,
+        reason: lastReason,
+        exchange: 'ctrader'
+      });
+      return fallback;
+    }
+
     logger.warn('cTrader getCurrentPrice failed after retries', {
       symbol,
       attempts: maxRetries,
@@ -1459,12 +1470,68 @@ export class CTraderClient {
   }
 
   /**
+   * Drop server-side spot subscription so the next SubscribeSpots gets a fresh snapshot event.
+   * Safe to call when not subscribed (errors ignored).
+   */
+  private async tryUnsubscribeSpots(symbolId: number): Promise<void> {
+    if (!this.connection || !this.config.accountId) return;
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) return;
+    try {
+      await this.connection.sendCommand('ProtoOAUnsubscribeSpotsReq', {
+        ctidTraderAccountId: accountIdNum,
+        symbolId: [symbolId]
+      });
+    } catch {
+      // Not subscribed or broker-specific — ignore
+    }
+  }
+
+  /** Last-resort mid price from recent M1 bars (bid=ask=close); spread is lost vs live spot. */
+  private async getCurrentPriceFromLatestTrendbar(symbol: string): Promise<SpotPriceResult | null> {
+    try {
+      const now = Date.now();
+      const bars = await this.getTrendbars({
+        symbol,
+        fromTimestamp: now - 20 * 60 * 1000,
+        toTimestamp: now,
+        period: 'M1'
+      });
+      if (bars.length === 0) return null;
+      const close = bars[bars.length - 1]?.price;
+      if (close == null || !Number.isFinite(close) || close <= 0) return null;
+      return { bid: close, ask: close };
+    } catch (error) {
+      logger.debug('cTrader trendbar fallback failed', {
+        symbol,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(error)
+      });
+      return null;
+    }
+  }
+
+  /**
    * Single attempt to fetch spot price. Returns {bid,ask} or failure info.
+   *
+   * Important: if we leave an active spot subscription on the server, the next SubscribeSpots returns
+   * ALREADY_SUBSCRIBED and cTrader may not replay the last quote — only new ticks. Quiet symbols (e.g. XAUUSD)
+   * can then time out. We unsubscribe before each subscribe so the first post-subscribe event always carries
+   * the latest snapshot (per Open API docs).
    */
   private async fetchSpotPriceOnce(
     symbol: string,
     timeoutMs: number
   ): Promise<SpotPriceResult | { reason: string; error?: string }> {
+    const isAlreadySubscribedError = (error: unknown): boolean => {
+      const obj = error as { errorCode?: unknown; error_code?: unknown } | null;
+      if (!obj || typeof obj !== 'object') return false;
+      const code = obj.errorCode ?? obj.error_code;
+      if (code === 113) return true;
+      const s = code != null ? String(code) : '';
+      return s === 'ALREADY_SUBSCRIBED' || s === '113';
+    };
+
     try {
       const symbolInfo = await this.getSymbolInfo(symbol);
       const symbolId = protobufLongToNumber(symbolInfo.symbolId);
@@ -1478,98 +1545,91 @@ export class CTraderClient {
       const accountId = this.config.accountId;
       if (!accountId) return { reason: 'symbol_lookup', error: 'No account ID' };
 
-      return await new Promise<SpotPriceResult | { reason: string; error?: string }>((resolve) => {
-        let listenerId: string | undefined;
-        let resolved = false;
-        let spotWaitTimer: ReturnType<typeof setTimeout> | undefined;
+      const accountIdNum = parseInt(accountId, 10);
+      if (isNaN(accountIdNum)) {
+        return { reason: 'symbol_lookup', error: 'Invalid account ID' };
+      }
 
-        const isAlreadySubscribedError = (error: unknown): boolean => {
-          const obj = error as { errorCode?: unknown; error_code?: unknown } | null;
-          if (!obj || typeof obj !== 'object') return false;
-          const code = obj.errorCode ?? obj.error_code;
-          if (code === 113) return true;
-          const s = code != null ? String(code) : '';
-          return s === 'ALREADY_SUBSCRIBED' || s === '113';
-        };
+      let listenerId: string | undefined;
 
-        const clearSpotWait = () => {
-          if (spotWaitTimer !== undefined) {
-            clearTimeout(spotWaitTimer);
-            spotWaitTimer = undefined;
-          }
-        };
-
-        const startSpotWaitTimer = () => {
-          if (resolved || spotWaitTimer !== undefined) return;
-          spotWaitTimer = setTimeout(() => {
-            if (!resolved && listenerId) {
-              connection.removeEventListener(listenerId);
-            }
-            if (!resolved) {
-              resolved = true;
-              resolve({ reason: 'timeout', error: `No spot event within ${timeoutMs}ms` });
-            }
-          }, timeoutMs);
-        };
-
-        const idResult = connection.on('ProtoOASpotEvent', (ctraderEvent: any) => {
-          if (resolved) return;
+      const spotWait = new Promise<
+        { bid: number; ask: number } | { reason: 'empty_spot_event'; error: string }
+      >((resolve) => {
+        let settled = false;
+        const id = connection.on('ProtoOASpotEvent', (ctraderEvent: any) => {
+          if (settled) return;
 
           const event = ctraderEvent.descriptor || ctraderEvent;
           const eventSymbolId = protobufLongToNumber(event.symbolId);
           if (eventSymbolId !== symbolId) return;
 
-          resolved = true;
-          clearSpotWait();
-
-          const id = idResult;
-          if (typeof id === 'string') {
-            connection.removeEventListener(id);
-          }
-
           const bid = event.bid ? event.bid / CTRADER_PRICE_SCALE : null;
           const ask = event.ask ? event.ask / CTRADER_PRICE_SCALE : null;
 
           if (bid && ask) {
+            settled = true;
+            if (typeof id === 'string') connection.removeEventListener(id);
             resolve({ bid, ask });
           } else if (bid) {
+            settled = true;
+            if (typeof id === 'string') connection.removeEventListener(id);
             resolve({ bid, ask: bid });
           } else if (ask) {
+            settled = true;
+            if (typeof id === 'string') connection.removeEventListener(id);
             resolve({ bid: ask, ask });
           } else {
+            settled = true;
+            if (typeof id === 'string') connection.removeEventListener(id);
             resolve({ reason: 'empty_spot_event', error: 'Spot event had no bid or ask' });
           }
         });
-
-        if (typeof idResult === 'string') {
-          listenerId = idResult;
-        }
-
-        void connection
-          .sendCommand('ProtoOASubscribeSpotsReq', {
-            ctidTraderAccountId: parseInt(accountId, 10),
-            symbolId: [symbolId]
-          })
-          .then(() => {
-            if (!resolved) startSpotWaitTimer();
-          })
-          .catch((error) => {
-            if (resolved) return;
-            if (isAlreadySubscribedError(error)) {
-              startSpotWaitTimer();
-              return;
-            }
-            resolved = true;
-            clearSpotWait();
-            if (listenerId) {
-              connection.removeEventListener(listenerId);
-            }
-            resolve({
-              reason: 'subscribe_failed',
-              error: serializeErrorForLog(error)
-            });
-          });
+        listenerId = typeof id === 'string' ? id : undefined;
       });
+
+      await this.tryUnsubscribeSpots(symbolId);
+
+      try {
+        await connection.sendCommand('ProtoOASubscribeSpotsReq', {
+          ctidTraderAccountId: accountIdNum,
+          symbolId: [symbolId]
+        });
+      } catch (error) {
+        if (!isAlreadySubscribedError(error)) {
+          if (listenerId) connection.removeEventListener(listenerId);
+          return { reason: 'subscribe_failed', error: serializeErrorForLog(error) };
+        }
+        await this.tryUnsubscribeSpots(symbolId);
+        try {
+          await connection.sendCommand('ProtoOASubscribeSpotsReq', {
+            ctidTraderAccountId: accountIdNum,
+            symbolId: [symbolId]
+          });
+        } catch (e2) {
+          if (listenerId) connection.removeEventListener(listenerId);
+          return { reason: 'subscribe_failed', error: serializeErrorForLog(e2) };
+        }
+      }
+
+      const timeoutRace = new Promise<{ reason: 'timeout'; error: string }>((resolve) => {
+        setTimeout(
+          () => resolve({ reason: 'timeout', error: `No spot event within ${timeoutMs}ms` }),
+          timeoutMs
+        );
+      });
+
+      const outcome = await Promise.race([spotWait, timeoutRace]);
+
+      if ('reason' in outcome && outcome.reason === 'timeout' && listenerId) {
+        connection.removeEventListener(listenerId);
+      }
+
+      void this.tryUnsubscribeSpots(symbolId);
+
+      if ('bid' in outcome && outcome.bid != null && 'ask' in outcome && outcome.ask != null) {
+        return outcome as SpotPriceResult;
+      }
+      return outcome as { reason: string; error?: string };
     } catch (error) {
       return {
         reason: 'symbol_lookup',
