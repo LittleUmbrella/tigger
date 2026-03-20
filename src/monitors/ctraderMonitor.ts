@@ -4,7 +4,12 @@ import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import dayjs from 'dayjs';
-import { CTraderClient } from '../clients/ctraderClient.js';
+import {
+  CTraderClient,
+  extractPositionIdFromCtraderOrderDetails,
+  getCtraderOrderExecutionPrice,
+  isCtraderOrderStatusFilled
+} from '../clients/ctraderClient.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import {
@@ -38,7 +43,7 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
 
 /**
  * Resolve positionId from orderId for trades that have order_id but no position_id.
- * Uses ProtoOAOrderDetailsReq (direct order ID lookup) - no time window needed.
+ * One ProtoOADealListReq per account (paginated internally), then ProtoOAOrderDetailsReq for misses.
  */
 const resolvePositionIdsBatch = async (
   trades: Trade[],
@@ -59,11 +64,45 @@ const resolvePositionIdsBatch = async (
   for (const [accountKey, accountTrades] of byAccount) {
     const client = getCTraderClient ? await getCTraderClient(accountKey || undefined) : ctraderClient;
     if (!client) continue;
+
+    const minCreated = Math.min(...accountTrades.map((t) => new Date(t.created_at).getTime()));
+    const [from, to] = capDealHistoryWindow(minCreated, Date.now());
+    let dealsSnapshot: any[] = [];
+    try {
+      dealsSnapshot = await client.getDealList(from, to);
+    } catch (error) {
+      logger.debug('Batch deal list for position-id resolution failed', {
+        account: accountKey || '(default)',
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+    }
+
+    const positionByOrderId = new Map<string, string>();
+    for (const d of dealsSnapshot) {
+      const oid = d.orderId != null ? String(d.orderId) : '';
+      const pid = d.positionId != null ? String(d.positionId) : '';
+      if (oid && pid && !positionByOrderId.has(oid)) positionByOrderId.set(oid, pid);
+    }
+
     for (const t of accountTrades) {
       if (!t.order_id) continue;
       const orderIdStr = String(t.order_id);
       try {
-        const posId = await client.getPositionIdByEntryOrderId(orderIdStr);
+        const fromDeals = positionByOrderId.get(orderIdStr);
+        if (fromDeals) {
+          result.set(orderIdStr, fromDeals);
+          logger.debug('Resolved position from batch deal list', {
+            tradeId: t.id,
+            orderId: orderIdStr,
+            positionId: fromDeals,
+            exchange: 'ctrader'
+          });
+          continue;
+        }
+        const posId = await client.getPositionIdByEntryOrderId(orderIdStr, from, to, {
+          allowDealListFallback: false
+        });
         if (posId) {
           result.set(orderIdStr, posId);
           logger.debug('Resolved position from order details', {
@@ -72,6 +111,21 @@ const resolvePositionIdsBatch = async (
             positionId: posId,
             exchange: 'ctrader'
           });
+          continue;
+        }
+        if (dealsSnapshot.length === 0) {
+          const posIdDeal = await client.getPositionIdByEntryOrderId(orderIdStr, from, to, {
+            allowDealListFallback: true
+          });
+          if (posIdDeal) {
+            result.set(orderIdStr, posIdDeal);
+            logger.debug('Resolved position after empty batch deal list', {
+              tradeId: t.id,
+              orderId: orderIdStr,
+              positionId: posIdDeal,
+              exchange: 'ctrader'
+            });
+          }
         }
       } catch (error) {
         logger.debug('Order details lookup failed - will retry per-check', {
@@ -155,7 +209,12 @@ const getClosedPositionInfoFromDeals = async (
       const status = d.dealStatus ?? d.deal_status;
       return status === 2 || status === 'FILLED';
     });
-    if (closingDeals.length === 0) return { closed: false };
+    if (closingDeals.length === 0) {
+      if (assumeClosed) {
+        return { closed: true, exitPrice: undefined, pnl: undefined };
+      }
+      return { closed: false };
+    }
 
     if (assumeClosed) {
       // Position known closed from exchange (not in open list) - trust it, extract exit info from closing deals
@@ -209,6 +268,104 @@ const getClosedPositionInfoFromDeals = async (
     });
     return { closed: false };
   }
+};
+
+/**
+ * Entry order is gone from open orders and no matching open position — use order details + deals
+ * (never assume FILLED without exchange confirmation; avoids stuck active trades with null position_id).
+ */
+const reconcileCtraderEntryWhenOrderMissingFromOpenList = async (
+  trade: Trade,
+  ctraderClient: CTraderClient,
+  symbol: string,
+  fromTs: number,
+  toTs: number
+): Promise<{
+  filled: boolean;
+  positionId?: string;
+  alreadyClosed?: boolean;
+  exitPrice?: number;
+  pnl?: number;
+  filledAt?: string;
+  filledPrice?: number;
+}> => {
+  const odEntry = await ctraderClient.getOrderDetails(trade.order_id!);
+  if (!odEntry?.order || !isCtraderOrderStatusFilled(odEntry.order)) {
+    logger.debug('Order not in open list; order details show not filled — wait for next poll', {
+      tradeId: trade.id,
+      symbol,
+      orderId: trade.order_id,
+      orderStatus: odEntry?.order?.orderStatus ?? odEntry?.order?.order_status,
+      exchange: 'ctrader'
+    });
+    return { filled: false };
+  }
+
+  let positionIdForDeals =
+    extractPositionIdFromCtraderOrderDetails(odEntry.order, odEntry.deals) ??
+    (await ctraderClient.getPositionIdByEntryOrderId(trade.order_id!, fromTs, toTs, {
+      prefetchedDetails: odEntry,
+      allowDealListFallback: true
+    }));
+
+  const updTs = odEntry.order.utcLastUpdateTimestamp ?? odEntry.order.utc_last_update_timestamp;
+  const tsMs = protobufLongToNumber(updTs);
+  const filledAtFromOrder = tsMs != null && tsMs > 0 ? new Date(tsMs).toISOString() : undefined;
+  const fillPx = getCtraderOrderExecutionPrice(odEntry.order);
+
+  if (positionIdForDeals) {
+    const closedInfo = await getClosedPositionInfoFromDeals(
+      ctraderClient,
+      positionIdForDeals,
+      fromTs,
+      toTs
+    );
+    if (closedInfo.closed) {
+      logger.info('Order filled, position already closed (deal history)', {
+        tradeId: trade.id,
+        symbol,
+        orderId: trade.order_id,
+        positionId: positionIdForDeals,
+        exitPrice: closedInfo.exitPrice,
+        pnl: closedInfo.pnl,
+        exchange: 'ctrader'
+      });
+      return {
+        filled: true,
+        positionId: positionIdForDeals,
+        alreadyClosed: true,
+        exitPrice: closedInfo.exitPrice,
+        pnl: closedInfo.pnl
+      };
+    }
+    logger.info('Entry order filled; activating trade with resolved position id', {
+      tradeId: trade.id,
+      symbol,
+      orderId: trade.order_id,
+      positionId: positionIdForDeals,
+      exchange: 'ctrader'
+    });
+    return {
+      filled: true,
+      positionId: positionIdForDeals,
+      filledAt: filledAtFromOrder,
+      filledPrice: fillPx
+    };
+  }
+
+  logger.info('cTrader entry FILLED but position id unknown — closing from order execution price only', {
+    tradeId: trade.id,
+    symbol,
+    orderId: trade.order_id,
+    executionPrice: fillPx,
+    exchange: 'ctrader'
+  });
+  return {
+    filled: true,
+    alreadyClosed: true,
+    exitPrice: fillPx,
+    pnl: undefined
+  };
 };
 
 /**
@@ -414,49 +571,34 @@ const checkEntryFilled = async (
               };
             }
             
-            // Order filled but position closed already - verify via deal/position history
+            // Order filled but position closed already - verify via order details + deal history
             const [fromTs, toTs] = capDealHistoryWindow(
               new Date(trade.created_at).getTime(),
               Date.now()
             );
-            const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
-              trade.order_id!,
+            const r = await reconcileCtraderEntryWhenOrderMissingFromOpenList(
+              trade,
+              ctraderClient,
+              symbol,
               fromTs,
               toTs
             );
-            if (resolvedPositionId) {
-              const closedInfo = await getClosedPositionInfoFromDeals(
-                ctraderClient,
-                resolvedPositionId,
-                fromTs,
-                toTs
-              );
-              if (closedInfo.closed) {
-                logger.info('Order filled, position already closed (from deal history)', {
-                  tradeId: trade.id,
-                  symbol,
-                  orderId: trade.order_id,
-                  positionId: resolvedPositionId,
-                  exitPrice: closedInfo.exitPrice,
-                  pnl: closedInfo.pnl,
-                  exchange: 'ctrader'
-                });
-                return {
-                  filled: true,
-                  positionId: resolvedPositionId,
-                  alreadyClosed: true,
-                  exitPrice: closedInfo.exitPrice,
-                  pnl: closedInfo.pnl,
-                };
-              }
+            if (!r.filled) return { filled: false };
+            if (r.alreadyClosed) {
+              return {
+                filled: true,
+                positionId: r.positionId,
+                alreadyClosed: true,
+                exitPrice: r.exitPrice,
+                pnl: r.pnl
+              };
             }
-            logger.debug('Order not found and no position - assuming filled but position closed', {
-              tradeId: trade.id,
-              symbol,
-              orderId: trade.order_id,
-              exchange: 'ctrader'
-            });
-            return { filled: true };
+            return {
+              filled: true,
+              positionId: r.positionId,
+              filledAt: r.filledAt,
+              filledPrice: r.filledPrice
+            };
           } else {
             // Order still open - check status
             const orderStatus = order.orderStatus || order.status;
@@ -492,40 +634,34 @@ const checkEntryFilled = async (
             error: serializeErrorForLog(error),
             exchange: 'ctrader'
           });
-          // Fallback: when getOpenOrders times out/fails, check deal history for fill+close
+          // Fallback: when getOpenOrders times out/fails, use order details + deal history
           const [fromTs, toTs] = capDealHistoryWindow(
             new Date(trade.created_at).getTime(),
             Date.now()
           );
-          const resolvedPositionId = await ctraderClient.getPositionIdByEntryOrderId(
-            trade.order_id!,
+          const r = await reconcileCtraderEntryWhenOrderMissingFromOpenList(
+            trade,
+            ctraderClient,
+            symbol,
             fromTs,
             toTs
           );
-          if (resolvedPositionId) {
-            const closedInfo = await getClosedPositionInfoFromDeals(
-              ctraderClient,
-              resolvedPositionId,
-              fromTs,
-              toTs
-            );
-            if (closedInfo.closed) {
-              logger.info('Order filled, position closed (from deal history, after open orders failed)', {
-                tradeId: trade.id,
-                symbol,
-                orderId: trade.order_id,
-                positionId: resolvedPositionId,
-                exchange: 'ctrader'
-              });
-              return {
-                filled: true,
-                positionId: resolvedPositionId,
-                alreadyClosed: true,
-                exitPrice: closedInfo.exitPrice,
-                pnl: closedInfo.pnl,
-              };
-            }
+          if (!r.filled) return { filled: false };
+          if (r.alreadyClosed) {
+            return {
+              filled: true,
+              positionId: r.positionId,
+              alreadyClosed: true,
+              exitPrice: r.exitPrice,
+              pnl: r.pnl
+            };
           }
+          return {
+            filled: true,
+            positionId: r.positionId,
+            filledAt: r.filledAt,
+            filledPrice: r.filledPrice
+          };
         }
       } else {
         logger.debug('No order ID available, checking positions only', {
@@ -639,17 +775,43 @@ const checkPositionClosed = async (
           : new Date(trade.created_at).getTime(),
         Date.now()
       );
-      const resolvedPositionId =
+      let resolvedPositionId =
         preResolvedPositionId ??
         (await ctraderClient.getPositionIdByEntryOrderId(trade.order_id, fromTs, toTs));
       if (!resolvedPositionId) {
-        logger.info('Cannot resolve position from order_id for close check', {
-          tradeId: trade.id,
-          orderId: trade.order_id,
-          exchange: 'ctrader',
-          note: 'Deal list may not contain this order - check time window or orderId'
-        });
-        return { closed: false };
+        const od = await ctraderClient.getOrderDetails(trade.order_id);
+        if (od?.order && isCtraderOrderStatusFilled(od.order)) {
+          const posRetry = extractPositionIdFromCtraderOrderDetails(od.order, od.deals);
+          if (posRetry) {
+            resolvedPositionId = posRetry;
+          } else if (preFetchedPositions != null) {
+            const symbol = normalizeCTraderSymbol(trade.trading_pair);
+            const stillOpen = preFetchedPositions.some((p: any) => {
+              const positionSymbol = p.symbolName || p.symbol;
+              const volume = Math.abs(p.volume || p.quantity || 0);
+              return positionSymbol === symbol && volume > 0;
+            });
+            if (!stillOpen) {
+              const exitPx = getCtraderOrderExecutionPrice(od.order);
+              logger.info('cTrader entry FILLED, no open position on symbol — marking closed (order execution price)', {
+                tradeId: trade.id,
+                orderId: trade.order_id,
+                exitPrice: exitPx,
+                exchange: 'ctrader'
+              });
+              return { closed: true, exitPrice: exitPx, pnl: undefined };
+            }
+          }
+        }
+        if (!resolvedPositionId) {
+          logger.info('Cannot resolve position from order_id for close check', {
+            tradeId: trade.id,
+            orderId: trade.order_id,
+            exchange: 'ctrader',
+            note: 'Deal list may not contain this order - check time window or orderId'
+          });
+          return { closed: false };
+        }
       }
       // If position is not in open list, exchange says it's closed - trust that over deal volume math
       const positionInOpenList = preFetchedPositions?.some((p: any) => {

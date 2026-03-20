@@ -12,7 +12,12 @@
  */
 
 import dotenv from 'dotenv';
-import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
+import {
+  CTraderClient,
+  CTraderClientConfig,
+  extractPositionIdFromCtraderOrderDetails,
+  isCtraderOrderStatusFilled
+} from '../clients/ctraderClient.js';
 import { DatabaseManager } from '../db/schema.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import fs from 'fs-extra';
@@ -135,12 +140,19 @@ async function main() {
   const positionIdsToCheck = new Map<string, { orderId?: string; deal?: any }>();
 
   if (orderIds.length > 0) {
-    console.log('--- getOrderDetails (by order ID) ---');
+    console.log('--- getOrderDetails (by order ID) — same extraction as monitor ---');
     for (const orderId of orderIds) {
       const details = await client.getOrderDetails(orderId);
       if (details) {
-        const posId = details.deals[0]?.positionId;
-        console.log(`✓ Order ${orderId}: positionId=${posId ?? '(none)'}, deals=${details.deals.length}`);
+        const fromOrder = extractPositionIdFromCtraderOrderDetails(details.order, details.deals);
+        const viaClient = await client.getPositionIdByEntryOrderId(orderId, fromTs, toTs, {
+          allowDealListFallback: false,
+          prefetchedDetails: details
+        });
+        const filled = isCtraderOrderStatusFilled(details.order);
+        console.log(
+          `✓ Order ${orderId}: extractPositionId=${fromOrder ?? '(none)'}, getPositionId(details-only)=${viaClient ?? '(none)'}, deals=${details.deals.length}, orderStatusFilled=${filled}`
+        );
       } else {
         console.log(`✗ Order ${orderId}: not found`);
       }

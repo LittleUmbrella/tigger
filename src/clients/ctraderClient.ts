@@ -2,6 +2,51 @@ import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { withCTraderRateLimitRetry } from '../utils/ctraderRateLimitRetry.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
+import { protobufLongToNumber } from '../utils/protobufLong.js';
+
+/** Normalize cTrader proto int64 positionId to string, or null if missing */
+export const normalizeCtraderPositionIdField = (raw: unknown): string | null => {
+  if (raw == null || raw === '' || raw === 0) return null;
+  const n =
+    typeof raw === 'number' && !isNaN(raw) ? raw : protobufLongToNumber(raw);
+  if (n == null || !isFinite(n) || n <= 0) return null;
+  return String(Math.trunc(n));
+};
+
+/**
+ * ProtoOAOrder has optional positionId (field 19); deals also carry positionId.
+ * Prefer order-level id — deal list may be empty in OrderDetailsRes while positionId is set on the order.
+ */
+export const extractPositionIdFromCtraderOrderDetails = (
+  order: any,
+  deals: any[] | undefined | null
+): string | null => {
+  if (!order) return null;
+  const fromOrder = normalizeCtraderPositionIdField(order.positionId ?? order.position_id);
+  if (fromOrder) return fromOrder;
+  for (const d of deals ?? []) {
+    const pid = normalizeCtraderPositionIdField(d?.positionId ?? d?.position_id);
+    if (pid) return pid;
+  }
+  return null;
+};
+
+export const isCtraderOrderStatusFilled = (order: any): boolean => {
+  if (!order) return false;
+  const s = order.orderStatus ?? order.order_status;
+  return s === 2 || s === 'FILLED' || s === 'ORDER_STATUS_FILLED';
+};
+
+export const getCtraderOrderExecutionPrice = (order: any): number | undefined => {
+  if (!order) return undefined;
+  const ex = order.executionPrice ?? order.execution_price;
+  if (typeof ex === 'number' && isFinite(ex) && ex > 0) return ex;
+  if (typeof ex === 'string') {
+    const p = parseFloat(ex);
+    return isFinite(p) && p > 0 ? p : undefined;
+  }
+  return undefined;
+};
 
 /**
  * Fixed price scale for cTrader Open API.
@@ -1111,19 +1156,30 @@ export class CTraderClient {
 
   /**
    * Resolve positionId from an entry orderId.
-   * Prefers ProtoOAOrderDetailsReq (direct order ID lookup, no time window).
-   * Falls back to getDealList for orders not found (e.g. very old).
+   * Prefers ProtoOAOrderDetailsReq (order.positionId and related deals).
+   * Falls back to getDealList when position id is absent from order details.
    */
   async getPositionIdByEntryOrderId(
     orderId: string,
     fromTimestamp?: number,
-    toTimestamp?: number
-  ): Promise<string | null> {
-    const details = await this.getOrderDetails(orderId);
-    if (details && details.deals.length > 0) {
-      const posId = details.deals[0].positionId;
-      return posId != null ? String(posId) : null;
+    toTimestamp?: number,
+    options?: {
+      allowDealListFallback?: boolean;
+      /** When provided, skips a second ProtoOAOrderDetailsReq (same payload as getOrderDetails). */
+      prefetchedDetails?: { order: any; deals: any[] } | null;
     }
+  ): Promise<string | null> {
+    const allowDealListFallback = options?.allowDealListFallback !== false;
+    const details =
+      options?.prefetchedDetails != null
+        ? options.prefetchedDetails
+        : await this.getOrderDetails(orderId);
+    if (details?.order) {
+      const fromDetails = extractPositionIdFromCtraderOrderDetails(details.order, details.deals);
+      if (fromDetails) return fromDetails;
+    }
+    if (!allowDealListFallback) return null;
+
     const to = toTimestamp ?? Date.now();
     const from = fromTimestamp ?? to - 24 * 60 * 60 * 1000;
     const deals = await this.getDealList(from, to);
