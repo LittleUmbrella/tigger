@@ -10,6 +10,7 @@ import { traceCommandHandler } from './commands/traceCommand.js';
 import { investigateCommandHandler } from './commands/investigateCommand.js';
 import { analyzeCommandHandler } from './commands/analyzeCommand.js';
 import { checkLogsCommandHandler } from './commands/checkLogsCommand.js';
+import { queryBybitDayCommandHandler } from './commands/queryBybitDayCommand.js';
 
 // Register all commands
 commandRegistry.register(
@@ -49,6 +50,16 @@ commandRegistry.register(
     '/check-logs message:12345 channel:2394142145',
     '/check-logs message:12345 channel:2394142145 timeframe:5',
     '/check-logs query:"level:error AND channel:2394142145"'
+  ]
+);
+
+commandRegistry.register(
+  'query-bybit-day',
+  queryBybitDayCommandHandler,
+  'Bybit execution list + closed PnL for one UTC day (demo API keys; avoids 7-day range limit)',
+  [
+    '/query-bybit-day day:2026-03-13',
+    '/query-bybit-day day:2026-03-13 symbol:BTCUSDT'
   ]
 );
 

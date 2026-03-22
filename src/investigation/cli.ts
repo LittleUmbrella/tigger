@@ -9,6 +9,7 @@
  *   npm run investigate -- /investigate message:12345
  *   npm run investigate -- /analyze trade:123
  *   npm run investigate -- /check-logs message:12345 channel:2394142145
+ *   npm run investigate -- /query-bybit-day day:2026-03-13
  */
 
 // MUST load env first, before logger (which checks LOGGLY_TOKEN at import time)

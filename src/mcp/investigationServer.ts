@@ -215,6 +215,17 @@ class InvestigationMCPServer {
             description: 'Time window in minutes (default: 10)',
           },
         };
+      case 'query-bybit-day':
+        return {
+          day: {
+            type: 'string',
+            description: 'UTC calendar day YYYY-MM-DD (default: 2026-03-13 if omitted)',
+          },
+          symbol: {
+            type: 'string',
+            description: 'Linear symbol (default: BTCUSDT)',
+          },
+        };
       default:
         return {};
     }
@@ -229,6 +240,8 @@ class InvestigationMCPServer {
         return ['trade'];
       case 'check-logs':
         return []; // Either message+channel OR query
+      case 'query-bybit-day':
+        return [];
       default:
         return [];
     }

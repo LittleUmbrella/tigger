@@ -1507,6 +1507,18 @@ export async function investigateCommandHandler(context: CommandContext): Promis
     }
   }
 
+  const traceForBybitDay = traceResult?.data;
+  const msgStepForDay = traceForBybitDay?.steps?.find((s: any) => s.step?.includes('Message Storage'));
+  const msgDateForDay = msgStepForDay?.details?.date || msgStepForDay?.timestamp;
+  const firstBybitTrade = traceForBybitDay?.steps?.find((s: any) => s.step?.includes('Trade Creation'))?.details
+    ?.trades?.[0];
+  if (msgDateForDay && firstBybitTrade?.exchange === 'bybit') {
+    const ymd = new Date(msgDateForDay).toISOString().slice(0, 10);
+    nextSteps.push(
+      `/query-bybit-day day:${ymd} — full UTC execution + closed PnL on demo keys (or: QUERY_BYBIT_DAY=${ymd} npm run query-bybit-day)`
+    );
+  }
+
   await workflowContext.db.close();
 
   return {

@@ -28,6 +28,7 @@
     "troubleshoot-trade": "tsx src/scripts/troubleshoot_trade.ts",
     "debug-ctrader-closures": "tsx src/scripts/debug_ctrader_trade_closures.ts",
     "trace-message": "tsx src/scripts/trace_message.ts",
+    "query-bybit-day": "tsx src/scripts/query_bybit_day_window.ts",
     "investigate": "tsx src/investigation/cli.ts",
     "query-loggly": "tsx src/scripts/query_loggly.ts",
     "loggly-diagnose": "tsx src/scripts/loggly_diagnose.ts",
