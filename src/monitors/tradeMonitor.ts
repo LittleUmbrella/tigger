@@ -34,6 +34,16 @@ import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
 /**
+ * Breakeven conditional limit: trigger is N ticks "better" than the limit so the order arms
+ * on retrace before price passes the limit (long: higher trigger; short: lower trigger).
+ */
+const BREAKEVEN_TRIGGER_LEAD_TICKS = 5;
+/**
+ * Backup SL is M ticks worse than BE than the trigger lead, so the limit has room to fill first.
+ */
+const BREAKEVEN_SL_BACKUP_WORSE_TICKS = 12;
+
+/**
  * Normalize trading pair symbol for Bybit API calls
  * Converts "XAUT" or "XAUT/USDT" to "XAUTUSDT"
  */
@@ -776,11 +786,18 @@ const cancelOrder = async (
   }
 };
 
+/**
+ * Move the position stop on Bybit via `setTradingStop` (Full).
+ *
+ * @param positionIdx Bybit position index: `0` = one-way mode; `1` = hedge-mode long (Buy) leg;
+ *   `2` = hedge-mode short (Sell) leg. Must match the open position `setTradingStop` applies to.
+ */
 const updateStopLoss = async (
   trade: Trade,
   newStopLoss: number,
   bybitClient?: RestClientV5,
-  db?: DatabaseManager
+  db?: DatabaseManager,
+  positionIdx: 0 | 1 | 2 = 0
 ): Promise<void> => {
   try {
     if (trade.exchange === 'bybit' && bybitClient) {
@@ -790,7 +807,7 @@ const updateStopLoss = async (
         category: 'linear' as const,
         symbol: symbol,
         stopLoss: newStopLoss.toString(),
-        positionIdx: 0 as 0 | 1 | 2,
+        positionIdx,
         tpslMode: 'Full' as const // Apply stop loss to 100% of position automatically
       };
       await withBybitRateLimitRetry(() => bybitClient.setTradingStop(stopLossParams));
@@ -830,7 +847,7 @@ const updateStopLoss = async (
       category: 'linear' as const,
       symbol: symbol!,
       stopLoss: newStopLoss.toString(),
-      positionIdx: 0 as 0 | 1 | 2,
+      positionIdx,
       tpslMode: 'Full' as const
     } : undefined;
     logger.error('Error updating stop loss', {
@@ -1379,10 +1396,12 @@ const placeTakeProfitOrders = async (
 };
 
 /**
- * Place a stop-limit order at entry price to close the trade at breakeven.
- * Uses triggerPrice so the order activates only when price retraces to entry (not immediately).
- * A regular limit at entry would fill immediately when price is above entry.
- * This is used instead of moving the stop loss when useLimitOrderForBreakeven is enabled.
+ * Place a conditional limit at entry fill (BE) to close the remainder; trigger is a few ticks
+ * better than the limit so the engine arms before price moves through BE.
+ *
+ * Backup: same as `useLimitOrderForBreakeven: false` — `updateStopLoss` → `setTradingStop` (Full)
+ * on the position (main market SL). False uses exact `getEntryFillPrice`; here we use that same
+ * baseline slightly worse so the breakeven limit can fill first.
  */
 const placeBreakevenLimitOrder = async (
   trade: Trade,
@@ -1466,15 +1485,54 @@ const placeBreakevenLimitOrder = async (
     const symbolInfo = await getSymbolInfo(bybitClient, symbol);
     let decimalPrecision = 2;
     let pricePrecision: number | undefined = undefined;
+    let tickSize: number | undefined = undefined;
 
     if (symbolInfo) {
       decimalPrecision = symbolInfo.qtyPrecision ?? 2;
       pricePrecision = symbolInfo.pricePrecision;
+      tickSize = symbolInfo.tickSize;
     }
 
     // Use actual fill price for BE (often better than order price for entry ranges)
     const bePrice = await getEntryFillPrice(trade, db, { bybitClient });
-    const entryPrice = roundPrice(bePrice, pricePrecision, undefined);
+    const tick =
+      tickSize !== undefined && tickSize > 0
+        ? tickSize
+        : Math.max(bePrice * 1e-6, 0.01);
+
+    const limitPrice = roundPrice(bePrice, pricePrecision, tick);
+    const leadOffset = BREAKEVEN_TRIGGER_LEAD_TICKS * tick;
+    const slWorseOffset = BREAKEVEN_SL_BACKUP_WORSE_TICKS * tick;
+
+    // Long close = Sell: better trigger = higher (arms as price falls toward BE). Short = Buy: lower trigger.
+    let triggerPrice = roundPrice(
+      isLong ? limitPrice + leadOffset : limitPrice - leadOffset,
+      pricePrecision,
+      tick
+    );
+    // Same SL mechanism as monitor when useLimitOrderForBreakeven is false (setTradingStop @ bePrice);
+    // offset from raw bePrice so "worse than BE" matches that path, not only the rounded limit.
+    let backupStopLoss = roundPrice(
+      isLong ? bePrice - slWorseOffset : bePrice + slWorseOffset,
+      pricePrecision,
+      tick
+    );
+
+    if (isLong) {
+      if (triggerPrice <= limitPrice) {
+        triggerPrice = roundPrice(limitPrice + tick, pricePrecision, tick);
+      }
+      if (backupStopLoss >= bePrice) {
+        backupStopLoss = roundPrice(bePrice - tick, pricePrecision, tick);
+      }
+    } else {
+      if (triggerPrice >= limitPrice) {
+        triggerPrice = roundPrice(limitPrice - tick, pricePrecision, tick);
+      }
+      if (backupStopLoss <= bePrice) {
+        backupStopLoss = roundPrice(bePrice + tick, pricePrecision, tick);
+      }
+    }
     
     // Breakeven order side is opposite of position side (to close the position)
     // For Long (Buy) position, breakeven order is Sell
@@ -1484,7 +1542,7 @@ const placeBreakevenLimitOrder = async (
     // Format quantity
     const quantityStr = formatQuantity(positionSize, decimalPrecision);
 
-    // Stop-limit: trigger when price retraces to entry. Long: trigger when price falls (2); Short: trigger when price rises (1).
+    // Stop-limit: trigger when price retraces toward entry. Long: trigger when price falls (2); Short: when rises (1).
     const triggerDirection = isLong ? 2 : 1; // 1=rises to trigger, 2=falls to trigger
     const breakevenOrderParams = {
       category: 'linear' as const,
@@ -1492,8 +1550,8 @@ const placeBreakevenLimitOrder = async (
       side: breakevenSide as 'Buy' | 'Sell',
       orderType: 'Limit' as const,
       qty: quantityStr,
-      price: entryPrice.toString(),
-      triggerPrice: entryPrice.toString(),
+      price: limitPrice.toString(),
+      triggerPrice: triggerPrice.toString(),
       triggerDirection: triggerDirection as 1 | 2,
       timeInForce: 'GTC' as const,
       reduceOnly: true,
@@ -1504,7 +1562,11 @@ const placeBreakevenLimitOrder = async (
     logger.info('Placing breakeven stop-limit order', {
       tradeId: trade.id,
       symbol,
-      entryPrice,
+      limitPrice,
+      triggerPrice,
+      backupStopLoss,
+      leadTicks: BREAKEVEN_TRIGGER_LEAD_TICKS,
+      slBackupTicks: BREAKEVEN_SL_BACKUP_WORSE_TICKS,
       quantity: quantityStr,
       side: breakevenSide,
       positionIdx,
@@ -1520,16 +1582,26 @@ const placeBreakevenLimitOrder = async (
         trade_id: trade.id,
         order_type: 'breakeven_limit',
         order_id: orderId,
-        price: entryPrice,
+        price: limitPrice,
         quantity: positionSize,
         status: 'pending'
+      });
+
+      // Identical API path to the !useLimitOrderForBreakeven branch (position SL via setTradingStop).
+      await updateStopLoss(trade, backupStopLoss, bybitClient, db);
+      await db.updateTrade(trade.id, {
+        stop_loss: backupStopLoss,
+        stop_loss_breakeven: true
       });
 
       logger.info('Breakeven stop-limit order placed successfully', {
         tradeId: trade.id,
         symbol,
         orderId,
-        entryPrice,
+        bePrice,
+        limitPrice,
+        triggerPrice,
+        backupStopLoss,
         quantity: quantityStr
       });
     } else {
@@ -2060,9 +2132,6 @@ const monitorTrade = async (
             });
             
             await placeBreakevenLimitOrder(trade, bybitClient, db, isLong);
-            await db.updateTrade(trade.id, {
-              stop_loss_breakeven: true
-            });
           } else if (existingBreakevenOrder) {
             logger.debug('Bybit breakeven limit order already exists', {
               tradeId: trade.id,
@@ -2158,7 +2227,7 @@ export const startTradeMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
-  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false; // Default false: limit at entry fills immediately when price above entry
+  const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false; // Default false: use setTradingStop at BE; true uses conditional limit + backup SL (see BREAKEVEN_* ticks)
 
   const monitorLoop = async (): Promise<void> => {
     // Check if we're in maximum speed mode (no delays)
