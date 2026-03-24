@@ -17,6 +17,7 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
 import { stevenParser } from './stevenParser.js';
 import { fxcmChartParser } from './fxcmChartParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
+import { isTransientInfrastructureError, serializeErrorForLog } from '../utils/errorUtils.js';
 
 // Register the default parser
 registerParser('default', defaultParser);
@@ -102,24 +103,25 @@ export const parseUnparsedMessages = async (
   db: DatabaseManager,
   maxStalenessMinutes?: number
 ): Promise<void> => {
-  const messages = await db.getUnparsedMessages(config.channel, maxStalenessMinutes);
-  
-  // Get the parser function for this parser config
-  const parser = getParserSync(config.name);
-  if (!parser) {
-    logger.warn('Parser not found, skipping parsing', {
-      parserName: config.name,
-      channel: config.channel
-    });
-    return; // Don't fall back to default parser - parsers should be strict and specific
-  }
-  const parserFunction = parser;
-  
-  // Prepare parser options from config
-  const parserOptions = config.entryPriceStrategy ? { entryPriceStrategy: config.entryPriceStrategy } : undefined;
-  
-  for (const message of messages) {
-    try {
+  try {
+    const messages = await db.getUnparsedMessages(config.channel, maxStalenessMinutes);
+
+    // Get the parser function for this parser config
+    const parser = getParserSync(config.name);
+    if (!parser) {
+      logger.warn('Parser not found, skipping parsing', {
+        parserName: config.name,
+        channel: config.channel
+      });
+      return; // Don't fall back to default parser - parsers should be strict and specific
+    }
+    const parserFunction = parser;
+
+    // Prepare parser options from config
+    const parserOptions = config.entryPriceStrategy ? { entryPriceStrategy: config.entryPriceStrategy } : undefined;
+
+    for (const message of messages) {
+      try {
       // Try configured/default parser first (synchronous)
       let parsed = parserFunction(message.content, parserOptions);
       let usedLLMFallback = false;
@@ -202,15 +204,38 @@ export const parseUnparsedMessages = async (
         // Don't mark as parsed here - let the initiator mark it after attempting to process
         // The initiator will mark unparseable messages as parsed to avoid reprocessing
       }
-    } catch (error) {
-      logger.error('Error parsing message', {
-        channel: config.channel,
-        parserName: config.name,
-        messageId: message.message_id,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      // Don't mark as parsed here - let the initiator handle error cases
-      // The initiator will mark non-retryable errors as parsed to avoid infinite retries
+      } catch (error) {
+        const errMsg = serializeErrorForLog(error);
+        const recoverable = isTransientInfrastructureError(error);
+        const base = {
+          channel: config.channel,
+          parserName: config.name,
+          messageId: message.message_id,
+          error: errMsg,
+          recoverable
+        };
+        if (recoverable) {
+          logger.warn('Error parsing message (transient)', base);
+        } else {
+          logger.error('Error parsing message', base);
+        }
+        // Don't mark as parsed here - let the initiator handle error cases
+        // The initiator will mark non-retryable errors as parsed to avoid infinite retries
+      }
+    }
+  } catch (error) {
+    const errMsg = serializeErrorForLog(error);
+    const recoverable = isTransientInfrastructureError(error);
+    const base = {
+      channel: config.channel,
+      parserName: config.name,
+      error: errMsg,
+      recoverable
+    };
+    if (recoverable) {
+      logger.warn('Parser batch skipped (transient infrastructure failure)', base);
+    } else {
+      logger.error('Parser batch failed', base);
     }
   }
 };

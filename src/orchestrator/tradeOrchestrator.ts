@@ -9,7 +9,7 @@ import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
 import { startCTraderMonitor } from '../monitors/ctraderMonitor.js';
 import { logger } from '../utils/logger.js';
-import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { isTransientInfrastructureError, serializeErrorForLog } from '../utils/errorUtils.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { registerParser } from '../parsers/parserRegistry.js';
 import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
@@ -862,11 +862,18 @@ export const startTradeOrchestrator = async (
 
           // Then parse signal messages
           parseUnparsedMessages(parser, db, channelConfig.maxMessageStalenessMinutes).catch(error => {
-            logger.error('Parser error', {
+            const recoverable = isTransientInfrastructureError(error);
+            const payload = {
               channel: channelConfig.channel,
               parserName: parser.name,
-              error: serializeErrorForLog(error)
-            });
+              error: serializeErrorForLog(error),
+              recoverable
+            };
+            if (recoverable) {
+              logger.warn('Parser error (recoverable)', payload);
+            } else {
+              logger.error('Parser error', payload);
+            }
           });
         }
       }

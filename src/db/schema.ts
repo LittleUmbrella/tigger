@@ -1096,7 +1096,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
    * Parse connection string and resolve hostname to IPv4 address
    * Supabase now uses IPv6 by default, so we explicitly resolve to IPv4
    */
-  private async parseConnectionString(connectionString: string): Promise<{ connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string; sslmode?: string }> {
+  private async parseConnectionString(connectionString: string): Promise<{ connectionString?: string; host?: string; port?: number; user?: string; password?: string; database?: string; sslmode?: string; originalHostname?: string }> {
     try {
       const url = new URL(connectionString);
       
@@ -1199,6 +1199,13 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         password: url.password,
         database: url.pathname.slice(1), // Remove leading /
       };
+
+      // When we connect to a resolved IPv4 address, node-postgres does not set TLS SNI (servername)
+      // unless we pass ssl.servername. Neon, Supabase poolers, and similar proxies route by SNI;
+      // missing SNI often surfaces as failures during the auth phase.
+      if (!isIPv4Address && !isIPv6Address) {
+        config.originalHostname = url.hostname;
+      }
       
       // Handle query parameters (like sslmode)
       if (url.search) {
@@ -1239,10 +1246,19 @@ class PostgreSQLAdapter implements DatabaseAdapter {
                        this.connectionString.includes('supabase.co') || // Supabase requires SSL
                        this.connectionString.includes('neon.tech') || // Neon requires SSL
                        connectionConfig.sslmode === 'require';
+
+      const { originalHostname, ...poolConfig } = connectionConfig;
+      const ssl =
+        needsSSL
+          ? {
+              rejectUnauthorized: false,
+              ...(originalHostname ? { servername: originalHostname } : {}),
+            }
+          : undefined;
       
       this.pool = new Pool({
-        ...connectionConfig,
-        ssl: needsSSL ? { rejectUnauthorized: false } : undefined,
+        ...poolConfig,
+        ssl,
       });
     }
     
