@@ -144,6 +144,7 @@ export async function runQueryBybitDayWindow(
       orderId: getBybitField(e, 'orderId', 'order_id'),
       execTime: getBybitField(e, 'execTime', 'exec_time'),
       isMaker: getBybitField(e, 'isMaker', 'is_maker'),
+      execTimeIso: null,
     }));
 
     const withTime: QueryBybitDayWindowExecutionRow[] = rows.map((r) => ({

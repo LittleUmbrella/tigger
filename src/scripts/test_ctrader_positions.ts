@@ -89,7 +89,7 @@ const main = async () => {
     (a: AccountConfig) => a.name === 'ctrader_demo' && a.exchange === 'ctrader'
   );
 
-  const creds = getAccountCredentials(account);
+  const creds = getAccountCredentials(account ?? null);
   if (!creds.clientId || !creds.clientSecret || !creds.accessToken || !creds.accountId) {
     console.error('❌ Missing CTRADER_CLIENT_ID, CTRADER_CLIENT_SECRET, CTRADER_ACCESS_TOKEN, or CTRADER_ACCOUNT_ID');
     process.exit(1);
