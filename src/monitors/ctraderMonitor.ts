@@ -24,7 +24,8 @@ import {
   updateTradeOnStopLossHit,
   cancelTrade,
   sleep,
-  MONITOR_TRADE_TIMEOUT_MS
+  MONITOR_TRADE_TIMEOUT_MS,
+  CTRADER_RECONCILE_TIMEOUT_MS
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
@@ -682,6 +683,137 @@ const checkEntryFilled = async (
   }
 };
 
+/** What the live monitor would do on the next poll for a DB-pending cTrader trade (read-only; no DB writes). */
+export type CTraderPendingBotPreview = {
+  tradeId: number;
+  /** First monitor step: matching open position on exchange for this symbol */
+  wouldPromoteActiveViaOpenPosition: boolean;
+  wouldCancelDueToExpiry: boolean;
+  wouldMarkClosed: boolean;
+  wouldMarkActive: boolean;
+  wouldRemainPending: boolean;
+  summary: string;
+  entryFillCheck: {
+    filled: boolean;
+    alreadyClosed?: boolean;
+    positionId?: string;
+    exitPrice?: number;
+    pnl?: number;
+  };
+};
+
+/**
+ * Read-only preview of live `monitorTrade` outcomes for a pending cTrader row (same order: open-position
+ * promotion → expiry → checkEntryFilled). Use from diagnostics scripts; does not mutate the database.
+ */
+export const previewCtraderPendingTradeBotOutcome = async (
+  trade: Trade,
+  ctraderClient: CTraderClient,
+  options?: { preFetched?: { positions: any[]; orders: any[] } }
+): Promise<CTraderPendingBotPreview> => {
+  if (trade.exchange !== 'ctrader') {
+    throw new Error(
+      `previewCtraderPendingTradeBotOutcome: trade ${trade.id} is exchange=${trade.exchange}, expected ctrader`
+    );
+  }
+
+  const positions = options?.preFetched?.positions ?? [];
+  const symbol = normalizeCTraderSymbol(trade.trading_pair);
+  if (trade.status === 'pending' && positions.length > 0) {
+    const position = positions.find((p: any) => {
+      const positionSymbol = p.symbolName || p.symbol;
+      const volume = Math.abs(p.volume || p.quantity || 0);
+      return positionSymbol === symbol && volume > 0;
+    });
+    if (position) {
+      const positionId = (position.positionId || position.id)?.toString();
+      return {
+        tradeId: trade.id,
+        wouldPromoteActiveViaOpenPosition: true,
+        wouldCancelDueToExpiry: false,
+        wouldMarkClosed: false,
+        wouldMarkActive: true,
+        wouldRemainPending: false,
+        summary:
+          'Live bot would promote to active from open position match (same as first pending block in monitor).',
+        entryFillCheck: {
+          filled: true,
+          positionId,
+        },
+      };
+    }
+  }
+
+  const tradeExpired = await checkTradeExpired(trade, false, undefined);
+  if (tradeExpired) {
+    return {
+      tradeId: trade.id,
+      wouldPromoteActiveViaOpenPosition: false,
+      wouldCancelDueToExpiry: true,
+      wouldMarkClosed: false,
+      wouldMarkActive: false,
+      wouldRemainPending: false,
+      summary:
+        'Live bot would cancel due to expiry (runs before entry fill reconciliation when still pending).',
+      entryFillCheck: { filled: false },
+    };
+  }
+
+  const entry = await checkEntryFilled(
+    trade,
+    ctraderClient,
+    false,
+    undefined,
+    options?.preFetched
+  );
+  const entryFillCheck = {
+    filled: entry.filled,
+    alreadyClosed: entry.alreadyClosed,
+    positionId: entry.positionId,
+    exitPrice: entry.exitPrice,
+    pnl: entry.pnl,
+  };
+
+  if (entry.filled && entry.alreadyClosed) {
+    return {
+      tradeId: trade.id,
+      wouldPromoteActiveViaOpenPosition: false,
+      wouldCancelDueToExpiry: false,
+      wouldMarkClosed: true,
+      wouldMarkActive: false,
+      wouldRemainPending: false,
+      summary:
+        'Live bot would call updateTradeOnPositionClosed (entry filled + position already closed on exchange).',
+      entryFillCheck,
+    };
+  }
+  if (entry.filled && !entry.alreadyClosed) {
+    return {
+      tradeId: trade.id,
+      wouldPromoteActiveViaOpenPosition: false,
+      wouldCancelDueToExpiry: false,
+      wouldMarkClosed: false,
+      wouldMarkActive: true,
+      wouldRemainPending: false,
+      summary:
+        'Live bot would set status active and fill entry order, then continue monitoring (spot + SL/TP).',
+      entryFillCheck,
+    };
+  }
+
+  return {
+    tradeId: trade.id,
+    wouldPromoteActiveViaOpenPosition: false,
+    wouldCancelDueToExpiry: false,
+    wouldMarkClosed: false,
+    wouldMarkActive: false,
+    wouldRemainPending: true,
+    summary:
+      'Live bot would leave trade pending this poll (no fill detected yet; needs spot price for SL-before-entry on later lines).',
+    entryFillCheck,
+  };
+};
+
 /**
  * Check if position is closed for cTrader
  * Implements retry logic and detailed logging (Gaps #4, #6)
@@ -1221,7 +1353,18 @@ const monitorTrade = async (
     if (!isSimulation && ctraderClient) {
       t0 = Date.now();
       try {
-        const reconciled = await ctraderClient.getOpenPositionsAndOrders();
+        const reconciled = await Promise.race([
+          ctraderClient.getOpenPositionsAndOrders(),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(`cTrader reconcile timeout after ${CTRADER_RECONCILE_TIMEOUT_MS}ms`)
+                ),
+              CTRADER_RECONCILE_TIMEOUT_MS
+            )
+          )
+        ]);
         cachedPositions = reconciled.positions;
         cachedOrders = reconciled.orders;
         timings.reconcile = Date.now() - t0;
@@ -1250,7 +1393,9 @@ const monitorTrade = async (
           }
         }
       } catch (error) {
-        logger.debug('Failed to fetch reconcile, will fetch per-check', {
+        const msg = error instanceof Error ? error.message : String(error);
+        const isReconcileTimeout = msg.includes('reconcile timeout');
+        logger[isReconcileTimeout ? 'warn' : 'debug']('Failed to fetch reconcile, will fetch per-check', {
           tradeId: trade.id,
           error: serializeErrorForLog(error),
           exchange: 'ctrader'
@@ -1267,39 +1412,6 @@ const monitorTrade = async (
       channel: trade.channel,
       exchange: 'ctrader'
     });
-
-    // Check if trade has expired
-    t0 = Date.now();
-    if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
-      timings.checkTradeExpired = Date.now() - t0;
-      logger.info('cTrader trade expired - cancelling order and sibling trades', {
-        tradeId: trade.id,
-        orderId: trade.order_id,
-        channel: trade.channel,
-        messageId: trade.message_id,
-        symbol: trade.trading_pair,
-        expiresAt: trade.expires_at,
-        cancelReason: 'expired',
-        exchange: 'ctrader'
-      });
-      await cancelOrder(trade, ctraderClient);
-      await cancelTrade(trade, db);
-      // Cancel sibling trades (N-trades from same message) - cancel their entry orders and mark cancelled
-      const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
-        .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
-      for (const sibling of siblings) {
-        await cancelOrder(sibling, ctraderClient);
-        await cancelTrade(sibling, db);
-        logger.info('cTrader sibling trade cancelled on expiry', {
-          siblingTradeId: sibling.id,
-          messageId: trade.message_id,
-          channel: trade.channel,
-          exchange: 'ctrader'
-        });
-      }
-      return;
-    }
-    timings.checkTradeExpired = Date.now() - t0;
 
     t0 = Date.now();
 
@@ -1360,63 +1472,51 @@ const monitorTrade = async (
     }
     timings.pendingPositionCheck = Date.now() - t0;
 
-    // Get current price
+    // Entry expiry only after we may have promoted pending→active from exchange positions (checkTradeExpired uses DB status=pending only).
     t0 = Date.now();
-    const currentPrice = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
-    if (!currentPrice) {
-      logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
+    if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
+      timings.checkTradeExpired = Date.now() - t0;
+      logger.info('cTrader trade expired - cancelling order and sibling trades', {
         tradeId: trade.id,
-        tradingPair: trade.trading_pair,
+        orderId: trade.order_id,
+        channel: trade.channel,
+        messageId: trade.message_id,
+        symbol: trade.trading_pair,
+        expiresAt: trade.expires_at,
+        cancelReason: 'expired',
         exchange: 'ctrader'
       });
-      return;
-    }
-    timings.getCurrentPrice = Date.now() - t0;
-
-    // Check if entry price was hit before stop loss or take profit (for pending trades)
-    if (trade.status === 'pending') {
-      const isLong = getIsLong(trade);
-      
-      if (checkSLHitBeforeEntry(trade, currentPrice)) {
-        logger.info('Price hit SL before entry - cancelling cTrader order and sibling trades', {
-          tradeId: trade.id,
-          currentPrice,
-          stopLoss: trade.stop_loss,
-          entryPrice: trade.entry_price,
+      await cancelOrder(trade, ctraderClient);
+      await cancelTrade(trade, db);
+      const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
+        .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
+      for (const sibling of siblings) {
+        await cancelOrder(sibling, ctraderClient);
+        await cancelTrade(sibling, db);
+        logger.info('cTrader sibling trade cancelled on expiry', {
+          siblingTradeId: sibling.id,
+          messageId: trade.message_id,
+          channel: trade.channel,
           exchange: 'ctrader'
         });
-        await cancelOrder(trade, ctraderClient);
-        await cancelTrade(trade, db);
-        const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
-          .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
-        for (const sibling of siblings) {
-          await cancelOrder(sibling, ctraderClient);
-          await cancelTrade(sibling, db);
-        }
-        return;
       }
+      return;
+    }
+    timings.checkTradeExpired = Date.now() - t0;
 
-      if (checkTPHitBeforeEntry(trade, currentPrice)) {
-        logger.info('Price hit TP before entry - TP orders will fill and book profit', {
-          tradeId: trade.id,
-          currentPrice,
-          entryPrice: trade.entry_price,
-          exchange: 'ctrader',
-          note: 'Relevant TP Orders will fill at current price and profit will be booked immediately'
-        });
-      }
-
-      // Check if entry is filled
-      logger.debug('Checking if cTrader entry order is filled', {
+    // Entry fill / deal-history reconciliation does not use spot price. If getCurrentPrice ran first and
+    // returned null (spot timeout, subscribe_failed), we never reached checkEntryFilled — trades stayed
+    // pending even after the exchange opened and closed the position (e.g. SL).
+    if (trade.status === 'pending') {
+      t0 = Date.now();
+      logger.debug('Checking if cTrader entry order is filled (before spot price)', {
         tradeId: trade.id,
         symbol: trade.trading_pair,
         orderId: trade.order_id,
         status: trade.status,
         entryPrice: trade.entry_price,
-        currentPrice,
         exchange: 'ctrader'
       });
-      
       const entryResult = await checkEntryFilled(
         trade,
         ctraderClient,
@@ -1424,13 +1524,14 @@ const monitorTrade = async (
         priceProvider,
         cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined
       );
+      timings.checkEntryFilled = Date.now() - t0;
       logger.debug('cTrader entry fill check result', {
         tradeId: trade.id,
         filled: entryResult.filled,
         positionId: entryResult.positionId,
         exchange: 'ctrader'
       });
-      
+
       if (entryResult.filled) {
         const fillPrice = entryResult.filledPrice;
         if (entryResult.alreadyClosed) {
@@ -1466,7 +1567,6 @@ const monitorTrade = async (
           channel: trade.channel,
           exchange: 'ctrader'
         });
-        // Use actual fill time from position when available; dayjs() is monitor poll time and can be delayed
         const fillTime = entryResult.filledAt ?? dayjs().toISOString();
         const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
           status: 'active',
@@ -1485,6 +1585,50 @@ const monitorTrade = async (
         }
 
         await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
+      }
+    }
+
+    // Get current price (SL-before-entry and active-trade logic need it)
+    t0 = Date.now();
+    const currentPrice = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
+    if (!currentPrice) {
+      logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
+        tradeId: trade.id,
+        tradingPair: trade.trading_pair,
+        exchange: 'ctrader'
+      });
+      return;
+    }
+    timings.getCurrentPrice = Date.now() - t0;
+
+    if (trade.status === 'pending') {
+      if (checkSLHitBeforeEntry(trade, currentPrice)) {
+        logger.info('Price hit SL before entry - cancelling cTrader order and sibling trades', {
+          tradeId: trade.id,
+          currentPrice,
+          stopLoss: trade.stop_loss,
+          entryPrice: trade.entry_price,
+          exchange: 'ctrader'
+        });
+        await cancelOrder(trade, ctraderClient);
+        await cancelTrade(trade, db);
+        const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
+          .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
+        for (const sibling of siblings) {
+          await cancelOrder(sibling, ctraderClient);
+          await cancelTrade(sibling, db);
+        }
+        return;
+      }
+
+      if (checkTPHitBeforeEntry(trade, currentPrice)) {
+        logger.info('Price hit TP before entry - TP orders will fill and book profit', {
+          tradeId: trade.id,
+          currentPrice,
+          entryPrice: trade.entry_price,
+          exchange: 'ctrader',
+          note: 'Relevant TP Orders will fill at current price and profit will be booked immediately'
+        });
       }
     }
 
