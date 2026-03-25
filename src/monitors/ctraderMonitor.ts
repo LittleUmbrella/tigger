@@ -43,6 +43,15 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
   return [from, to];
 };
 
+const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
+  return Promise.race([
+    promise,
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
+    )
+  ]);
+};
+
 /**
  * Resolve positionId from orderId for trades that have order_id but no position_id.
  * One ProtoOADealListReq per account (paginated internally), then ProtoOAOrderDetailsReq for misses.
@@ -300,7 +309,8 @@ const reconcileCtraderEntryWhenOrderMissingFromOpenList = async (
   ctraderClient: CTraderClient,
   symbol: string,
   fromTs: number,
-  toTs: number
+  toTs: number,
+  options?: { prefetchedOrderDetails?: { order: any; deals: any[] } | null }
 ): Promise<{
   filled: boolean;
   positionId?: string;
@@ -310,7 +320,10 @@ const reconcileCtraderEntryWhenOrderMissingFromOpenList = async (
   filledAt?: string;
   filledPrice?: number;
 }> => {
-  const odEntry = await ctraderClient.getOrderDetails(trade.order_id!);
+  const odEntry =
+    options != null && 'prefetchedOrderDetails' in options
+      ? options.prefetchedOrderDetails
+      : await ctraderClient.getOrderDetails(trade.order_id!);
   if (!odEntry?.order || !isCtraderOrderStatusFilled(odEntry.order)) {
     logger.debug('Order not in open list; order details show not filled — wait for next poll', {
       tradeId: trade.id,
@@ -452,7 +465,11 @@ const checkEntryFilled = async (
         const retryDelay = 1000;
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
           try {
-            positions = await ctraderClient.getOpenPositions();
+            positions = await withCtraderApiTimeout(
+              ctraderClient.getOpenPositions(),
+              CTRADER_RECONCILE_TIMEOUT_MS,
+              'getOpenPositions (checkEntryFilled)'
+            );
             logger.info('cTrader positions received', {
               tradeId: trade.id,
               symbol,
@@ -559,7 +576,13 @@ const checkEntryFilled = async (
             });
             
             // Strategy 3: Re-check positions (position might have been created after initial check)
-            const positionsAgain = preFetched ? preFetched.positions : await ctraderClient.getOpenPositions();
+            const positionsAgain = preFetched
+              ? preFetched.positions
+              : await withCtraderApiTimeout(
+                  ctraderClient.getOpenPositions(),
+                  CTRADER_RECONCILE_TIMEOUT_MS,
+                  'getOpenPositions (checkEntryFilled re-check)'
+                );
             const positionAgain = positionsAgain.find((p: any) => {
               const positionSymbol = p.symbolName || p.symbol;
               const volume = Math.abs(p.volume || p.quantity || 0);
@@ -724,7 +747,8 @@ export type CTraderPendingBotPreview = {
 
 /**
  * Read-only preview of live `monitorTrade` outcomes for a pending cTrader row (same order: open-position
- * promotion → expiry → checkEntryFilled). Use from diagnostics scripts; does not mutate the database.
+ * promotion → expiry → checkEntryFilled). Live expiry also verifies order details before cancel.
+ * Use from diagnostics scripts; does not mutate the database.
  */
 export const previewCtraderPendingTradeBotOutcome = async (
   trade: Trade,
@@ -1362,6 +1386,244 @@ type CTraderEntryFillResult = {
 /** Single getOpenPositions cap when reconcile failed — pending entry fast-path only */
 const PENDING_FAST_PATH_GET_POSITIONS_MS = 15_000;
 
+/** Order-details probe when deciding expiry — keep short so expiry runs before MONITOR_TRADE_TIMEOUT_MS */
+const PENDING_ENTRY_EXPIRY_ORDER_DETAILS_MS = 20_000;
+
+/**
+ * Promote pending→active when an open position is already visible (cached reconcile or bounded fetch).
+ */
+const promotePendingIfOpenPositionVisible = async (
+  trade: Trade,
+  db: DatabaseManager,
+  ctraderClient: CTraderClient,
+  cachedPositions: any[] | undefined
+): Promise<void> => {
+  if (trade.status !== 'pending') return;
+  let positions: any[] | undefined = cachedPositions;
+  if (positions === undefined) {
+    try {
+      positions = await withCtraderApiTimeout(
+        ctraderClient.getOpenPositions(),
+        PENDING_FAST_PATH_GET_POSITIONS_MS,
+        'getOpenPositions (pending promotion)'
+      );
+    } catch (error) {
+      logger.debug('Pending promotion: could not fetch positions', {
+        tradeId: trade.id,
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+      return;
+    }
+  }
+  const symbol = normalizeCTraderSymbol(trade.trading_pair);
+  const position = positions.find((p: any) => {
+    const positionSymbol = p.symbolName || p.symbol;
+    const volume = Math.abs(p.volume || p.quantity || 0);
+    return positionSymbol === symbol && volume > 0;
+  });
+  if (!position) return;
+
+  const positionId = position.positionId || position.id;
+  const fillTime = trade.entry_filled_at || dayjs().toISOString();
+  const fillPrice = parseFloat(position.avgPrice || position.averagePrice || position.price || '0');
+
+  logger.info('cTrader entry order filled', {
+    tradeId: trade.id,
+    tradingPair: trade.trading_pair,
+    entryPrice: trade.entry_price,
+    fillPrice: fillPrice > 0 ? fillPrice : undefined,
+    positionId: positionId?.toString(),
+    channel: trade.channel,
+    exchange: 'ctrader',
+    note: 'Detected via position check - entry was filled but status not updated'
+  });
+
+  const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
+    status: 'active',
+    entry_filled_at: fillTime,
+    position_id: positionId?.toString()
+  };
+  if (fillPrice > 0) {
+    updates.entry_price = fillPrice;
+  }
+  await db.updateTrade(trade.id, updates);
+  trade.status = 'active';
+  trade.entry_filled_at = fillTime;
+  if (fillPrice > 0) {
+    trade.entry_price = fillPrice;
+  }
+  trade.position_id = positionId?.toString();
+
+  await updateEntryOrderToFilled(trade, db, fillTime, fillPrice > 0 ? fillPrice : undefined);
+};
+
+/**
+ * Expired pending entry: verify exchange (filled vs still open) before cancel — runs before heavy checkEntryFilled
+ * so slow reconcile cannot block expiry for the whole 120s monitor budget.
+ */
+const handlePendingEntryExpiry = async (
+  trade: Trade,
+  db: DatabaseManager,
+  ctraderClient: CTraderClient | undefined,
+  isSimulation: boolean,
+  priceProvider: HistoricalPriceProvider | undefined
+): Promise<'return' | 'noop'> => {
+  if (trade.status !== 'pending') return 'noop';
+  if (!(await checkTradeExpired(trade, isSimulation, priceProvider))) return 'noop';
+
+  if (isSimulation) {
+    logger.info('cTrader trade expired (simulation) — cancelling in DB', {
+      tradeId: trade.id,
+      orderId: trade.order_id,
+      channel: trade.channel,
+      messageId: trade.message_id,
+      symbol: trade.trading_pair,
+      expiresAt: trade.expires_at,
+      exchange: 'ctrader'
+    });
+    await cancelTrade(trade, db);
+    const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel)).filter(
+      (t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id
+    );
+    for (const sibling of siblings) {
+      await cancelTrade(sibling, db);
+      logger.info('cTrader sibling trade cancelled on expiry (simulation)', {
+        siblingTradeId: sibling.id,
+        messageId: trade.message_id,
+        channel: trade.channel,
+        exchange: 'ctrader'
+      });
+    }
+    return 'return';
+  }
+
+  const symbol = normalizeCTraderSymbol(trade.trading_pair);
+  logger.info('cTrader trade expired - verifying exchange before cancel', {
+    tradeId: trade.id,
+    orderId: trade.order_id,
+    channel: trade.channel,
+    messageId: trade.message_id,
+    symbol,
+    expiresAt: trade.expires_at,
+    cancelReason: 'expired',
+    exchange: 'ctrader'
+  });
+
+  if (!ctraderClient || !trade.order_id) {
+    await cancelTrade(trade, db);
+    const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel)).filter(
+      (t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id
+    );
+    for (const sibling of siblings) {
+      await cancelTrade(sibling, db);
+      logger.info('cTrader sibling trade cancelled on expiry (no client/order id)', {
+        siblingTradeId: sibling.id,
+        messageId: trade.message_id,
+        channel: trade.channel,
+        exchange: 'ctrader'
+      });
+    }
+    return 'return';
+  }
+
+  let od: Awaited<ReturnType<CTraderClient['getOrderDetails']>> | null | undefined;
+  try {
+    od = await withCtraderApiTimeout(
+      ctraderClient.getOrderDetails(trade.order_id),
+      PENDING_ENTRY_EXPIRY_ORDER_DETAILS_MS,
+      'getOrderDetails (entry expiry)'
+    );
+  } catch (error) {
+    logger.warn('Expiry: order details timed out or failed — attempting cancel', {
+      tradeId: trade.id,
+      orderId: trade.order_id,
+      error: serializeErrorForLog(error),
+      exchange: 'ctrader'
+    });
+    od = undefined;
+  }
+
+  const tryApplyReconcileResult = async (
+    r: Awaited<ReturnType<typeof reconcileCtraderEntryWhenOrderMissingFromOpenList>>
+  ): Promise<'return' | 'noop'> => {
+    if (!r.filled) return 'noop';
+    const entry: CTraderEntryFillResult = r.alreadyClosed
+      ? {
+          filled: true,
+          positionId: r.positionId,
+          alreadyClosed: true,
+          exitPrice: r.exitPrice,
+          pnl: r.pnl
+        }
+      : {
+          filled: true,
+          positionId: r.positionId,
+          filledAt: r.filledAt,
+          filledPrice: r.filledPrice
+        };
+    const outcome = await applyCtraderPendingEntryFillResult(trade, db, entry, 'standard');
+    return outcome === 'return' || outcome === 'continue' ? 'return' : 'noop';
+  };
+
+  if (od?.order && isCtraderOrderStatusFilled(od.order)) {
+    const [fromTs, toTs] = capDealHistoryWindow(new Date(trade.created_at).getTime(), Date.now());
+    const r = await reconcileCtraderEntryWhenOrderMissingFromOpenList(trade, ctraderClient, symbol, fromTs, toTs, {
+      prefetchedOrderDetails: od
+    });
+    const applied = await tryApplyReconcileResult(r);
+    if (applied === 'return') return 'return';
+  } else if (od === null) {
+    const [fromTs, toTs] = capDealHistoryWindow(new Date(trade.created_at).getTime(), Date.now());
+    try {
+      const r = await reconcileCtraderEntryWhenOrderMissingFromOpenList(trade, ctraderClient, symbol, fromTs, toTs);
+      const applied = await tryApplyReconcileResult(r);
+      if (applied === 'return') return 'return';
+    } catch (error) {
+      logger.debug('Expiry: order not found; reconcile fallback failed', {
+        tradeId: trade.id,
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+    }
+  }
+
+  try {
+    await cancelOrder(trade, ctraderClient);
+  } catch (error) {
+    logger.warn('Expiry: cancel order failed (may already be filled); will retry next poll', {
+      tradeId: trade.id,
+      orderId: trade.order_id,
+      error: serializeErrorForLog(error),
+      exchange: 'ctrader'
+    });
+    return 'noop';
+  }
+  await cancelTrade(trade, db);
+  const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel)).filter(
+    (t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id
+  );
+  for (const sibling of siblings) {
+    try {
+      if (sibling.order_id) await cancelOrder(sibling, ctraderClient);
+    } catch (error) {
+      logger.warn('Expiry: sibling cancel failed', {
+        siblingTradeId: sibling.id,
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+    }
+    await cancelTrade(sibling, db);
+    logger.info('cTrader sibling trade cancelled on expiry', {
+      siblingTradeId: sibling.id,
+      messageId: trade.message_id,
+      channel: trade.channel,
+      exchange: 'ctrader'
+    });
+  }
+  return 'return';
+};
+
 /**
  * Apply `checkEntryFilled` result for a pending cTrader trade (mutates `trade` in memory).
  * @returns `return` — done (already closed); `continue` — promoted to active; `noop` — not filled
@@ -1505,8 +1767,24 @@ const monitorTrade = async (
         }
       }
 
+      if (trade.status === 'pending' && !isSimulation && ctraderClient) {
+        t0 = Date.now();
+        await promotePendingIfOpenPositionVisible(trade, db, ctraderClient, cachedPositions);
+        timings.pendingPositionCheck = Date.now() - t0;
+      }
+    }
+
+    // Entry expiry before heavy checkEntryFilled / fast-path so API slowness cannot block cancellation for the full monitor budget
+    if (trade.status === 'pending') {
+      t0 = Date.now();
+      const expiryOutcome = await handlePendingEntryExpiry(trade, db, ctraderClient, isSimulation, priceProvider);
+      timings.checkTradeExpired = Date.now() - t0;
+      if (expiryOutcome === 'return') return;
+    }
+
+    if (!isSimulation && ctraderClient) {
       // Pending fast-path: no open position for this symbol → entry may be filled or already closed; run
-      // checkEntryFilled before expiry / promotion / spot (avoids starving deal reconciliation on slow polls).
+      // checkEntryFilled after promotion and expiry (still before spot price).
       if (trade.status === 'pending' && trade.order_id) {
         let positionsForFast: any[] | undefined = cachedPositions;
         if (positionsForFast === undefined) {
@@ -1576,97 +1854,6 @@ const monitorTrade = async (
       channel: trade.channel,
       exchange: 'ctrader'
     });
-
-    t0 = Date.now();
-
-    // For pending trades, check if position already exists
-    if (trade.status === 'pending' && !isSimulation && ctraderClient) {
-      try {
-        const positions = cachedPositions ?? await ctraderClient.getOpenPositions();
-        const symbol = normalizeCTraderSymbol(trade.trading_pair);
-        const position = positions.find((p: any) => {
-          const positionSymbol = p.symbolName || p.symbol;
-          const volume = Math.abs(p.volume || p.quantity || 0);
-          return positionSymbol === symbol && volume > 0;
-        });
-        
-        if (position) {
-          const positionId = position.positionId || position.id;
-          const fillTime = trade.entry_filled_at || dayjs().toISOString();
-          const fillPrice = parseFloat(
-            position.avgPrice || position.averagePrice || position.price || '0'
-          );
-          
-          logger.info('cTrader entry order filled', {
-            tradeId: trade.id,
-            tradingPair: trade.trading_pair,
-            entryPrice: trade.entry_price,
-            fillPrice: fillPrice > 0 ? fillPrice : undefined,
-            positionId: positionId?.toString(),
-            channel: trade.channel,
-            exchange: 'ctrader',
-            note: 'Detected via position check - entry was filled but status not updated'
-          });
-          
-          const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
-            status: 'active',
-            entry_filled_at: fillTime,
-            position_id: positionId?.toString(),
-          };
-          if (fillPrice > 0) {
-            updates.entry_price = fillPrice;
-          }
-          await db.updateTrade(trade.id, updates);
-          trade.status = 'active';
-          trade.entry_filled_at = fillTime;
-          if (fillPrice > 0) {
-            trade.entry_price = fillPrice;
-          }
-          trade.position_id = positionId?.toString();
-
-          await updateEntryOrderToFilled(trade, db, fillTime, fillPrice > 0 ? fillPrice : undefined);
-        }
-      } catch (error) {
-        logger.debug('Error checking cTrader positions for pending trade', {
-          tradeId: trade.id,
-          exchange: 'ctrader',
-          error: serializeErrorForLog(error)
-        });
-      }
-    }
-    timings.pendingPositionCheck = Date.now() - t0;
-
-    // Entry expiry only after we may have promoted pending→active from exchange positions (checkTradeExpired uses DB status=pending only).
-    t0 = Date.now();
-    if (await checkTradeExpired(trade, isSimulation, priceProvider)) {
-      timings.checkTradeExpired = Date.now() - t0;
-      logger.info('cTrader trade expired - cancelling order and sibling trades', {
-        tradeId: trade.id,
-        orderId: trade.order_id,
-        channel: trade.channel,
-        messageId: trade.message_id,
-        symbol: trade.trading_pair,
-        expiresAt: trade.expires_at,
-        cancelReason: 'expired',
-        exchange: 'ctrader'
-      });
-      await cancelOrder(trade, ctraderClient);
-      await cancelTrade(trade, db);
-      const siblings = (await db.getTradesByMessageId(trade.message_id, trade.channel))
-        .filter((t) => t.exchange === 'ctrader' && t.status === 'pending' && t.id !== trade.id);
-      for (const sibling of siblings) {
-        await cancelOrder(sibling, ctraderClient);
-        await cancelTrade(sibling, db);
-        logger.info('cTrader sibling trade cancelled on expiry', {
-          siblingTradeId: sibling.id,
-          messageId: trade.message_id,
-          channel: trade.channel,
-          exchange: 'ctrader'
-        });
-      }
-      return;
-    }
-    timings.checkTradeExpired = Date.now() - t0;
 
     // Entry fill / deal-history reconciliation does not use spot price. If getCurrentPrice ran first and
     // returned null (spot timeout, subscribe_failed), we never reached checkEntryFilled — trades stayed
