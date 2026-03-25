@@ -25,7 +25,8 @@ import {
   cancelTrade,
   sleep,
   MONITOR_TRADE_TIMEOUT_MS,
-  CTRADER_RECONCILE_TIMEOUT_MS
+  CTRADER_RECONCILE_TIMEOUT_MS,
+  CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS
 } from './shared.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
@@ -198,7 +199,20 @@ const getClosedPositionInfoFromDeals = async (
 ): Promise<{ closed: boolean; exitPrice?: number; pnl?: number }> => {
   try {
     const toNum = (v: any) => (typeof v === 'object' && v?.low != null ? protobufLongToNumber(v) : v);
-    const deals = await ctraderClient.getDealListByPositionId(positionId, fromTimestamp, toTimestamp);
+    const deals = await Promise.race([
+      ctraderClient.getDealListByPositionId(positionId, fromTimestamp, toTimestamp),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `getDealListByPositionId timeout after ${CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS}ms`
+              )
+            ),
+          CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS
+        )
+      )
+    ]);
     const closingDeals = deals.filter((d: any) => {
       const detail = d.closePositionDetail ?? d.close_position_detail;
       return detail != null;
@@ -262,11 +276,17 @@ const getClosedPositionInfoFromDeals = async (
       pnl: totalPnl !== 0 ? totalPnl : undefined,
     };
   } catch (error) {
-    logger.debug('Error getting closed position info from deals', {
+    const msg = error instanceof Error ? error.message : String(error);
+    const timedOut = msg.includes('timeout');
+    logger[timedOut ? 'warn' : 'debug']('Error getting closed position info from deals', {
       positionId,
+      assumeClosed,
       error: serializeErrorForLog(error),
       exchange: 'ctrader'
     });
+    if (assumeClosed) {
+      return { closed: true, exitPrice: undefined, pnl: undefined };
+    }
     return { closed: false };
   }
 };
@@ -1329,6 +1349,86 @@ const checkOrderFilled = async (
   }
 };
 
+type CTraderEntryFillResult = {
+  filled: boolean;
+  positionId?: string;
+  filledAt?: string;
+  filledPrice?: number;
+  alreadyClosed?: boolean;
+  exitPrice?: number;
+  pnl?: number;
+};
+
+/** Single getOpenPositions cap when reconcile failed — pending entry fast-path only */
+const PENDING_FAST_PATH_GET_POSITIONS_MS = 15_000;
+
+/**
+ * Apply `checkEntryFilled` result for a pending cTrader trade (mutates `trade` in memory).
+ * @returns `return` — done (already closed); `continue` — promoted to active; `noop` — not filled
+ */
+const applyCtraderPendingEntryFillResult = async (
+  trade: Trade,
+  db: DatabaseManager,
+  entryResult: CTraderEntryFillResult,
+  source: 'fast_path' | 'standard'
+): Promise<'return' | 'continue' | 'noop'> => {
+  if (!entryResult.filled) return 'noop';
+  const fillPrice = entryResult.filledPrice;
+  if (entryResult.alreadyClosed) {
+    logger.info('cTrader entry filled but position already closed by exchange (from deal history)', {
+      tradeId: trade.id,
+      tradingPair: trade.trading_pair,
+      positionId: entryResult.positionId,
+      exitPrice: entryResult.exitPrice,
+      pnl: entryResult.pnl,
+      channel: trade.channel,
+      exchange: 'ctrader',
+      entryFillSource: source
+    });
+    const fillTime = entryResult.filledAt ?? dayjs().toISOString();
+    const resolvedEntryPrice = fillPrice ?? trade.entry_price;
+    await db.updateTrade(trade.id, {
+      entry_filled_at: fillTime,
+      position_id: entryResult.positionId,
+      entry_price: resolvedEntryPrice
+    });
+    trade.entry_filled_at = fillTime;
+    trade.position_id = entryResult.positionId;
+    trade.entry_price = resolvedEntryPrice;
+    await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
+    await updateTradeOnPositionClosed(trade, db, entryResult.exitPrice, entryResult.pnl);
+    return 'return';
+  }
+  logger.info('cTrader entry order filled', {
+    tradeId: trade.id,
+    tradingPair: trade.trading_pair,
+    entryPrice: trade.entry_price,
+    fillPrice,
+    positionId: entryResult.positionId,
+    channel: trade.channel,
+    exchange: 'ctrader',
+    entryFillSource: source
+  });
+  const fillTime = entryResult.filledAt ?? dayjs().toISOString();
+  const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
+    status: 'active',
+    entry_filled_at: fillTime,
+    position_id: entryResult.positionId
+  };
+  if (fillPrice != null && fillPrice > 0) {
+    updates.entry_price = fillPrice;
+  }
+  await db.updateTrade(trade.id, updates);
+  trade.status = 'active';
+  trade.entry_filled_at = fillTime;
+  trade.position_id = entryResult.positionId;
+  if (fillPrice != null && fillPrice > 0) {
+    trade.entry_price = fillPrice;
+  }
+  await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
+  return 'continue';
+};
+
 /**
  * Monitor a single cTrader trade
  */
@@ -1345,6 +1445,7 @@ const monitorTrade = async (
   const timings: Record<string, number> = {};
   let t0 = Date.now();
   const monitorStart = Date.now();
+  let pendingEntryFillAttempted = false;
 
   try {
     // Single reconcile fetch - do early for active trades to detect closed-on-exchange before logging
@@ -1368,30 +1469,6 @@ const monitorTrade = async (
         cachedPositions = reconciled.positions;
         cachedOrders = reconciled.orders;
         timings.reconcile = Date.now() - t0;
-
-        // Early exit for active trades closed on exchange - avoid "Monitoring" log spam
-        if (trade.status === 'active' || trade.status === 'filled') {
-          const positionResult = await checkPositionClosed(
-            trade,
-            ctraderClient,
-            isSimulation,
-            priceProvider,
-            cachedPositions,
-            trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
-          );
-          if (positionResult.closed) {
-            logger.info('cTrader trade closed on exchange - updated (skipping monitor)', {
-              tradeId: trade.id,
-              symbol: trade.trading_pair,
-              orderId: trade.order_id,
-              exitPrice: positionResult.exitPrice,
-              pnl: positionResult.pnl,
-              exchange: 'ctrader'
-            });
-            await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
-            return;
-          }
-        }
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         const isReconcileTimeout = msg.includes('reconcile timeout');
@@ -1400,6 +1477,93 @@ const monitorTrade = async (
           error: serializeErrorForLog(error),
           exchange: 'ctrader'
         });
+      }
+
+      // Closed-on-exchange check must run even when reconcile failed (otherwise we never detect TP/SL close)
+      if (trade.status === 'active' || trade.status === 'filled') {
+        t0 = Date.now();
+        const positionResultEarly = await checkPositionClosed(
+          trade,
+          ctraderClient,
+          isSimulation,
+          priceProvider,
+          cachedPositions,
+          trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
+        );
+        timings.checkPositionClosedEarly = Date.now() - t0;
+        if (positionResultEarly.closed) {
+          logger.info('cTrader trade closed on exchange - updated (skipping monitor)', {
+            tradeId: trade.id,
+            symbol: trade.trading_pair,
+            orderId: trade.order_id,
+            exitPrice: positionResultEarly.exitPrice,
+            pnl: positionResultEarly.pnl,
+            exchange: 'ctrader'
+          });
+          await updateTradeOnPositionClosed(trade, db, positionResultEarly.exitPrice, positionResultEarly.pnl);
+          return;
+        }
+      }
+
+      // Pending fast-path: no open position for this symbol → entry may be filled or already closed; run
+      // checkEntryFilled before expiry / promotion / spot (avoids starving deal reconciliation on slow polls).
+      if (trade.status === 'pending' && trade.order_id) {
+        let positionsForFast: any[] | undefined = cachedPositions;
+        if (positionsForFast === undefined) {
+          t0 = Date.now();
+          try {
+            positionsForFast = await Promise.race([
+              ctraderClient.getOpenPositions(),
+              new Promise<never>((_, reject) =>
+                setTimeout(
+                  () =>
+                    reject(
+                      new Error(
+                        `getOpenPositions timeout after ${PENDING_FAST_PATH_GET_POSITIONS_MS}ms (pending fast-path)`
+                      )
+                    ),
+                  PENDING_FAST_PATH_GET_POSITIONS_MS
+                )
+              )
+            ]);
+            timings.pendingFastPathFetchPositions = Date.now() - t0;
+          } catch (e) {
+            logger.debug('Pending fast-path: could not fetch positions', {
+              tradeId: trade.id,
+              error: serializeErrorForLog(e),
+              exchange: 'ctrader'
+            });
+            positionsForFast = undefined;
+          }
+        }
+        if (positionsForFast !== undefined) {
+          const symbolFast = normalizeCTraderSymbol(trade.trading_pair);
+          const hasOpenPositionForSymbol = positionsForFast.some((p: any) => {
+            const positionSymbol = p.symbolName || p.symbol;
+            const volume = Math.abs(p.volume || p.quantity || 0);
+            return positionSymbol === symbolFast && volume > 0;
+          });
+          if (!hasOpenPositionForSymbol) {
+            t0 = Date.now();
+            logger.debug('cTrader pending entry fill fast-path (no open position for symbol)', {
+              tradeId: trade.id,
+              symbol: symbolFast,
+              orderId: trade.order_id,
+              exchange: 'ctrader'
+            });
+            const entryResultFast = await checkEntryFilled(
+              trade,
+              ctraderClient,
+              isSimulation,
+              priceProvider,
+              cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined
+            );
+            timings.checkEntryFilledFast = Date.now() - t0;
+            pendingEntryFillAttempted = true;
+            const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResultFast, 'fast_path');
+            if (outcome === 'return') return;
+          }
+        }
       }
     }
 
@@ -1507,7 +1671,7 @@ const monitorTrade = async (
     // Entry fill / deal-history reconciliation does not use spot price. If getCurrentPrice ran first and
     // returned null (spot timeout, subscribe_failed), we never reached checkEntryFilled — trades stayed
     // pending even after the exchange opened and closed the position (e.g. SL).
-    if (trade.status === 'pending') {
+    if (trade.status === 'pending' && !pendingEntryFillAttempted) {
       t0 = Date.now();
       logger.debug('Checking if cTrader entry order is filled (before spot price)', {
         tradeId: trade.id,
@@ -1532,80 +1696,28 @@ const monitorTrade = async (
         exchange: 'ctrader'
       });
 
-      if (entryResult.filled) {
-        const fillPrice = entryResult.filledPrice;
-        if (entryResult.alreadyClosed) {
-          logger.info('cTrader entry filled but position already closed by exchange (from deal history)', {
-            tradeId: trade.id,
-            tradingPair: trade.trading_pair,
-            positionId: entryResult.positionId,
-            exitPrice: entryResult.exitPrice,
-            pnl: entryResult.pnl,
-            channel: trade.channel,
-            exchange: 'ctrader'
-          });
-          const fillTime = entryResult.filledAt ?? dayjs().toISOString();
-          const resolvedEntryPrice = fillPrice ?? trade.entry_price;
-          await db.updateTrade(trade.id, {
-            entry_filled_at: fillTime,
-            position_id: entryResult.positionId,
-            entry_price: resolvedEntryPrice,
-          });
-          trade.entry_filled_at = fillTime;
-          trade.position_id = entryResult.positionId;
-          trade.entry_price = resolvedEntryPrice;
-          await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
-          await updateTradeOnPositionClosed(trade, db, entryResult.exitPrice, entryResult.pnl);
-          return;
-        }
-        logger.info('cTrader entry order filled', {
+      const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResult, 'standard');
+      if (outcome === 'return') return;
+    }
+
+    // Pending only: spot for SL/TP-before-entry. Active trades resolve closure before spot so slow spot cannot block TP close-out.
+    if (trade.status === 'pending') {
+      t0 = Date.now();
+      const currentPricePending = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
+      if (!currentPricePending) {
+        logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
           tradeId: trade.id,
           tradingPair: trade.trading_pair,
-          entryPrice: trade.entry_price,
-          fillPrice,
-          positionId: entryResult.positionId,
-          channel: trade.channel,
           exchange: 'ctrader'
         });
-        const fillTime = entryResult.filledAt ?? dayjs().toISOString();
-        const updates: { status: 'active'; entry_filled_at: string; position_id?: string; entry_price?: number } = {
-          status: 'active',
-          entry_filled_at: fillTime,
-          position_id: entryResult.positionId,
-        };
-        if (fillPrice != null && fillPrice > 0) {
-          updates.entry_price = fillPrice;
-        }
-        await db.updateTrade(trade.id, updates);
-        trade.status = 'active';
-        trade.entry_filled_at = fillTime;
-        trade.position_id = entryResult.positionId;
-        if (fillPrice != null && fillPrice > 0) {
-          trade.entry_price = fillPrice;
-        }
-
-        await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
+        return;
       }
-    }
+      timings.getCurrentPrice = Date.now() - t0;
 
-    // Get current price (SL-before-entry and active-trade logic need it)
-    t0 = Date.now();
-    const currentPrice = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
-    if (!currentPrice) {
-      logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
-        tradeId: trade.id,
-        tradingPair: trade.trading_pair,
-        exchange: 'ctrader'
-      });
-      return;
-    }
-    timings.getCurrentPrice = Date.now() - t0;
-
-    if (trade.status === 'pending') {
-      if (checkSLHitBeforeEntry(trade, currentPrice)) {
+      if (checkSLHitBeforeEntry(trade, currentPricePending)) {
         logger.info('Price hit SL before entry - cancelling cTrader order and sibling trades', {
           tradeId: trade.id,
-          currentPrice,
+          currentPrice: currentPricePending,
           stopLoss: trade.stop_loss,
           entryPrice: trade.entry_price,
           exchange: 'ctrader'
@@ -1621,10 +1733,10 @@ const monitorTrade = async (
         return;
       }
 
-      if (checkTPHitBeforeEntry(trade, currentPrice)) {
+      if (checkTPHitBeforeEntry(trade, currentPricePending)) {
         logger.info('Price hit TP before entry - TP orders will fill and book profit', {
           tradeId: trade.id,
-          currentPrice,
+          currentPrice: currentPricePending,
           entryPrice: trade.entry_price,
           exchange: 'ctrader',
           note: 'Relevant TP Orders will fill at current price and profit will be booked immediately'
@@ -1708,7 +1820,7 @@ const monitorTrade = async (
         trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
       );
       timings.checkPositionClosed = Date.now() - t0;
-        if (positionResult.closed) {
+      if (positionResult.closed) {
         logger.info('cTrader position closed', {
           tradeId: trade.id,
           exitPrice: positionResult.exitPrice,
@@ -1719,11 +1831,23 @@ const monitorTrade = async (
         return;
       }
 
+      t0 = Date.now();
+      const currentPriceActive = await getCurrentPrice(trade.trading_pair, ctraderClient, isSimulation, priceProvider);
+      if (!currentPriceActive) {
+        logger.warn('Could not get current price for cTrader trade (check prior logs for reason: timeout, subscribe_failed, empty_spot_event)', {
+          tradeId: trade.id,
+          tradingPair: trade.trading_pair,
+          exchange: 'ctrader'
+        });
+        return;
+      }
+      timings.getCurrentPrice = Date.now() - t0;
+
       // Check if stop loss is hit
-      if (checkStopLossHit(trade, currentPrice)) {
+      if (checkStopLossHit(trade, currentPriceActive)) {
         logger.info('cTrader stop loss hit', {
           tradeId: trade.id,
-          currentPrice,
+          currentPrice: currentPriceActive,
           stopLoss: trade.stop_loss,
           exchange: 'ctrader'
         });

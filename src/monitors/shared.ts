@@ -239,6 +239,9 @@ export const MONITOR_TRADE_TIMEOUT_MS = 120_000; // 120 seconds (was 60s; increa
 /** Reconcile must finish before entry-expiry runs so we promote filled positions before cancelling; cap wait so hung API does not burn the whole monitor budget */
 export const CTRADER_RECONCILE_TIMEOUT_MS = 45_000;
 
+/** Deal list by position can paginate or hang; cap so closed-position detection does not burn the whole monitor budget */
+export const CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS = 60_000;
+
 /** TP placement sub-timeout - if TP placement exceeds this, we continue and retry next poll */
 export const TP_PLACEMENT_TIMEOUT_MS = 60_000; // 60 seconds
 
