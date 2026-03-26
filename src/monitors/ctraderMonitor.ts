@@ -28,6 +28,7 @@ import {
   CTRADER_RECONCILE_TIMEOUT_MS,
   CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS
 } from './shared.js';
+import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
@@ -41,6 +42,156 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
   if (to - from > DEAL_HISTORY_MAX_WINDOW_MS) from = to - DEAL_HISTORY_MAX_WINDOW_MS;
   if (to - from < DEAL_HISTORY_MIN_WINDOW_MS) from = to - DEAL_HISTORY_MIN_WINDOW_MS;
   return [from, to];
+};
+
+/** Statuses we may have written for either TP or SL exits; `stopped` is SL-only when we classified correctly. */
+const CTRADER_TP_SL_CLASSIFY_STATUSES = new Set<Trade['status']>(['closed', 'completed']);
+
+/**
+ * Classify a closed cTrader sibling as TP vs SL using DB fields.
+ * Our monitor often sets `closed` for both exchange TP and SL exits; use exit_price vs TP/SL/entry when present.
+ */
+const classifyCtraderCloseFromDb = (sibling: Trade): 'take_profit' | 'stop_loss' | null => {
+  if (sibling.status === 'stopped') return 'stop_loss';
+  if (!CTRADER_TP_SL_CLASSIFY_STATUSES.has(sibling.status)) return null;
+
+  const exitPx = sibling.exit_price;
+  if (exitPx != null && isFinite(exitPx) && exitPx > 0) {
+    return classifyCtraderExitPriceVsLevels(sibling, exitPx);
+  }
+
+  if (sibling.pnl != null && isFinite(sibling.pnl)) {
+    if (sibling.pnl > 1e-8) return 'take_profit';
+    if (sibling.pnl < -1e-8) return 'stop_loss';
+  }
+
+  return null;
+};
+
+const classifyCtraderExitPriceVsLevels = (sibling: Trade, exitPx: number): 'take_profit' | 'stop_loss' | null => {
+  let tps: number[];
+  try {
+    tps = JSON.parse(sibling.take_profits || '[]') as number[];
+  } catch {
+    tps = [];
+  }
+  const tpPrice = tps.length > 0 ? tps[0] : 0;
+  const sl = sibling.stop_loss;
+  const entry = sibling.entry_price;
+  const isLong = getIsLong(sibling);
+
+  const tol = Math.max(Math.abs(entry) * 1e-5, 1e-9);
+
+  if (tpPrice > 0 && sl > 0) {
+    if (isLong) {
+      if (exitPx >= tpPrice - tol) return 'take_profit';
+      if (exitPx <= sl + tol) return 'stop_loss';
+      const distTp = Math.abs(exitPx - tpPrice);
+      const distSl = Math.abs(exitPx - sl);
+      if (distTp + tol < distSl) return 'take_profit';
+      if (distSl + tol < distTp) return 'stop_loss';
+    } else {
+      if (exitPx <= tpPrice + tol) return 'take_profit';
+      if (exitPx >= sl - tol) return 'stop_loss';
+      const distTp = Math.abs(exitPx - tpPrice);
+      const distSl = Math.abs(exitPx - sl);
+      if (distTp + tol < distSl) return 'take_profit';
+      if (distSl + tol < distTp) return 'stop_loss';
+    }
+  } else {
+    if (isLong) {
+      if (exitPx > entry + tol) return 'take_profit';
+      if (exitPx < entry - tol) return 'stop_loss';
+    } else {
+      if (exitPx < entry - tol) return 'take_profit';
+      if (exitPx > entry + tol) return 'stop_loss';
+    }
+  }
+
+  if (sibling.pnl != null && isFinite(sibling.pnl)) {
+    if (sibling.pnl > 1e-8) return 'take_profit';
+    if (sibling.pnl < -1e-8) return 'stop_loss';
+  }
+
+  return null;
+};
+
+/**
+ * When DB cannot classify, use closing deals' realized gross profit (cTrader ProtoOAClosePositionDetail).
+ */
+const classifyCtraderCloseFromDeals = async (
+  sibling: Trade,
+  ctraderClient: CTraderClient
+): Promise<'take_profit' | 'stop_loss' | null> => {
+  const positionId = sibling.position_id;
+  if (!positionId) return null;
+
+  const fromTs = sibling.entry_filled_at
+    ? new Date(sibling.entry_filled_at).getTime()
+    : new Date(sibling.created_at).getTime();
+  const [from, to] = capDealHistoryWindow(fromTs, Date.now());
+
+  let deals: any[];
+  try {
+    deals = await Promise.race([
+      ctraderClient.getDealListByPositionId(positionId, from, to),
+      new Promise<never>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `getDealListByPositionId (BE sibling classify) timeout after ${CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS}ms`
+              )
+            ),
+          CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS
+        )
+      )
+    ]);
+  } catch {
+    return null;
+  }
+
+  const closingDeals = deals.filter((d: any) => (d.closePositionDetail ?? d.close_position_detail) != null);
+  if (closingDeals.length === 0) return null;
+
+  let totalGross = 0;
+  for (const d of closingDeals) {
+    const detail = d.closePositionDetail ?? d.close_position_detail;
+    const grossProfit = detail?.grossProfit ?? detail?.gross_profit ?? 0;
+    const moneyDigits = detail?.moneyDigits ?? detail?.money_digits ?? 2;
+    const raw = protobufLongToNumber(grossProfit) ?? 0;
+    totalGross += raw / Math.pow(10, moneyDigits);
+  }
+  if (totalGross > 1e-8) return 'take_profit';
+  if (totalGross < -1e-8) return 'stop_loss';
+  return null;
+};
+
+const countCtraderSiblingsClosedAtTakeProfit = async (
+  siblings: Trade[],
+  currentTradeId: number,
+  accountName: string | undefined,
+  ctraderClient: CTraderClient | undefined
+): Promise<number> => {
+  const relevant = siblings.filter(
+    (t) => t.exchange === 'ctrader' && t.account_name === accountName && t.id !== currentTradeId
+  );
+
+  const tasks = relevant.map(async (sib) => {
+    if (sib.status === 'stopped') return 0;
+    if (sib.status !== 'closed' && sib.status !== 'completed') return 0;
+
+    const fromDb = classifyCtraderCloseFromDb(sib);
+    if (fromDb === 'take_profit') return 1;
+    if (fromDb === 'stop_loss') return 0;
+
+    if (!ctraderClient) return 0;
+    const fromDeals = await classifyCtraderCloseFromDeals(sib, ctraderClient);
+    return fromDeals === 'take_profit' ? 1 : 0;
+  });
+
+  const results = await Promise.all(tasks);
+  return results.reduce<number>((a, b) => a + b, 0);
 };
 
 const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
@@ -1702,6 +1853,7 @@ const monitorTrade = async (
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
+  breakevenAfterTPs: number,
   preResolvedPositionIds?: Map<string, string>
 ): Promise<void> => {
   const timings: Record<string, number> = {};
@@ -1996,6 +2148,80 @@ const monitorTrade = async (
       }
       timings.checkOrderFillsLoop = Date.now() - t0;
 
+      // Check if enough TPs filled to move SL to breakeven.
+      // cTrader splits signals into N trades (one per TP), each with its own position.
+      // We often persist `closed` for both TP and SL exits — classify via exit_price vs TP/SL/entry, else deals grossProfit.
+      if (!trade.stop_loss_breakeven) {
+        const allSiblings = await db.getTradesByMessageId(trade.message_id, trade.channel);
+        const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(
+          allSiblings,
+          trade.id,
+          trade.account_name,
+          ctraderClient
+        );
+
+        if (siblingsHitTp >= breakevenAfterTPs) {
+          try {
+            const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
+            const symbol = normalizeCTraderSymbol(trade.trading_pair);
+            const symbolInfo = ctraderClient ? await ctraderClient.getSymbolInfo(symbol) : undefined;
+
+            const rawDigits = symbolInfo?.digits;
+            const digits = typeof rawDigits === 'number' ? rawDigits : (typeof rawDigits === 'object' && rawDigits?.low != null ? rawDigits.low : 2);
+            const tickSize = Math.pow(10, -digits);
+
+            const rawSl = symbolInfo?.slDistance;
+            const slDistance = typeof rawSl === 'number' ? rawSl : (typeof rawSl === 'object' && rawSl != null ? (protobufLongToNumber(rawSl) ?? 0) : 0);
+            let minNudge = tickSize;
+            if (slDistance > 0) {
+              const rawDistType = symbolInfo?.distanceSetIn ?? (symbolInfo as any)?.distance_set_in;
+              const distType = typeof rawDistType === 'number' ? rawDistType : (typeof rawDistType === 'object' && rawDistType?.low != null ? rawDistType.low : 1);
+              if (distType === 2) {
+                minNudge = Math.max(tickSize, bePrice * (slDistance / 10000));
+              } else {
+                minNudge = Math.max(tickSize, slDistance * Math.pow(10, -digits));
+              }
+            }
+
+            const isLong = getIsLong(trade);
+            const rawSlPrice = isLong ? bePrice - minNudge : bePrice + minNudge;
+            const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
+
+            if (ctraderClient && trade.position_id) {
+              await ctraderClient.modifyPosition({
+                positionId: trade.position_id,
+                stopLoss: slPrice
+              });
+            }
+
+            await db.updateTrade(trade.id, {
+              stop_loss: slPrice,
+              stop_loss_breakeven: true
+            });
+            trade.stop_loss = slPrice;
+            trade.stop_loss_breakeven = true;
+
+            logger.info('Required take profits hit - moved cTrader stop loss to breakeven', {
+              tradeId: trade.id,
+              siblingsHitTp,
+              breakevenAfterTPs,
+              bePrice,
+              slPrice,
+              exchange: 'ctrader'
+            });
+          } catch (beError) {
+            logger.error('Error moving stop loss to breakeven on cTrader', {
+              tradeId: trade.id,
+              siblingsHitTp,
+              breakevenAfterTPs,
+              channel: trade.channel,
+              exchange: 'ctrader',
+              error: serializeErrorForLog(beError)
+            });
+          }
+        }
+      }
+
       // Check if position is closed (use pre-fetched positions when available)
       t0 = Date.now();
       const positionResult = await checkPositionClosed(
@@ -2137,6 +2363,7 @@ export const startCTraderMonitor = async (
   let running = true;
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
+  const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1;
   const concurrency = monitorConfig.ctraderMonitorConcurrency ?? 2;
   const limit = pLimit(concurrency);
 
@@ -2176,6 +2403,7 @@ export const startCTraderMonitor = async (
                 accountCTraderClient,
                 isSimulation,
                 priceProvider,
+                breakevenAfterTPs,
                 preResolvedPositionIds
               ),
               new Promise<void>((_, reject) =>
