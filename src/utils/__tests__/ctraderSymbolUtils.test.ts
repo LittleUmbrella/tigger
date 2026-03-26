@@ -1,5 +1,22 @@
 import { describe, it, expect } from 'vitest';
-import { normalizeCTraderSymbol } from '../ctraderSymbolUtils.js';
+import {
+  normalizeAssetAliasToCTraderPair,
+  normalizeCTraderSymbol,
+} from '../ctraderSymbolUtils.js';
+
+describe('normalizeAssetAliasToCTraderPair', () => {
+  it('maps gold-family aliases to XAUUSD', () => {
+    expect(normalizeAssetAliasToCTraderPair('gold')).toBe('XAUUSD');
+    expect(normalizeAssetAliasToCTraderPair('XAU')).toBe('XAUUSD');
+    expect(normalizeAssetAliasToCTraderPair('XAUT')).toBe('XAUUSD');
+    expect(normalizeAssetAliasToCTraderPair('xauusd')).toBe('XAUUSD');
+  });
+
+  it('leaves other symbols unchanged (uppercased)', () => {
+    expect(normalizeAssetAliasToCTraderPair('EURNZD')).toBe('EURNZD');
+    expect(normalizeAssetAliasToCTraderPair('eurusd')).toBe('EURUSD');
+  });
+});
 
 describe('normalizeCTraderSymbol', () => {
   it('maps XAUTUSDT to XAUUSD (crypto gold -> forex gold)', () => {

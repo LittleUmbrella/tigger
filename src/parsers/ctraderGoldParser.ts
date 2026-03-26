@@ -2,6 +2,7 @@ import { ParsedOrder } from '../types/order.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
+import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
 
 /**
  * Parser for cTrader gold trading signals. Supports multiple formats:
@@ -37,11 +38,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
     if (!tradingPairMatch) return null;
     
-    // Translate gold/XAU/XAUT/XAUUSD to XAUUSD for cTrader
-    const assetName = tradingPairMatch[1].toUpperCase();
-    const tradingPair = assetName === 'GOLD' || assetName === 'XAU' || assetName === 'XAUT' || assetName === 'XAUUSD'
-      ? 'XAUUSD'  // cTrader native format
-      : `${assetName}USD`;
+    const tradingPair = normalizeAssetAliasToCTraderPair(tradingPairMatch[1]);
     
     // Extract signal type - "buy" = long, "sell" = short
     const buyMatch = normalizedContent.match(/buy/i);

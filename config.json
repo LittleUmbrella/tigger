@@ -92,6 +92,18 @@
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
+    },
+    {
+      "name": "ctrader_dgf_harvester",
+      "channel": "2889224950",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH_DGF"
+      },
+      "pollInterval": 4000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
     }
   ],
   "parsers": [
@@ -122,6 +134,10 @@
     {
       "name": "steven",
       "channel": "2120484771"
+    },
+    {
+      "name": "ctrader_dgf",
+      "channel": "2889224950"
     }
   ],
   "accounts": [
@@ -259,6 +275,24 @@
       "channel": "2385521106",
       "harvester": "big_harvester",
       "parser": "big",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "breakevenAfterTPs": 1,
+      "useLimitOrderForBreakeven": false,
+      "riskPercentage": 1,
+      "entryTimeoutMinutes": 10,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "tradeObfuscation": {
+        "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
+      }
+    },
+    {
+      "channel": "2889224950",
+      "harvester": "ctrader_dgf_harvester",
+      "parser": "ctrader_dgf",
       "initiator": "ctrader",
       "monitor": "ctrader",
       "breakevenAfterTPs": 1,

@@ -11,6 +11,21 @@ const CRYPTO_GOLD_TO_XAU: Record<string, string> = {
   PAXG: 'XAU',  // Paxos Gold (crypto token) -> XAU/USD (forex)
 };
 
+const GOLD_FAMILY_ALIASES = new Set(['GOLD', 'XAU', 'XAUT', 'XAUUSD']);
+
+/**
+ * Map parser-extracted asset or pair tokens to canonical cTrader symbols.
+ * Gold-style aliases (gold, XAU, XAUT, XAUUSD) → XAUUSD.
+ * Any other token (e.g. EURNZD, EURUSD) is trimmed and uppercased, unchanged.
+ */
+export function normalizeAssetAliasToCTraderPair(raw: string): string {
+  const u = raw.trim().replace(/\s+/g, '').toUpperCase();
+  if (GOLD_FAMILY_ALIASES.has(u)) {
+    return 'XAUUSD';
+  }
+  return u;
+}
+
 /**
  * Normalize trading pair symbol for cTrader.
  * cTrader uses forex/CFD format: EURUSD, XAUUSD, BTCUSD (no USDT).

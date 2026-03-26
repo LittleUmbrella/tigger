@@ -2,6 +2,7 @@ import { ParsedOrder } from '../types/order.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
+import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
 
 /**
  * Parser for Steven-format gold trading signals. Similar to ctrader_gold but with different syntax:
@@ -26,11 +27,7 @@ export const stevenParser = (content: string, options?: ParserOptions): ParsedOr
     const tradingPairMatch = normalizedContent.match(/\b(gold|XAU|XAUT|XAUUSD)\b/i);
     if (!tradingPairMatch) return null;
 
-    const assetName = tradingPairMatch[1].toUpperCase();
-    const tradingPair =
-      assetName === 'GOLD' || assetName === 'XAU' || assetName === 'XAUT' || assetName === 'XAUUSD'
-        ? 'XAUUSD'
-        : `${assetName}USD`;
+    const tradingPair = normalizeAssetAliasToCTraderPair(tradingPairMatch[1]);
 
     // Extract signal type - buy = long, sell = short
     const buyMatch = normalizedContent.match(/\bbuy\b/i);
