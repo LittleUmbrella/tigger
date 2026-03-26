@@ -4,6 +4,7 @@ import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 import input from "input";
 import fs from "fs-extra";
+import path from "path";
 import { Command } from "commander";
 import { logger } from "../../utils/logger.js";
 
@@ -39,6 +40,30 @@ logOptions("list-channels", opts);
 // Environment / session setup
 // -----------------------------
 const envPath = ".env";
+const channelsMdPath = path.join(process.cwd(), "data", "channels.md");
+
+const formatDialogsMarkdown = (
+  dialogsList: Array<{
+    type: string;
+    name: string;
+    id: number | bigint;
+    accessHash: bigint;
+    username: string;
+  }>
+): string => {
+  const lines: string[] = [];
+  lines.push(`✅ Found ${dialogsList.length} dialog(s):\n`);
+  for (const d of dialogsList) {
+    lines.push("────────────────────────────────────");
+    lines.push(`📋 Type:        ${d.type}`);
+    lines.push(`📛 Name:        ${d.name}`);
+    lines.push(`🆔 ID:          ${d.id}`);
+    lines.push(`🔑 AccessHash:  ${d.accessHash}`);
+    lines.push(`🔗 Username:    ${d.username}`);
+  }
+  lines.push("────────────────────────────────────");
+  return lines.join("\n");
+};
 const apiId = parseInt(opts.apiId || process.env.TG_API_ID, 10);
 const apiHash = opts.apiHash || process.env.TG_API_HASH;
 let sessionString = opts.session || process.env.TG_SESSION || "";
@@ -161,23 +186,21 @@ if (!apiId || !apiHash) {
     });
 
   if (!dialogsList.length) {
-    console.log(term
+    const emptyMsg = term
       ? `⚠️ No dialogs found matching "${opts.search}".`
-      : "⚠️ No dialogs found.");
+      : "⚠️ No dialogs found.";
+    console.log(emptyMsg);
+    await fs.ensureDir(path.dirname(channelsMdPath));
+    await fs.writeFile(channelsMdPath, `${emptyMsg}\n`, "utf8");
     await client.disconnect();
     process.exit(0);
   }
 
-  console.log(`✅ Found ${dialogsList.length} dialog(s):\n`);
-  for (const d of dialogsList) {
-    console.log("────────────────────────────────────");
-    console.log(`📋 Type:        ${d.type}`);
-    console.log(`📛 Name:        ${d.name}`);
-    console.log(`🆔 ID:          ${d.id}`);
-    console.log(`🔑 AccessHash:  ${d.accessHash}`);
-    console.log(`🔗 Username:    ${d.username}`);
-  }
-  console.log("────────────────────────────────────");
+  const listing = formatDialogsMarkdown(dialogsList);
+  console.log(listing);
+
+  await fs.ensureDir(path.dirname(channelsMdPath));
+  await fs.writeFile(channelsMdPath, `${listing}\n`, "utf8");
 
   await client.disconnect();
   console.log("\n🏁 Done.");
