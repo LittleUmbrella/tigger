@@ -42,6 +42,16 @@ logOptions("list-channels", opts);
 const envPath = ".env";
 const channelsMdPath = path.join(process.cwd(), "data", "channels.md");
 
+/** GramJS may use big-integer `BigInteger`; normalize for `bigint` / display. */
+const toBigInt = (v: unknown): bigint => {
+  if (typeof v === 'bigint') return v;
+  if (typeof v === 'number') return BigInt(Math.trunc(v));
+  if (v != null && typeof (v as { toString: () => string }).toString === 'function') {
+    return BigInt(String(v));
+  }
+  return BigInt(0);
+};
+
 const formatDialogsMarkdown = (
   dialogsList: Array<{
     type: string;
@@ -151,8 +161,9 @@ if (!apiId || !apiHash) {
         return {
           type: "Channel",
           name: d.entity.title,
-          id: d.entity.id,
-          accessHash: d.entity.accessHash,
+          id: toBigInt(d.entity.id),
+          accessHash:
+            d.entity.accessHash != null ? toBigInt(d.entity.accessHash) : BigInt(0),
           username: d.entity.username || "(none)",
         };
       }
@@ -162,7 +173,7 @@ if (!apiId || !apiHash) {
         return {
           type: "Group",
           name: d.entity.title,
-          id: d.entity.id,
+          id: toBigInt(d.entity.id),
           accessHash: BigInt(0), // Groups don't have accessHash
           username: "(none)",
         };
@@ -176,8 +187,9 @@ if (!apiId || !apiHash) {
         return {
           type: "Private Chat",
           name: fullName,
-          id: d.entity.id,
-          accessHash: d.entity.accessHash || BigInt(0),
+          id: toBigInt(d.entity.id),
+          accessHash:
+            d.entity.accessHash != null ? toBigInt(d.entity.accessHash) : BigInt(0),
           username: d.entity.username || "(none)",
         };
       }
