@@ -29,6 +29,11 @@ export class CTraderConnection {
   private connected: boolean = false;
   private initialized: boolean = false;
   private pendingOrderCommand: PendingOrderCommand | null = null;
+  /** Called when the underlying socket closes — allows CTraderClient to detect dead connections */
+  onClose?: () => void;
+
+  /** Default per-command timeout to prevent orphaned promises when the server never responds */
+  static readonly DEFAULT_COMMAND_TIMEOUT_MS = 60_000;
 
   constructor(config: CTraderConnectionConfig) {
     this.socket = new CTraderSocket(config);
@@ -37,7 +42,10 @@ export class CTraderConnection {
     this.protobufHandler = new CTraderProtobufHandler();
     this.encoderDecoder = new MessageEncoderDecoder((data) => this.handleDecodedData(data));
 
-    // Setup socket event handlers
+    this.setupSocketHandlers();
+  }
+
+  private setupSocketHandlers(): void {
     this.socket.on('data', (data: Buffer) => {
       this.encoderDecoder.decode(data);
     });
@@ -54,13 +62,21 @@ export class CTraderConnection {
     });
 
     this.socket.on('close', () => {
+      const wasPreviouslyConnected = this.connected;
       this.connected = false;
       logger.info('CTrader socket closed');
-      // Reject any pending order so we fail fast instead of hanging
       if (this.pendingOrderCommand) {
         logger.warn('Rejecting pending order due to socket close', { exchange: 'ctrader' });
         this.pendingOrderCommand.reject(new Error('CTrader socket closed - no order response received'));
         this.pendingOrderCommand = null;
+      }
+      const pendingCount = this.commandMap.getPendingCommands().length;
+      if (pendingCount > 0) {
+        logger.warn('Rejecting pending commands due to socket close', { pendingCount, exchange: 'ctrader' });
+        this.commandMap.rejectAll(new Error('CTrader socket closed'));
+      }
+      if (wasPreviouslyConnected) {
+        this.onClose?.();
       }
     });
   }
@@ -143,7 +159,19 @@ export class CTraderConnection {
       }
     }
 
-    return this.commandMap.create(clientMsgId, message);
+    const commandPromise = this.commandMap.create(clientMsgId, message);
+    const timeoutMs = CTraderConnection.DEFAULT_COMMAND_TIMEOUT_MS;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        const extracted = this.commandMap.extractById(clientMsgId);
+        if (extracted) {
+          const err = new Error(`sendCommand '${payloadName}' timed out after ${timeoutMs}ms`);
+          extracted.reject(err);
+          reject(err);
+        }
+      }, timeoutMs);
+    });
+    return Promise.race([commandPromise, timeoutPromise]);
   }
 
   /**

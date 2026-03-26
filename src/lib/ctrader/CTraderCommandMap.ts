@@ -40,6 +40,16 @@ export class CTraderCommandMap {
   }
 
   /**
+   * Reject all pending commands (e.g. on socket close) and clear the map.
+   */
+  rejectAll(reason: Error): void {
+    for (const command of this.commands.values()) {
+      command.reject(reason);
+    }
+    this.commands.clear();
+  }
+
+  /**
    * Check if a command exists
    */
   hasCommand(clientMsgId: string): boolean {

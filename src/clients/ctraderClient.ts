@@ -99,6 +99,10 @@ export class CTraderClient {
   private symbolInfoCache = new Map<string, { expiresAt: number; data: any }>();
   private static readonly SYMBOL_INFO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
+  private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private static readonly HEARTBEAT_INTERVAL_MS = 25_000;
+  private reconnecting: boolean = false;
+
   constructor(config: CTraderClientConfig) {
     this.config = {
       environment: 'demo',
@@ -112,9 +116,11 @@ export class CTraderClient {
    * Connect to cTrader OpenAPI server
    */
   async connect(): Promise<void> {
-    if (this.connected && this.connection) {
+    if (this.connected && this.connection?.isConnected()) {
       return;
     }
+
+    this.stopHeartbeat();
 
     try {
       this.connection = new CTraderConnection({
@@ -122,8 +128,19 @@ export class CTraderClient {
         port: this.config.port!
       });
 
+      this.connection.onClose = () => {
+        logger.warn('cTrader connection lost — marking client disconnected for auto-reconnect', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader'
+        });
+        this.connected = false;
+        this.authenticated = false;
+        this.stopHeartbeat();
+      };
+
       await this.connection.open();
       this.connected = true;
+      this.startHeartbeat();
       
       logger.info('Connected to cTrader OpenAPI', {
         host: this.config.host,
@@ -131,6 +148,8 @@ export class CTraderClient {
         environment: this.config.environment
       });
     } catch (error) {
+      this.connected = false;
+      this.authenticated = false;
       logger.error('Failed to connect to cTrader OpenAPI', {
         error: serializeErrorForLog(error)
       });
@@ -150,7 +169,6 @@ export class CTraderClient {
     }
 
     try {
-      // First authenticate the application
       await this.connection.sendCommand('ProtoOAApplicationAuthReq', {
         clientId: this.config.clientId,
         clientSecret: this.config.clientSecret
@@ -158,7 +176,6 @@ export class CTraderClient {
 
       logger.info('Application authenticated with cTrader OpenAPI');
 
-      // Then authenticate the trading account if access token and account ID are provided
       if (this.config.accessToken && this.config.accountId) {
         const accountIdNum = parseInt(this.config.accountId, 10);
         if (isNaN(accountIdNum)) {
@@ -188,6 +205,73 @@ export class CTraderClient {
         stack: error instanceof Error ? error.stack : undefined
       });
       throw error;
+    }
+  }
+
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeatInterval = setInterval(() => {
+      if (this.connection?.isConnected()) {
+        this.connection.sendHeartbeat();
+      } else if (this.connected) {
+        logger.warn('Heartbeat detected dead socket — marking disconnected', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader'
+        });
+        this.connected = false;
+        this.authenticated = false;
+        this.stopHeartbeat();
+      }
+    }, CTraderClient.HEARTBEAT_INTERVAL_MS);
+    if (this.heartbeatInterval.unref) {
+      this.heartbeatInterval.unref();
+    }
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
+    }
+  }
+
+  /**
+   * Ensure connection is alive and authenticated; reconnect if needed.
+   * Throws if reconnection fails — callers should catch and handle gracefully.
+   */
+  async ensureConnected(): Promise<void> {
+    const socketAlive = this.connection?.isConnected() ?? false;
+    if (this.authenticated && socketAlive) return;
+
+    if (this.reconnecting) {
+      throw new Error('cTrader reconnection already in progress');
+    }
+    this.reconnecting = true;
+    try {
+      logger.info('cTrader auto-reconnecting', {
+        accountId: this.config.accountId,
+        wasConnected: this.connected,
+        wasAuthenticated: this.authenticated,
+        socketAlive,
+        exchange: 'ctrader'
+      });
+
+      if (this.connection) {
+        try { this.connection.close(); } catch { /* already dead */ }
+        this.connection = null;
+      }
+      this.connected = false;
+      this.authenticated = false;
+
+      await this.connect();
+      await this.authenticate();
+
+      logger.info('cTrader auto-reconnect successful', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader'
+      });
+    } finally {
+      this.reconnecting = false;
     }
   }
 
@@ -222,6 +306,7 @@ export class CTraderClient {
    * Uses ProtoOATraderReq to get trader account details including balance
    */
   async getAccountInfo(): Promise<any> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -259,6 +344,7 @@ export class CTraderClient {
     toTimestamp: number;
     period?: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1';
   }): Promise<Array<{ timestamp: number; price: number; high?: number; low?: number }>> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -356,6 +442,7 @@ export class CTraderClient {
     toTimestamp: number;
     type?: 'BID' | 'ASK';
   }): Promise<Array<{ timestamp: number; price: number }>> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -460,6 +547,7 @@ export class CTraderClient {
    * Tries exact match first, then case-insensitive, then known aliases (e.g. XAUUSD -> GOLD).
    */
   async getSymbolInfo(symbol: string): Promise<any> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -600,6 +688,7 @@ export class CTraderClient {
     /** Optional. User label (max 100 chars) - groups positions for management */
     label?: string;
   }): Promise<string> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -682,6 +771,7 @@ export class CTraderClient {
     /** Optional. User label (max 100 chars) - groups positions for management */
     label?: string;
   }): Promise<string> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -776,6 +866,7 @@ export class CTraderClient {
     /** Link order to position (closing/reduce behaviour when side is opposite) */
     positionId?: string;
   }): Promise<string> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -845,6 +936,7 @@ export class CTraderClient {
    * Useful for debugging - use getOpenPositions/getOpenOrders for normal usage.
    */
   async getReconcile(): Promise<{ position?: any[]; order?: any[]; [key: string]: any }> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -910,6 +1002,7 @@ export class CTraderClient {
    * Get open positions (uses ProtoOAReconcileReq; positions have tradeData.symbolId, we enrich with symbolName)
    */
   async getOpenPositions(): Promise<any[]> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -971,6 +1064,7 @@ export class CTraderClient {
    * Get open orders (uses ProtoOAReconcileReq; enriches orderId for monitor matching)
    */
   async getOpenOrders(): Promise<any[]> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1001,6 +1095,7 @@ export class CTraderClient {
    * Wrapped with rate limit retry (cTrader historical limit: 5 req/sec).
    */
   async getDealList(fromTimestamp: number, toTimestamp: number, maxRows: number = 1000): Promise<any[]> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1074,6 +1169,7 @@ export class CTraderClient {
     fromTimestamp: number,
     toTimestamp: number
   ): Promise<any[]> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1142,6 +1238,7 @@ export class CTraderClient {
    * Uses ProtoOAOrderDetailsReq.
    */
   async getOrderDetails(orderId: string): Promise<{ order: any; deals: any[] } | null> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1210,6 +1307,7 @@ export class CTraderClient {
    * Wrapped with rate limit retry (cTrader historical limit: 5 req/sec).
    */
   async getClosedOrders(fromTimestamp: number, toTimestamp: number): Promise<any[]> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1261,6 +1359,7 @@ export class CTraderClient {
    * Cancel an order
    */
   async cancelOrder(orderId: string): Promise<void> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1295,6 +1394,7 @@ export class CTraderClient {
     stopLoss?: number;
     takeProfit?: number;
   }): Promise<void> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1329,6 +1429,7 @@ export class CTraderClient {
    * @param symbol - Required when volumeLots provided (for volume conversion to API units)
    */
   async closePosition(positionId: string, volumeLots?: number, symbol?: string): Promise<void> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1396,6 +1497,7 @@ export class CTraderClient {
    *               on limit orders. When omitted, returns mid price (bid+ask)/2.
    */
   async getCurrentPrice(symbol: string, side?: 'buy' | 'sell'): Promise<number | null> {
+    await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
@@ -1642,9 +1744,11 @@ export class CTraderClient {
    * Disconnect from cTrader OpenAPI
    */
   async disconnect(): Promise<void> {
+    this.stopHeartbeat();
     if (this.connection) {
       try {
-        await this.connection.close();
+        this.connection.onClose = undefined;
+        this.connection.close();
       } catch (error) {
         logger.warn('Error closing cTrader connection', {
           error: serializeErrorForLog(error)
@@ -1658,9 +1762,9 @@ export class CTraderClient {
   }
 
   /**
-   * Check if client is connected
+   * Check if client is connected (checks actual socket, not just cached flag)
    */
   isConnected(): boolean {
-    return this.connected && this.connection !== null;
+    return this.connected && (this.connection?.isConnected() ?? false);
   }
 }
