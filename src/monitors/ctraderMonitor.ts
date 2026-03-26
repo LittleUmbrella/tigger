@@ -48,24 +48,41 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
 const CTRADER_TP_SL_CLASSIFY_STATUSES = new Set<Trade['status']>(['closed', 'completed']);
 
 /**
+ * Classify TP vs SL from exit price / PnL vs trade levels (no status check).
+ * Used for reconcile closes and for persisted sibling rows.
+ */
+const classifyCtraderCloseFromExitAndPnl = (
+  trade: Trade,
+  exitPrice: number | undefined,
+  pnl: number | undefined
+): 'take_profit' | 'stop_loss' | null => {
+  const merged: Trade =
+    exitPrice != null && exitPrice > 0
+      ? { ...trade, exit_price: exitPrice, ...(pnl !== undefined ? { pnl } : {}) }
+      : { ...trade, ...(pnl !== undefined ? { pnl } : {}) };
+
+  if (exitPrice != null && isFinite(exitPrice) && exitPrice > 0) {
+    const r = classifyCtraderExitPriceVsLevels(merged, exitPrice);
+    if (r != null) return r;
+  }
+
+  const p = pnl ?? merged.pnl;
+  if (p != null && isFinite(p)) {
+    if (p > 1e-8) return 'take_profit';
+    if (p < -1e-8) return 'stop_loss';
+  }
+
+  return null;
+};
+
+/**
  * Classify a closed cTrader sibling as TP vs SL using DB fields.
  * Our monitor often sets `closed` for both exchange TP and SL exits; use exit_price vs TP/SL/entry when present.
  */
 const classifyCtraderCloseFromDb = (sibling: Trade): 'take_profit' | 'stop_loss' | null => {
   if (sibling.status === 'stopped') return 'stop_loss';
   if (!CTRADER_TP_SL_CLASSIFY_STATUSES.has(sibling.status)) return null;
-
-  const exitPx = sibling.exit_price;
-  if (exitPx != null && isFinite(exitPx) && exitPx > 0) {
-    return classifyCtraderExitPriceVsLevels(sibling, exitPx);
-  }
-
-  if (sibling.pnl != null && isFinite(sibling.pnl)) {
-    if (sibling.pnl > 1e-8) return 'take_profit';
-    if (sibling.pnl < -1e-8) return 'stop_loss';
-  }
-
-  return null;
+  return classifyCtraderCloseFromExitAndPnl(sibling, sibling.exit_price, sibling.pnl);
 };
 
 const classifyCtraderExitPriceVsLevels = (sibling: Trade, exitPx: number): 'take_profit' | 'stop_loss' | null => {
@@ -192,6 +209,51 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
 
   const results = await Promise.all(tasks);
   return results.reduce<number>((a, b) => a + b, 0);
+};
+
+/**
+ * Decide TP vs SL when reconciling an exchange closed position into our DB (`closed` vs `stopped`).
+ */
+const resolveCtraderReconciledCloseReason = async (
+  trade: Trade,
+  exitPrice: number | undefined,
+  pnl: number | undefined,
+  ctraderClient: CTraderClient | undefined
+): Promise<'take_profit' | 'stop_loss'> => {
+  let r = classifyCtraderCloseFromExitAndPnl(trade, exitPrice, pnl);
+  if (r != null) return r;
+  if (ctraderClient && trade.position_id) {
+    const fromDeals = await classifyCtraderCloseFromDeals(trade, ctraderClient);
+    if (fromDeals != null) return fromDeals;
+  }
+  if (exitPrice != null && isFinite(exitPrice) && exitPrice > 0) {
+    const entry = trade.entry_price;
+    const isLong = getIsLong(trade);
+    const tol = Math.max(Math.abs(entry) * 1e-5, 1e-9);
+    if (isLong) {
+      if (exitPrice < entry - tol) return 'stop_loss';
+      if (exitPrice > entry + tol) return 'take_profit';
+    } else {
+      if (exitPrice > entry + tol) return 'stop_loss';
+      if (exitPrice < entry - tol) return 'take_profit';
+    }
+  }
+  return 'take_profit';
+};
+
+const applyCtraderReconciledClose = async (
+  trade: Trade,
+  db: DatabaseManager,
+  exitPrice: number | undefined,
+  pnl: number | undefined,
+  ctraderClient: CTraderClient | undefined
+): Promise<void> => {
+  const reason = await resolveCtraderReconciledCloseReason(trade, exitPrice, pnl, ctraderClient);
+  if (reason === 'stop_loss') {
+    await updateTradeOnStopLossHit(trade, db, exitPrice, pnl);
+  } else {
+    await updateTradeOnPositionClosed(trade, db, exitPrice, pnl);
+  }
 };
 
 const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
@@ -1713,7 +1775,7 @@ const handlePendingEntryExpiry = async (
           filledAt: r.filledAt,
           filledPrice: r.filledPrice
         };
-    const outcome = await applyCtraderPendingEntryFillResult(trade, db, entry, 'standard');
+    const outcome = await applyCtraderPendingEntryFillResult(trade, db, entry, 'standard', ctraderClient);
     return outcome === 'return' || outcome === 'continue' ? 'return' : 'noop';
   };
 
@@ -1783,7 +1845,8 @@ const applyCtraderPendingEntryFillResult = async (
   trade: Trade,
   db: DatabaseManager,
   entryResult: CTraderEntryFillResult,
-  source: 'fast_path' | 'standard'
+  source: 'fast_path' | 'standard',
+  ctraderClient?: CTraderClient
 ): Promise<'return' | 'continue' | 'noop'> => {
   if (!entryResult.filled) return 'noop';
   const fillPrice = entryResult.filledPrice;
@@ -1809,7 +1872,7 @@ const applyCtraderPendingEntryFillResult = async (
     trade.position_id = entryResult.positionId;
     trade.entry_price = resolvedEntryPrice;
     await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
-    await updateTradeOnPositionClosed(trade, db, entryResult.exitPrice, entryResult.pnl);
+    await applyCtraderReconciledClose(trade, db, entryResult.exitPrice, entryResult.pnl, ctraderClient);
     return 'return';
   }
   logger.info('cTrader entry order filled', {
@@ -1914,7 +1977,7 @@ const monitorTrade = async (
             pnl: positionResultEarly.pnl,
             exchange: 'ctrader'
           });
-          await updateTradeOnPositionClosed(trade, db, positionResultEarly.exitPrice, positionResultEarly.pnl);
+          await applyCtraderReconciledClose(trade, db, positionResultEarly.exitPrice, positionResultEarly.pnl, ctraderClient);
           return;
         }
       }
@@ -1990,7 +2053,7 @@ const monitorTrade = async (
             );
             timings.checkEntryFilledFast = Date.now() - t0;
             pendingEntryFillAttempted = true;
-            const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResultFast, 'fast_path');
+            const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResultFast, 'fast_path', ctraderClient);
             if (outcome === 'return') return;
           }
         }
@@ -2035,7 +2098,7 @@ const monitorTrade = async (
         exchange: 'ctrader'
       });
 
-      const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResult, 'standard');
+      const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResult, 'standard', ctraderClient);
       if (outcome === 'return') return;
     }
 
@@ -2240,7 +2303,7 @@ const monitorTrade = async (
           pnl: positionResult.pnl,
           exchange: 'ctrader'
         });
-        await updateTradeOnPositionClosed(trade, db, positionResult.exitPrice, positionResult.pnl);
+        await applyCtraderReconciledClose(trade, db, positionResult.exitPrice, positionResult.pnl, ctraderClient);
         return;
       }
 
@@ -2274,7 +2337,7 @@ const monitorTrade = async (
           trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
         );
         if (stopLossResult.closed) {
-          await updateTradeOnStopLossHit(trade, db, stopLossResult.exitPrice, stopLossResult.pnl);
+          await applyCtraderReconciledClose(trade, db, stopLossResult.exitPrice, stopLossResult.pnl, ctraderClient);
         } else {
           await db.updateTrade(trade.id, { status: 'stopped' });
         }
