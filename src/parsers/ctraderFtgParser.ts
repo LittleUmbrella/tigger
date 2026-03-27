@@ -34,6 +34,9 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * TP …
  * SL*4384 👍
  *
+ * Format 6 (single-line, space-separated entry zone):
+ * #XAUUSD BUY 4450 4445 SL 4440 TP 4455 …
+ *
  * Entry from two prices: long → min, short → max. Falls back to ctraderGoldParser
  * when FTG patterns do not match.
  */
@@ -66,6 +69,15 @@ const extractEntryAndSide = (
   }
 
   m = t.match(/\$?XAUUSD\s+(buy|sell)\s+([\d.]+)\s*\/\s*([\d.]+)/i);
+  if (m) {
+    const a = parseFloat(m[2]);
+    const b = parseFloat(m[3]);
+    if (isNaN(a) || isNaN(b) || a <= 0 || b <= 0) return null;
+    const signalType = m[1].toLowerCase() === 'buy' ? 'long' : 'short';
+    return { signalType, entryPrice: entryZone(signalType, a, b) };
+  }
+
+  m = t.match(/#?\$?\s*XAUUSD\s+(buy|sell)\s+([\d.]+)\s+([\d.]+)/i);
   if (m) {
     const a = parseFloat(m[2]);
     const b = parseFloat(m[3]);
@@ -140,6 +152,15 @@ const extractTakeProfits = (content: string): number[] => {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) tps.push(v);
     }
+  }
+  if (tps.length > 0) return tps;
+
+  // Single-line compact: … SL … TP 4455 TP 4458 … (line does not start with TP)
+  const inlineTpPattern = /\bTP\s*\d+\s*:\s*([\d.]+)|\bTP\s+([\d.]+)/gi;
+  let im: RegExpExecArray | null;
+  while ((im = inlineTpPattern.exec(content)) !== null) {
+    const v = parseFloat(im[1] ?? im[2] ?? '');
+    if (!isNaN(v) && v > 0) tps.push(v);
   }
   return tps;
 };

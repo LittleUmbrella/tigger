@@ -27,6 +27,8 @@ import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js
  *
  * Format 3 (compact, colon separators):
  * XAUUSD BUY NOW @5193 - 5187 SL:5184 TP:5203 TP:5210 TP:5218
+ *
+ * Optional leading # or $ (e.g. #XAUUSD …) is ignored for matching.
  */
 export const ctraderGoldParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
@@ -35,7 +37,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     
     // Extract trading pair - look for "gold", "XAU", "XAUT", or "XAUUSD" (case-insensitive)
     // Translate "gold" to "XAU", but keep as XAUUSD for cTrader (don't translate to crypto XAUT/USDT)
-    const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
+    const tradingPairMatch = normalizedContent.match(/^#?\$?\s*(gold|XAU|XAUT|XAUUSD)\s+/i);
     if (!tradingPairMatch) return null;
     
     const tradingPair = normalizeAssetAliasToCTraderPair(tradingPairMatch[1]);
