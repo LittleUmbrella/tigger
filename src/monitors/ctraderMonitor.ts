@@ -30,6 +30,7 @@ import {
 } from './shared.js';
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
+import { resolveBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -1917,7 +1918,8 @@ const monitorTrade = async (
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
   breakevenAfterTPs: number,
-  preResolvedPositionIds?: Map<string, string>
+  preResolvedPositionIds?: Map<string, string>,
+  dynamicBreakevenAfterTPs: boolean = false
 ): Promise<void> => {
   const timings: Record<string, number> = {};
   let t0 = Date.now();
@@ -2216,6 +2218,13 @@ const monitorTrade = async (
       // We often persist `closed` for both TP and SL exits — classify via exit_price vs TP/SL/entry, else deals grossProfit.
       if (!trade.stop_loss_breakeven) {
         const allSiblings = await db.getTradesByMessageId(trade.message_id, trade.channel);
+        const totalTpLevels = allSiblings.filter(
+          (t) => t.exchange === 'ctrader' && t.account_name === trade.account_name
+        ).length;
+        const effectiveBreakevenAfterTPs = resolveBreakevenAfterTPs(totalTpLevels, {
+          breakevenAfterTPs,
+          dynamicBreakevenAfterTPs
+        });
         const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(
           allSiblings,
           trade.id,
@@ -2223,7 +2232,7 @@ const monitorTrade = async (
           ctraderClient
         );
 
-        if (siblingsHitTp >= breakevenAfterTPs) {
+        if (siblingsHitTp >= effectiveBreakevenAfterTPs) {
           try {
             const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
             const symbol = normalizeCTraderSymbol(trade.trading_pair);
@@ -2267,7 +2276,9 @@ const monitorTrade = async (
             logger.info('Required take profits hit - moved cTrader stop loss to breakeven', {
               tradeId: trade.id,
               siblingsHitTp,
-              breakevenAfterTPs,
+              breakevenAfterTPs: effectiveBreakevenAfterTPs,
+              totalTpLevels,
+              dynamicBreakevenAfterTPs,
               bePrice,
               slPrice,
               exchange: 'ctrader'
@@ -2276,7 +2287,9 @@ const monitorTrade = async (
             logger.error('Error moving stop loss to breakeven on cTrader', {
               tradeId: trade.id,
               siblingsHitTp,
-              breakevenAfterTPs,
+              breakevenAfterTPs: effectiveBreakevenAfterTPs,
+              totalTpLevels,
+              dynamicBreakevenAfterTPs,
               channel: trade.channel,
               exchange: 'ctrader',
               error: serializeErrorForLog(beError)
@@ -2427,6 +2440,7 @@ export const startCTraderMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880;
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1;
+  const dynamicBreakevenAfterTPs = monitorConfig.dynamicBreakevenAfterTPs ?? false;
   const concurrency = monitorConfig.ctraderMonitorConcurrency ?? 2;
   const limit = pLimit(concurrency);
 
@@ -2467,7 +2481,8 @@ export const startCTraderMonitor = async (
                 isSimulation,
                 priceProvider,
                 breakevenAfterTPs,
-                preResolvedPositionIds
+                preResolvedPositionIds,
+                dynamicBreakevenAfterTPs
               ),
               new Promise<void>((_, reject) =>
                 setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)

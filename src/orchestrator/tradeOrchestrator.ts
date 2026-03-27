@@ -321,10 +321,11 @@ export const startTradeOrchestrator = async (
       }
       state.stopHarvesters.push(stopHarvester);
 
-      // Merge channel-specific breakevenAfterTPs, entryTimeoutMinutes, and useLimitOrderForBreakeven overrides with monitor config
+      // Merge channel-specific breakevenAfterTPs, dynamicBreakevenAfterTPs, entryTimeoutMinutes, and useLimitOrderForBreakeven overrides with monitor config
       const monitorConfigWithOverride: MonitorConfig = {
         ...monitor,
         breakevenAfterTPs: channelConfig.breakevenAfterTPs ?? monitor.breakevenAfterTPs,
+        dynamicBreakevenAfterTPs: channelConfig.dynamicBreakevenAfterTPs ?? monitor.dynamicBreakevenAfterTPs,
         entryTimeoutMinutes: channelConfig.entryTimeoutMinutes ?? monitor.entryTimeoutMinutes,
         useLimitOrderForBreakeven: channelConfig.useLimitOrderForBreakeven ?? monitor.useLimitOrderForBreakeven ?? false
       };

@@ -30,6 +30,7 @@ import {
 } from './shared.js';
 
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
+import { getTakeProfitLevelCount, resolveBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
@@ -1710,7 +1711,8 @@ const monitorTrade = async (
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
   breakevenAfterTPs: number,
-  useLimitOrderForBreakeven: boolean = false
+  useLimitOrderForBreakeven: boolean = false,
+  dynamicBreakevenAfterTPs: boolean = false
 ): Promise<void> => {
   try {
     // Log trade status at start for debugging
@@ -2117,8 +2119,16 @@ const monitorTrade = async (
       const isLong = getIsLong(trade);
       const filledTPCount = await countFilledTakeProfits(trade, db);
 
+      const takeProfitsLen = getTakeProfitLevelCount(trade);
+      const tpOrderCount = orders.filter((o) => o.order_type === 'take_profit').length;
+      const totalTpLevels = takeProfitsLen > 0 ? takeProfitsLen : tpOrderCount;
+      const effectiveBreakevenAfterTPs = resolveBreakevenAfterTPs(totalTpLevels, {
+        breakevenAfterTPs,
+        dynamicBreakevenAfterTPs
+      });
+
       // Check if we've hit the required number of TPs to move to breakeven
-      if (filledTPCount >= breakevenAfterTPs && !trade.stop_loss_breakeven) {
+      if (filledTPCount >= effectiveBreakevenAfterTPs && !trade.stop_loss_breakeven) {
         const existingBreakevenOrder = await getBreakevenLimitOrder(trade, db);
 
         if (useLimitOrderForBreakeven) {
@@ -2126,7 +2136,9 @@ const monitorTrade = async (
             logger.info('Required take profits hit - creating Bybit breakeven limit order at entry price', {
               tradeId: trade.id,
               filledTPCount,
-              breakevenAfterTPs,
+              breakevenAfterTPs: effectiveBreakevenAfterTPs,
+              totalTpLevels,
+              dynamicBreakevenAfterTPs,
               entryPrice: trade.entry_price,
               exchange: 'bybit'
             });
@@ -2148,7 +2160,9 @@ const monitorTrade = async (
           logger.info('Required take profits hit - moving Bybit stop loss to breakeven', {
             tradeId: trade.id,
             filledTPCount,
-            breakevenAfterTPs,
+            breakevenAfterTPs: effectiveBreakevenAfterTPs,
+            totalTpLevels,
+            dynamicBreakevenAfterTPs,
             bePrice,
             orderPrice: trade.entry_price,
             exchange: 'bybit'
@@ -2227,6 +2241,7 @@ export const startTradeMonitor = async (
   const pollInterval = monitorConfig.pollInterval || 10000;
   const entryTimeoutMinutes = monitorConfig.entryTimeoutMinutes || 2880; // Default: 2 days = 2880 minutes
   const breakevenAfterTPs = monitorConfig.breakevenAfterTPs ?? 1; // Default to 1 for backward compatibility
+  const dynamicBreakevenAfterTPs = monitorConfig.dynamicBreakevenAfterTPs ?? false;
   const useLimitOrderForBreakeven = monitorConfig.useLimitOrderForBreakeven ?? false; // Default false: use setTradingStop at BE; true uses conditional limit + backup SL (see BREAKEVEN_* ticks)
 
   const monitorLoop = async (): Promise<void> => {
@@ -2243,7 +2258,7 @@ export const startTradeMonitor = async (
             ? getBybitClient(trade.account_name)
             : bybitClient;
           return Promise.race([
-            monitorTrade(channel, entryTimeoutMinutes, trade, db, accountBybitClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven),
+            monitorTrade(channel, entryTimeoutMinutes, trade, db, accountBybitClient, isSimulation, priceProvider, breakevenAfterTPs, useLimitOrderForBreakeven, dynamicBreakevenAfterTPs),
             new Promise<void>((_, reject) =>
               setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
             )

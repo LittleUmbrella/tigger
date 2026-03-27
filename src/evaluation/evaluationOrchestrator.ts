@@ -210,7 +210,13 @@ export async function runEvaluation(
   const maxDurationDays = config.maxTradeDurationDays || 7;
   const mockExchanges = updatedTradesToSimulate.map(trade => ({
     trade,
-    exchange: createMockExchange(trade, db, priceProvider, monitorConfig.breakevenAfterTPs ?? 1)
+    exchange: createMockExchange(
+      trade,
+      db,
+      priceProvider,
+      monitorConfig.breakevenAfterTPs ?? 1,
+      monitorConfig.dynamicBreakevenAfterTPs ?? false
+    )
   }));
 
   // Initialize all mock exchanges in parallel - price history fetches are independent

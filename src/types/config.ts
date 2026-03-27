@@ -106,6 +106,8 @@ export interface MonitorConfig {
   pollInterval?: number; // milliseconds
   entryTimeoutMinutes?: number; // minutes to wait for entry before cancelling
   breakevenAfterTPs?: number; // Number of take profits to hit before moving stop loss to breakeven (default: 1)
+  /** When true, breakeven threshold scales with total TP count (see computeDynamicBreakevenAfterTPs); breakevenAfterTPs is ignored */
+  dynamicBreakevenAfterTPs?: boolean;
   useLimitOrderForBreakeven?: boolean; // When true: conditional limit at BE fill + trigger a few ticks better + backup SL slightly worse (default: false uses setTradingStop at BE only)
   /** cTrader only: use tick data instead of M1 candles for evaluation (more precise, more API calls) */
   ctraderUseTickData?: boolean;
@@ -157,6 +159,7 @@ export interface ChannelSetConfig {
   initiator: string; // Reference to initiator name
   monitor: 'bybit' | 'dex' | 'ctrader'; // Reference to monitor type
   breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
+  dynamicBreakevenAfterTPs?: boolean; // Per-channel override for dynamic breakeven threshold (overrides monitor config)
   entryTimeoutMinutes?: number; // Per-channel override for minutes to wait for entry before cancelling (overrides monitor config)
   riskPercentage?: number; // Per-channel override for percentage of account to risk (overrides initiator config)
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)

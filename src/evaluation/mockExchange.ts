@@ -9,6 +9,7 @@ import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 import { getDecimalPrecision } from '../utils/positionSizing.js';
+import { computeDynamicBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
 import dayjs from 'dayjs';
 
 interface PriceDataPoint {
@@ -45,7 +46,8 @@ export function createMockExchange(
   trade: Trade,
   db: DatabaseManager,
   priceProvider: HistoricalPriceProvider,
-  breakevenAfterTPs: number = 1 // Number of TPs to hit before moving to breakeven (default: 1)
+  breakevenAfterTPs: number = 1, // Ignored when dynamicBreakevenAfterTPs is true
+  dynamicBreakevenAfterTPs: boolean = false
 ): MockExchange {
   const takeProfits = JSON.parse(trade.take_profits) as number[];
   const isLong = trade.entry_price > trade.stop_loss;
@@ -882,7 +884,10 @@ export function createMockExchange(
             // Move stop loss to breakeven after N TPs are filled
             // Count filled TPs (including the one we just filled)
             const filledTPCount = state.filledTakeProfits.size;
-            if (filledTPCount >= breakevenAfterTPs && !state.trade.stop_loss_breakeven) {
+            const breakevenThreshold = dynamicBreakevenAfterTPs
+              ? computeDynamicBreakevenAfterTPs(state.takeProfits.length)
+              : breakevenAfterTPs;
+            if (filledTPCount >= breakevenThreshold && !state.trade.stop_loss_breakeven) {
               await moveStopLossToBreakeven();
             }
           }

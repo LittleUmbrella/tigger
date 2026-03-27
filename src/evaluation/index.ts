@@ -128,7 +128,8 @@ program
   .option('--max-trade-duration <days>', 'Maximum trade duration in days', '7')
   .option('--risk-percentage <n>', 'Risk percentage per trade', '3')
   .option('--base-leverage <n>', 'Base/default leverage if not specified in message. Also used as confidence indicator for risk adjustment')
-  .option('--breakeven-after-tps <n>', 'Number of take profits to hit before moving stop-loss to breakeven (default: 1)', '1')
+  .option('--breakeven-after-tps <n>', 'Number of take profits to hit before moving stop-loss to breakeven (default: 1; ignored if --dynamic-breakeven-after-tps)', '1')
+  .option('--dynamic-breakeven-after-tps', 'Scale breakeven threshold from total TP count (see computeDynamicBreakevenAfterTPs)', false)
   .option('--entry-timeout-minutes <n>', 'Minutes to wait for entry before cancelling trade (default: 2880 = 2 days)', '2880')
   .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
   .option('--obfuscation-sl <min,max>', 'Trade obfuscation for SL: percent range as "min,max" (e.g. "-0.5,0.5")')
@@ -189,6 +190,7 @@ program
             pollInterval: 10000,
             entryTimeoutMinutes: parseInt(options.entryTimeoutMinutes || '2880', 10),
             breakevenAfterTPs: parseInt(options.breakevenAfterTps || '1', 10),
+            dynamicBreakevenAfterTPs: Boolean(options.dynamicBreakevenAfterTps),
           },
           propFirms,
           initialBalance: parseFloat(options.initialBalance) || 10000,
