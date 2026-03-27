@@ -1047,7 +1047,7 @@ const executeTradeForAccount = async (
     // Place order (assigned in N-trades path or single-order path below)
     let orderId!: string;
     /** When using N trades (one per TP), each trade has its own order with SL+TP - no separate TP orders */
-    let nTradeData: { tradeIds: number[]; orderIds: string[]; quantities: number[]; tpPrices: number[] } | undefined;
+    let nTradeData: { tradeIds: number[]; orderIds: string[]; quantities: number[]; tpPrices: number[][] } | undefined;
     if (isSimulation) {
       if (roundedTPPrices && roundedTPPrices.length > 1 && roundedStopLoss && roundedStopLoss > 0) {
         const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision);
@@ -1069,7 +1069,7 @@ const executeTradeForAccount = async (
             tradeIds: [],
             orderIds,
             quantities: validTPOrders.map((tp) => tp.quantity),
-            tpPrices: validTPOrders.map((tp) => tp.price)
+            tpPrices: validTPOrders.map((tp) => [tp.price])
           };
         } else {
           orderId = `SIM-${Date.now()}-${Math.random().toString(36).substring(7)}`;
@@ -1212,8 +1212,37 @@ const executeTradeForAccount = async (
               tradeIds: [],
               orderIds: ids,
               quantities,
-              tpPrices: validTPOrders.map((tp) => tp.price)
+              tpPrices: validTPOrders.map((tp) => [tp.price])
             };
+
+            // Deduplicate order IDs — cTrader netting can merge separate orders into the
+            // same orderId. Consolidate quantities and TPs so each trade row is unique.
+            const uniqueOrderIds = new Set(ids);
+            if (uniqueOrderIds.size < ids.length) {
+              const merged = new Map<string, { quantity: number; tpPrices: number[] }>();
+              for (let idx = 0; idx < ids.length; idx++) {
+                const oid = ids[idx];
+                const existing = merged.get(oid);
+                if (existing) {
+                  existing.quantity += quantities[idx];
+                  existing.tpPrices.push(validTPOrders[idx].price);
+                } else {
+                  merged.set(oid, { quantity: quantities[idx], tpPrices: [validTPOrders[idx].price] });
+                }
+              }
+              logger.warn('Duplicate order IDs from cTrader (netting) — consolidating trade rows', {
+                channel,
+                symbol,
+                accountName: accountName || 'default',
+                placedCount: ids.length,
+                uniqueCount: merged.size,
+                orderIds: ids,
+                exchange: 'ctrader'
+              });
+              nTradeData.orderIds = [...merged.keys()];
+              nTradeData.quantities = [...merged.values()].map((v) => v.quantity);
+              nTradeData.tpPrices = [...merged.values()].map((v) => v.tpPrices);
+            }
           } else {
             logger.info('N-trades skipped - validation returned no valid TP orders', {
               channel,
@@ -1360,7 +1389,7 @@ const executeTradeForAccount = async (
             direction: order.signalType,
             entry_price: roundedEntryPrice,
             stop_loss: roundedStopLoss || order.stopLoss,
-            take_profits: JSON.stringify([nTradeData.tpPrices[i]]),
+            take_profits: JSON.stringify(nTradeData.tpPrices[i]),
             leverage: effectiveLeverage,
             quantity: nTradeData.quantities[i],
             risk_percentage: riskPercentage,

@@ -275,7 +275,7 @@ const resolvePositionIdsBatch = async (
   getCTraderClient: ((accountName?: string) => Promise<CTraderClient | undefined>) | undefined,
   ctraderClient: CTraderClient | undefined
 ): Promise<Map<string, string>> => {
-  const needsResolution = trades.filter((t) => t.order_id && !t.position_id && (t.status === 'active' || t.status === 'filled'));
+  const needsResolution = trades.filter((t) => t.order_id && !t.position_id);
   if (needsResolution.length === 0) return new Map();
 
   const result = new Map<string, string>();
@@ -626,7 +626,8 @@ const checkEntryFilled = async (
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider,
-  preFetched?: { positions: any[]; orders: any[] }
+  preFetched?: { positions: any[]; orders: any[] },
+  preResolvedPositionIds?: Map<string, string>
 ): Promise<{
   filled: boolean;
   positionId?: string;
@@ -705,21 +706,26 @@ const checkEntryFilled = async (
         }
       }
       
-      const position = positions.find((p: any) => {
-        const positionSymbol = p.symbolName || p.symbol;
-        const volume = Math.abs(p.volume || p.quantity || 0);
-        const matches = positionSymbol === symbol && volume > 0;
+      // Order-based position resolution: use pre-resolved map to find the exact position for this order.
+      // Prevents incorrect symbol-only matching when multiple orders exist for the same symbol (N-trades).
+      const resolvedPosId = trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined;
+      const position = resolvedPosId
+        ? positions.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
+        : positions.find((p: any) => {
+            const positionSymbol = p.symbolName || p.symbol;
+            const volume = Math.abs(p.volume || p.quantity || 0);
+            const matches = positionSymbol === symbol && volume > 0;
         
-        logger.debug('Checking position match', {
-          tradeId: trade.id,
-          positionSymbol,
-          expectedSymbol: symbol,
-          volume,
-          matches
-        });
+            logger.debug('Checking position match', {
+              tradeId: trade.id,
+              positionSymbol,
+              expectedSymbol: symbol,
+              volume,
+              matches
+            });
         
-        return matches;
-      });
+            return matches;
+          });
       
       if (position) {
         const positionId = position.positionId || position.id;
@@ -736,6 +742,7 @@ const checkEntryFilled = async (
           volume: position.volume || position.quantity,
           orderId: trade.order_id,
           filledPrice: filledPrice > 0 ? filledPrice : undefined,
+          resolvedViaOrder: !!resolvedPosId,
           exchange: 'ctrader'
         });
         return {
@@ -797,11 +804,13 @@ const checkEntryFilled = async (
                   CTRADER_RECONCILE_TIMEOUT_MS,
                   'getOpenPositions (checkEntryFilled re-check)'
                 );
-            const positionAgain = positionsAgain.find((p: any) => {
-              const positionSymbol = p.symbolName || p.symbol;
-              const volume = Math.abs(p.volume || p.quantity || 0);
-              return positionSymbol === symbol && volume > 0;
-            });
+            const positionAgain = resolvedPosId
+              ? positionsAgain.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
+              : positionsAgain.find((p: any) => {
+                  const positionSymbol = p.symbolName || p.symbol;
+                  const volume = Math.abs(p.volume || p.quantity || 0);
+                  return positionSymbol === symbol && volume > 0;
+                });
             
             if (positionAgain) {
               const posId = positionAgain.positionId || positionAgain.id;
@@ -1610,7 +1619,8 @@ const promotePendingIfOpenPositionVisible = async (
   trade: Trade,
   db: DatabaseManager,
   ctraderClient: CTraderClient,
-  cachedPositions: any[] | undefined
+  cachedPositions: any[] | undefined,
+  preResolvedPositionIds?: Map<string, string>
 ): Promise<void> => {
   if (trade.status !== 'pending') return;
   let positions: any[] | undefined = cachedPositions;
@@ -1631,11 +1641,14 @@ const promotePendingIfOpenPositionVisible = async (
     }
   }
   const symbol = normalizeCTraderSymbol(trade.trading_pair);
-  const position = positions.find((p: any) => {
-    const positionSymbol = p.symbolName || p.symbol;
-    const volume = Math.abs(p.volume || p.quantity || 0);
-    return positionSymbol === symbol && volume > 0;
-  });
+  const resolvedPosId = trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined;
+  const position = resolvedPosId
+    ? positions.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
+    : positions.find((p: any) => {
+        const positionSymbol = p.symbolName || p.symbol;
+        const volume = Math.abs(p.volume || p.quantity || 0);
+        return positionSymbol === symbol && volume > 0;
+      });
   if (!position) return;
 
   const positionId = position.positionId || position.id;
@@ -1986,7 +1999,7 @@ const monitorTrade = async (
 
       if (trade.status === 'pending' && !isSimulation && ctraderClient) {
         t0 = Date.now();
-        await promotePendingIfOpenPositionVisible(trade, db, ctraderClient, cachedPositions);
+        await promotePendingIfOpenPositionVisible(trade, db, ctraderClient, cachedPositions, preResolvedPositionIds);
         timings.pendingPositionCheck = Date.now() - t0;
       }
     }
@@ -2051,7 +2064,8 @@ const monitorTrade = async (
               ctraderClient,
               isSimulation,
               priceProvider,
-              cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined
+              cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined,
+              preResolvedPositionIds
             );
             timings.checkEntryFilledFast = Date.now() - t0;
             pendingEntryFillAttempted = true;
@@ -2090,7 +2104,8 @@ const monitorTrade = async (
         ctraderClient,
         isSimulation,
         priceProvider,
-        cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined
+        cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined,
+        preResolvedPositionIds
       );
       timings.checkEntryFilled = Date.now() - t0;
       logger.debug('cTrader entry fill check result', {
