@@ -37,6 +37,9 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * Format 6 (single-line, space-separated entry zone):
  * #XAUUSD BUY 4450 4445 SL 4440 TP 4455 …
  *
+ * Format 7 (single-line):
+ * $GOLD BUYING NOW ENTRIES:4416__4410 STOPLOSS 4404 TP 4420 …
+ *
  * Entry from two prices: long → min, short → max. Falls back to ctraderGoldParser
  * when FTG patterns do not match.
  */
@@ -86,6 +89,19 @@ const extractEntryAndSide = (
     return { signalType, entryPrice: entryZone(signalType, a, b) };
   }
 
+  m = t.match(/\$?GOLD\s+(buying|selling)\s+now\b/i);
+  if (m) {
+    const signalType = m[1].toLowerCase() === 'buying' ? 'long' : 'short';
+    const entries = t.match(/ENTRIES:\s*([\d.]+)__([\d.]+)/i);
+    if (entries) {
+      const a = parseFloat(entries[1]);
+      const b = parseFloat(entries[2]);
+      if (!isNaN(a) && !isNaN(b) && a > 0 && b > 0) {
+        return { signalType, entryPrice: entryZone(signalType, a, b) };
+      }
+    }
+  }
+
   if (/\$?GOLD\s+(buy|sell)\s+now\b/im.test(t)) {
     const sideMatch = t.match(/\$?GOLD\s+(buy|sell)\s+now/im);
     if (!sideMatch) return null;
@@ -118,7 +134,12 @@ const extractEntryAndSide = (
 
 const extractStopLoss = (content: string): number | undefined => {
   for (const line of content.split(/\r?\n/)) {
-    const m = line.match(/\bSL\s*\*?\s*:?\s*([\d.]+)/i);
+    let m = line.match(/\bSTOPLOSS\s+([\d.]+)/i);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!isNaN(v) && v > 0) return v;
+    }
+    m = line.match(/\bSL\s*\*?\s*:?\s*([\d.]+)/i);
     if (m) {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) return v;
