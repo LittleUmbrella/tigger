@@ -16,10 +16,18 @@ const GOLD_FAMILY_ALIASES = new Set(['GOLD', 'XAU', 'XAUT', 'XAUUSD']);
 /**
  * Map parser-extracted asset or pair tokens to canonical cTrader symbols.
  * Gold-style aliases (gold, XAU, XAUT, XAUUSD) → XAUUSD.
+ * Combined labels like GOLD/XAUUSD or #GOLD/XAUUSD → XAUUSD.
  * Any other token (e.g. EURNZD, EURUSD) is trimmed and uppercased, unchanged.
  */
 export function normalizeAssetAliasToCTraderPair(raw: string): string {
-  const u = raw.trim().replace(/\s+/g, '').toUpperCase();
+  const u = raw
+    .trim()
+    .replace(/\s+/g, '')
+    .replace(/^[#$]+/, '')
+    .toUpperCase();
+  if (u === 'GOLD/XAUUSD') {
+    return 'XAUUSD';
+  }
   if (GOLD_FAMILY_ALIASES.has(u)) {
     return 'XAUUSD';
   }

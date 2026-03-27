@@ -10,20 +10,29 @@ $ARGUMENTS
 
 Use `$ARGUMENTS` as an optional parser base name or slug (e.g. `my_gold_signals`). If empty, derive a short name from the conversation.
 
+### Optional: `data/channels.md`
+
+When the slug or channel name appears in **`data/channels.md`**, you **should** use it to resolve **channel id** (🆔 ID) and to double-check you have the right channel. For **access hash**, never paste the raw value into `config.json`; the user still configures it via an **env var name** (you only put the **name** in `config.json`, same as other harvesters). You may **propose** an env var name that matches repo conventions (e.g. `TG_ACCESS_HASH_FTG` alongside `TG_ACCESS_HASH_DGF`).
+
+**Do not treat `data/channels.md` as permission to implement.** Filling (1)–(2) from that file **does not** replace **(3) formats** below.
+
 ## Required prompts (stop and ask if missing)
 
-Before writing files, you **must** have all of the following from the user (in this chat or in `$ARGUMENTS`):
+Before writing files, you **must** have all of the following from the user (in this chat or in `$ARGUMENTS`), except where noted:
 
-1. **Channel id** — The Telegram channel id string used in `config.json` (e.g. `2385521106`). Must match the channel the harvester will read from.
-2. **Telegram accessHash** — The **environment variable name** for the channel access hash (e.g. `TG_ACCESS_HASH_MY_SIGNALS`), not the secret value. Harvesters use `envVarNames.accessHash` pointing at this name, with `apiId` typically `TG_API_ID` like `ctrader_gold_harvester`.
+1. **Channel id** — The Telegram channel id string used in `config.json` (e.g. `2385521106`). Must match the channel the harvester will read from. May be taken from `data/channels.md` when unambiguous; if unsure, ask.
+2. **Telegram accessHash** — The **environment variable name** for the channel access hash (e.g. `TG_ACCESS_HASH_MY_SIGNALS`), not the secret value. Harvesters use `envVarNames.accessHash` pointing at this name, with `apiId` typically `TG_API_ID` like `ctrader_gold_harvester`. May be **proposed** from the slug (e.g. `TG_ACCESS_HASH_FTG`); confirm if the user uses a different naming scheme.
 3. **Formats to parse** — Collected as below; do not treat a single message as complete unless the user says so.
 
-If any of (1) or (2) are missing, ask concise follow-up questions; do not invent credentials or channel ids.
+If (1) or (2) are missing and not resolvable from `data/channels.md` (or the user’s message), ask concise follow-up questions; do not invent channel ids.
+
+**Formats are not optional:** You **must not** skip the format workflow by assuming messages match `ctrader_gold`, `ctrader_dgf`, or another parser, **unless** the user **explicitly** states that only those layouts apply **and** ends the list (e.g. “same formats as ctrader_gold only” + `done`). Delegating to another parser in code without that explicit confirmation is wrong for this command.
 
 ### Formats: keep asking until the user is done
 
 Do **not** implement or edit code until the user has **finished listing all formats** they want supported.
 
+- **Shortcut (explicit only):** If the user says their messages match **only** an existing parser’s documented formats (e.g. “same as `ctraderGoldParser` header, no other layouts”) **and** clearly ends with `done` / equivalent, treat that as the full format spec—still document that choice in the new parser’s file header so it is auditable.
 - After the user gives **each** format (examples and any notes), reply with a **short acknowledgment** (e.g. “Recorded as Format N”) and ask again: **“Send another format example, or say you’re done (e.g. `done`, `no more formats`, `that’s all`, `finished`).”**
 - **Accept as “done”** clear signals such as: `done`, `no more`, `no more formats`, `that’s all`, `finished`, `none left`, `stop`, or equivalent. If unsure, ask once: “Any more formats, or proceed with implementation?”
 - **Accumulate** every example into a numbered list in your own notes so nothing is dropped; the final parser file header comment should document **all** formats (same spirit as “Format 1 / 2 / 3” in `src/parsers/ctraderGoldParser.ts`).
