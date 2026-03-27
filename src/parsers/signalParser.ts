@@ -16,6 +16,7 @@ import { starFormatParser } from './starFormatParser.js';
 import { ctraderGoldParser } from './ctraderGoldParser.js';
 import { ctraderDgfParser } from './ctraderDgfParser.js';
 import { ctraderFtgParser } from './ctraderFtgParser.js';
+import { ctraderKlhParser } from './ctraderKlhParser.js';
 import { stevenParser } from './stevenParser.js';
 import { fxcmChartParser } from './fxcmChartParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
@@ -34,6 +35,7 @@ registerParser('star_format', starFormatParser);
 registerParser('ctrader_gold', ctraderGoldParser);
 registerParser('ctrader_dgf', ctraderDgfParser);
 registerParser('ctrader_ftg', ctraderFtgParser);
+registerParser('ctrader_klh', ctraderKlhParser);
 registerParser('steven', stevenParser);
 registerParser('fxcm_chart', fxcmChartParser);
 
