@@ -86,6 +86,26 @@ const resolveTpTokensWithOpen = (tokens: TpToken[], avgStep: number): number[] =
   return result;
 };
 
+/** Parse SL from text starting at `SL` through end of line (avoids conflating entry `@` with SL `@`). */
+const parseStopLossFromSlClause = (slClause: string): number | undefined => {
+  const slAfterAt = slClause.match(/@\s*([\d.]+)/);
+  if (slAfterAt) {
+    const v = parseFloat(slAfterAt[1]);
+    if (!isNaN(v) && v > 0) return v;
+  }
+  const solidBreak = slClause.match(/\bsolid\s+break\s+([\d.]+)/i);
+  if (solidBreak) {
+    const v = parseFloat(solidBreak[1]);
+    if (!isNaN(v) && v > 0) return v;
+  }
+  const slPlain = slClause.match(/SL[\s:]+([\d.]+)/i);
+  if (slPlain) {
+    const v = parseFloat(slPlain[1]);
+    if (!isNaN(v) && v > 0) return v;
+  }
+  return undefined;
+};
+
 /**
  * Parser for DGF-style cTrader signals (channel ctrader_dgf): gold/XAU and
  * forex pairs written as Buy/Sell NOW #SYMBOL @ entry. "gold" / XAU family maps to XAUUSD;
@@ -95,6 +115,7 @@ const resolveTpTokensWithOpen = (tokens: TpToken[], avgStep: number): number[] =
  * XAUUSD BUY NOW @ 4450
  *
  * SL: Solid break @ 4442
+ * SL: Solid break 4442
  *
  * TP: 4458
  * TP: 4466
@@ -202,17 +223,9 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
       }
     }
 
-    let stopLoss: number | undefined;
-    const slLine = lines.find((line) => /^\s*SL[\s:]/i.test(line));
-    if (slLine) {
-      const slAfterAt = slLine.match(/@\s*([\d.]+)/);
-      if (slAfterAt) {
-        stopLoss = parseFloat(slAfterAt[1]);
-      } else {
-        const slPlain = slLine.match(/SL[\s:]+([\d.]+)/i);
-        if (slPlain) stopLoss = parseFloat(slPlain[1]);
-      }
-    }
+    const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
+    const slClause = slClauseMatch?.[0] ?? '';
+    const stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
     if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return null;
 
     const tpTokens = parseTpTokens(normalizedContent);
