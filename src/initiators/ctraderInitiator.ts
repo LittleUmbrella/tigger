@@ -359,26 +359,31 @@ const executeTradeForAccount = async (
       }
     }
     
-    // Check for existing open positions (skip if forcePlaceTrade - e.g. manual retry with stale DB)
+    // Check for existing open cTrader position on this channel for the same symbol (skip if forcePlaceTrade)
+    // Other channels may hold the same symbol; Bybit/evaluation still use global per-symbol dedup.
     if (!context.forcePlaceTrade) {
       const existingTrades = await db.getActiveTrades();
-      const existingTradeForSymbol = existingTrades.find(t => 
-        t.trading_pair === order.tradingPair && 
-        (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
+      const existingTradeForSymbol = existingTrades.find(
+        (t) =>
+          t.exchange === 'ctrader' &&
+          t.channel === channel &&
+          t.trading_pair === order.tradingPair &&
+          (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
       );
-      
+
       if (existingTradeForSymbol) {
-      logger.info('Skipping trade - existing open position for symbol', {
-        channel,
-        messageId: message.message_id,
-        symbol,
-        tradingPair: order.tradingPair,
-        signalType: order.signalType,
-        accountName: accountName || 'default',
-        existingTradeId: existingTradeForSymbol.id,
-        existingTradeStatus: existingTradeForSymbol.status
-      });
-      await db.markMessageParsed(message.id);
+        logger.info('Skipping trade - existing open cTrader position for symbol on this channel', {
+          channel,
+          messageId: message.message_id,
+          symbol,
+          tradingPair: order.tradingPair,
+          signalType: order.signalType,
+          accountName: accountName || 'default',
+          existingTradeId: existingTradeForSymbol.id,
+          existingTradeStatus: existingTradeForSymbol.status,
+          existingTradeChannel: existingTradeForSymbol.channel
+        });
+        await db.markMessageParsed(message.id);
         return;
       }
     }
