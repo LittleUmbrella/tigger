@@ -571,7 +571,18 @@ async function recalculateQuantitiesHistorically(
 
     // Use baseLeverage as default if leverage is not specified
     const effectiveLeverage = trade.leverage > 0 ? trade.leverage : (baseLeverage || 1);
-    
+
+    const slPriceDiff = Math.abs(trade.entry_price - trade.stop_loss);
+    if (!isFinite(slPriceDiff) || slPriceDiff === 0) {
+      logger.warn('Skipping quantity recalculation - entry and stop loss are identical or invalid', {
+        tradeId: trade.id,
+        entryPrice: trade.entry_price,
+        stopLoss: trade.stop_loss
+      });
+      skippedCount++;
+      continue;
+    }
+
     const positionSize = calculatePositionSize(
       balanceAtCreation,
       trade.risk_percentage,
