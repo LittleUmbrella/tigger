@@ -157,15 +157,15 @@ const extractMarketDirectionOnly = (content: string): { signalType: 'long' | 'sh
   const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   for (const line of lines) {
     if (/^\bSL\b/i.test(line) || /^TP/i.test(line) || /^\bSTOPLOSS\b/i.test(line)) continue;
-    if (/ENTRIES:/i.test(line)) continue;
 
+    // Symbol + side may share a line with ENTRIES:__ (human zone), STOPLOSS, TPs — not end-anchored.
     let m = line.match(
-      /^#?\$?\s*(?:GOLD\/XAUUSD|GOLD|XAUUSD|XAU|XAUT)\s+(buy|sell)(?:\s+now)?\s*$/i,
+      /^#?\$?\s*(?:GOLD\/XAUUSD|GOLD|XAUUSD|XAU|XAUT)\s+(buy|sell)(?:\s+now)?\b/i,
     );
     if (m) {
       return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
     }
-    m = line.match(/\bXAUUSD\s+(buy|sell)(?:\s+now)?\s*$/i);
+    m = line.match(/\bXAUUSD\s+(buy|sell)(?:\s+now)?\b/i);
     if (m) {
       return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
     }

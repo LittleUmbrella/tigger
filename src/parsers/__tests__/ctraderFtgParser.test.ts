@@ -41,6 +41,18 @@ TP 4498`;
     expect(order!.takeProfits).toEqual([4494, 4498]);
   });
 
+  it('parses single-line #XAUUSD BUY NOW ENTRIES:a__b STOPLOSS + TPs (market)', () => {
+    const msg =
+      '#XAUUSD BUY NOW ENTRIES:4488__4480 STOPLOSS 4474 TP 4494 TP 4498 TP 4502 TP 4510 TP 4520';
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4474);
+    expect(order!.takeProfits).toEqual([4494, 4498, 4502, 4510, 4520]);
+  });
+
   it('parses Format 8: symbol + BUY/SELL without entry, SL + TP (market)', () => {
     const msg = `#XAUUSD
 
