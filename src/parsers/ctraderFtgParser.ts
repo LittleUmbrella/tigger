@@ -40,6 +40,14 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * Format 7 (single-line):
  * $GOLD BUYING NOW ENTRIES:4416__4410 STOPLOSS 4404 TP 4420 …
  *
+ * Format 8 (market — no entry price; SL + TP required):
+ * #XAUUSD
+ * BUY
+ * SL: 4534.72
+ * TP: 4608.96
+ * (Also: #XAUUSD BUY on one line, or GOLD BUY NOW with no slash entry line.)
+ * #XAUUSD BUY NOW may include ENTRIES:a__b for humans; it is still a market order (only GOLD BUYING|SELLING NOW uses ENTRIES for entry).
+ *
  * Entry from two prices: long → min, short → max. Falls back to ctraderGoldParser
  * when FTG patterns do not match.
  */
@@ -132,6 +140,31 @@ const extractEntryAndSide = (
   return null;
 };
 
+/** BUY/SELL (optionally NOW) with no entry price on that line — market order. */
+const extractMarketDirectionOnly = (content: string): { signalType: 'long' | 'short' } | null => {
+  const lines = content.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  for (const line of lines) {
+    if (/^\bSL\b/i.test(line) || /^TP/i.test(line) || /^\bSTOPLOSS\b/i.test(line)) continue;
+    if (/ENTRIES:/i.test(line)) continue;
+
+    let m = line.match(
+      /^#?\$?\s*(?:GOLD\/XAUUSD|GOLD|XAUUSD|XAU|XAUT)\s+(buy|sell)(?:\s+now)?\s*$/i,
+    );
+    if (m) {
+      return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
+    }
+    m = line.match(/\bXAUUSD\s+(buy|sell)(?:\s+now)?\s*$/i);
+    if (m) {
+      return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
+    }
+    m = line.match(/^(buy|sell)(?:\s+now)?\s*$/i);
+    if (m) {
+      return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
+    }
+  }
+  return null;
+};
+
 const extractStopLoss = (content: string): number | undefined => {
   for (const line of content.split(/\r?\n/)) {
     let m = line.match(/\bSTOPLOSS\s+([\d.]+)/i);
@@ -154,7 +187,14 @@ const extractTakeProfits = (content: string): number[] => {
     const trimmed = line.trim();
     if (!/^TP/i.test(trimmed)) continue;
 
-    let m = trimmed.match(/^TP\s*\d+\s*:\s*([\d.]+)/i);
+    let m = trimmed.match(/^TP\s*:\s*([\d.]+)/i);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!isNaN(v) && v > 0) tps.push(v);
+      continue;
+    }
+
+    m = trimmed.match(/^TP\s*\d+\s*:\s*([\d.]+)/i);
     if (m) {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) tps.push(v);
@@ -194,8 +234,12 @@ export const ctraderFtgParser = (content: string, options?: ParserOptions): Pars
     const tradingPair = resolveFtgTradingPair(normalizedContent);
     if (!tradingPair) return ctraderGoldParser(content, options);
 
-    const entrySide = extractEntryAndSide(normalizedContent);
-    if (!entrySide) return ctraderGoldParser(content, options);
+    const pricedEntry = extractEntryAndSide(normalizedContent);
+    const marketDir = pricedEntry ? null : extractMarketDirectionOnly(normalizedContent);
+    if (!pricedEntry && !marketDir) return ctraderGoldParser(content, options);
+
+    const signalType = pricedEntry ? pricedEntry.signalType : marketDir!.signalType;
+    const entryPrice = pricedEntry?.entryPrice;
 
     const stopLoss = extractStopLoss(normalizedContent);
     if (stopLoss === undefined) return ctraderGoldParser(content, options);
@@ -204,24 +248,24 @@ export const ctraderFtgParser = (content: string, options?: ParserOptions): Pars
     if (takeProfitsRaw.length === 0) return ctraderGoldParser(content, options);
 
     const takeProfits = [...takeProfitsRaw];
-    if (entrySide.signalType === 'long') {
+    if (signalType === 'long') {
       takeProfits.sort((a, b) => a - b);
     } else {
       takeProfits.sort((a, b) => b - a);
     }
 
-    const deduplicatedTPs = deduplicateTakeProfits(takeProfits, entrySide.signalType);
+    const deduplicatedTPs = deduplicateTakeProfits(takeProfits, signalType);
     if (deduplicatedTPs.length === 0) return ctraderGoldParser(content, options);
 
     const leverage = 20;
 
     const parsedOrder: ParsedOrder = {
       tradingPair,
-      entryPrice: entrySide.entryPrice,
+      entryPrice,
       stopLoss,
       takeProfits: deduplicatedTPs,
       leverage,
-      signalType: entrySide.signalType,
+      signalType,
     };
 
     if (!validateParsedOrder(parsedOrder, { message: content })) {

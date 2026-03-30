@@ -23,4 +23,48 @@ describe('ctraderFtgParser', () => {
     expect(order!.entryPrice).toBe(2655);
     expect(order!.stopLoss).toBe(2660);
   });
+
+  it('treats #XAUUSD BUY NOW + ENTRIES as market (ENTRIES ignored for entry; GOLD still uses ENTRIES)', () => {
+    const msg = `#XAUUSD BUY NOW
+
+ENTRIES:4488__4480
+
+STOPLOSS 4474
+
+TP 4494
+TP 4498`;
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.signalType).toBe('long');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4474);
+    expect(order!.takeProfits).toEqual([4494, 4498]);
+  });
+
+  it('parses Format 8: symbol + BUY/SELL without entry, SL + TP (market)', () => {
+    const msg = `#XAUUSD
+
+BUY
+
+SL: 4534.72
+
+TP: 4608.96`;
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4534.72);
+    expect(order!.takeProfits).toEqual([4608.96]);
+  });
+
+  it('parses Format 8: #XAUUSD BUY one line, SL/TP', () => {
+    const msg = `#XAUUSD BUY
+SL: 4500
+TP: 4600`;
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.signalType).toBe('long');
+  });
 });
