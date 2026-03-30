@@ -14,6 +14,32 @@ describe('ctraderDgfParser', () => {
     expect(order!.takeProfits).toEqual([4430, 4422]);
   });
 
+  it('parses Format 5 forex with # before symbol', () => {
+    const msg = `Buy NOW #EURNZD @ 1.99376
+
+SL @ 1.98373
+
+TP @ 2.01364`;
+    const order = ctraderDgfParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('EURNZD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.entryPrice).toBe(1.99376);
+    expect(order!.stopLoss).toBe(1.98373);
+    expect(order!.takeProfits).toEqual([2.01364]);
+  });
+
+  it('parses Format 5 forex single-line without # before symbol', () => {
+    const msg = 'Buy NOW EURNZD @ 2.00467 SL @ 1.99465 TP @ 2.02456';
+    const order = ctraderDgfParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('EURNZD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.entryPrice).toBe(2.00467);
+    expect(order!.stopLoss).toBe(1.99465);
+    expect(order!.takeProfits).toEqual([2.02456]);
+  });
+
   it('still parses multi-line Solid break @ price', () => {
     const msg = `XAUUSD BUY NOW @ 4450
 

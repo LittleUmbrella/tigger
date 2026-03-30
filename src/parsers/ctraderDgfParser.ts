@@ -108,8 +108,8 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
 
 /**
  * Parser for DGF-style cTrader signals (channel ctrader_dgf): gold/XAU and
- * forex pairs written as Buy/Sell NOW #SYMBOL @ entry. "gold" / XAU family maps to XAUUSD;
- * other #symbols (e.g. EURNZD) are left unchanged.
+ * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
+ * other symbols (e.g. EURNZD) are left unchanged.
  *
  * Format 1:
  * XAUUSD BUY NOW @ 4450
@@ -152,8 +152,9 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
  *
  * Entry range A+B: use the price after "+" (here 4350), analogous to the price after "-" in Format 3.
  *
- * Format 5 (forex / any #symbol):
+ * Format 5 (forex / any symbol; # before pair optional):
  * Buy NOW #EURNZD @ 1.99376
+ * Buy NOW EURNZD @ 2.00467 SL @ 1.99465 TP @ 2.02456
  *
  * SL @ 1.98373
  *
@@ -166,7 +167,7 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
     const firstLine = lines[0] ?? '';
 
     const hashNowPair = firstLine.match(
-      /^\s*(buy|sell)\s+now\s+#([A-Za-z0-9]+)\s+@\s*([\d.]+)/i,
+      /^\s*(buy|sell)\s+now\s+#?([A-Za-z0-9]+)\s+@\s*([\d.]+)/i,
     );
 
     const sideFirst = firstLine.match(
