@@ -48,6 +48,10 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * (Also: #XAUUSD BUY on one line, or GOLD BUY NOW with no slash entry line.)
  * #XAUUSD BUY NOW may include ENTRIES:a__b for humans; it is still a market order (only GOLD BUYING|SELLING NOW uses ENTRIES for entry).
  *
+ * Format 9 (single-line — Format 3 compacted onto one line; **market order**):
+ * $GOLD SELL NOW 📉4536/4539📉 TP¹✔️4533 TP²✔️4530 … ♨️ SL 4544
+ * The 📉a/b📉 zone is informational; entryPrice is omitted (same as Format 8 market).
+ *
  * Entry from two prices: long → min, short → max. Falls back to ctraderGoldParser
  * when FTG patterns do not match.
  */
@@ -118,7 +122,15 @@ const extractEntryAndSide = (
     for (const line of lines) {
       const s = line.trim();
       if (!s || /^\s*TP/i.test(line)) continue;
-      if (/\bSL\b/i.test(s) && /\bSL\s*\*?\s*:?\s*[\d.]+/i.test(s)) continue;
+      // Skip dedicated SL-only lines (multi-line Format 3), not combined lines that also have a/b entry.
+      const hasEntryPairOnLine = /([\d.]+)\s*\/\s*([\d.]+)/.test(s);
+      if (
+        /\bSL\b/i.test(s) &&
+        /\bSL\s*\*?\s*:?\s*[\d.]+/i.test(s) &&
+        !hasEntryPairOnLine
+      ) {
+        continue;
+      }
       const pair = s.match(/([\d.]+)\s*\/\s*([\d.]+)/);
       if (!pair) continue;
       const a = parseFloat(pair[1]);
@@ -216,14 +228,28 @@ const extractTakeProfits = (content: string): number[] => {
   }
   if (tps.length > 0) return tps;
 
-  // Single-line compact: … SL … TP 4455 TP 4458 … (line does not start with TP)
-  const inlineTpPattern = /\bTP\s*\d+\s*:\s*([\d.]+)|\bTP\s+([\d.]+)/gi;
+  // Single-line compact: … TP 4455 … or TP¹✔️4533 (¹–⁹ + ✔ optional VS U+FE0F, then price)
+  const superscripts = '\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079';
+  const inlineTpPattern = new RegExp(
+    String.raw`\bTP\s*\d+\s*:\s*([\d.]+)|\bTP\s+([\d.]+)|\bTP[${superscripts}]*\s*[\u2713\u2714]+\uFE0F?\s*([\d.]+)`,
+    'gi',
+  );
   let im: RegExpExecArray | null;
   while ((im = inlineTpPattern.exec(content)) !== null) {
-    const v = parseFloat(im[1] ?? im[2] ?? '');
+    const v = parseFloat(im[1] ?? im[2] ?? im[3] ?? '');
     if (!isNaN(v) && v > 0) tps.push(v);
   }
   return tps;
+};
+
+/** Single-line FTG (Format 9): GOLD … NOW + a/b zone + superscript TPs — market; zone is not used as limit entry. */
+const isFormat9SingleLineMarket = (t: string): boolean => {
+  const lines = t.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length !== 1) return false;
+  if (!/\$?GOLD\s+(buy|sell)\s+now\b/im.test(t)) return false;
+  if (!/([\d.]+)\s*\/\s*([\d.]+)/.test(t)) return false;
+  const superscripts = '\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079';
+  return new RegExp(`\\bTP[${superscripts}]`).test(t);
 };
 
 export const ctraderFtgParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
@@ -235,11 +261,12 @@ export const ctraderFtgParser = (content: string, options?: ParserOptions): Pars
     if (!tradingPair) return ctraderGoldParser(content, options);
 
     const pricedEntry = extractEntryAndSide(normalizedContent);
-    const marketDir = pricedEntry ? null : extractMarketDirectionOnly(normalizedContent);
+    const format9Market = isFormat9SingleLineMarket(normalizedContent);
+    const marketDir = pricedEntry && !format9Market ? null : extractMarketDirectionOnly(normalizedContent);
     if (!pricedEntry && !marketDir) return ctraderGoldParser(content, options);
 
     const signalType = pricedEntry ? pricedEntry.signalType : marketDir!.signalType;
-    const entryPrice = pricedEntry?.entryPrice;
+    const entryPrice = format9Market ? undefined : pricedEntry?.entryPrice;
 
     const stopLoss = extractStopLoss(normalizedContent);
     if (stopLoss === undefined) return ctraderGoldParser(content, options);

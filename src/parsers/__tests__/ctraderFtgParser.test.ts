@@ -67,4 +67,16 @@ TP: 4600`;
     expect(order!.entryPrice).toBeUndefined();
     expect(order!.signalType).toBe('long');
   });
+
+  it('parses Format 9: single-line GOLD SELL NOW with 📉a/b📉, TP¹✔️…, SL on same line (market)', () => {
+    const msg =
+      '$GOLD SELL NOW 📉4536/4539📉 TP¹✔️4533 TP²✔️4530 TP³✔️4527 TP⁴✔️4524 TP⁵✔️4521 TP⁶✔️4518 ♨️ SL 4544';
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4544);
+    expect(order!.takeProfits).toEqual([4533, 4530, 4527, 4524, 4521, 4518]);
+  });
 });
