@@ -3,6 +3,11 @@
  * Investigate why a trade was closed - queries Bybit API for execution/closed PnL history
  * Usage: npx tsx src/scripts/investigate_trade_close.ts 228
  * Uses trade's entry_filled_at for time range.
+ *
+ * Symbol: uses normalizeBybitSymbol (e.g. FLUX → FLUXUSDT) so getClosedPnL / getExecutionList match Bybit.
+ *
+ * Market closes: multiple rows with orderType Market and distinct orderIds mean multiple submitOrder
+ * calls (e.g. close_percentage partials). See printMarketCloseHints output below.
  */
 import dotenv from 'dotenv';
 import fs from 'fs-extra';
@@ -12,6 +17,7 @@ import { RestClientV5 } from 'bybit-api';
 import { DatabaseManager } from '../db/schema.js';
 import { BotConfig } from '../types/config.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '../..');
@@ -19,7 +25,49 @@ const envPath = path.join(projectRoot, '.env-investigation');
 if (fs.existsSync(envPath)) dotenv.config({ path: envPath });
 else dotenv.config();
 
-const normalizeSymbol = (p: string) => p.replace('/', '').toUpperCase().replace(/USDC?$/, 'USDT');
+/**
+ * Explain multiple Market closed-PnL rows (distinct orderIds = distinct API closes).
+ */
+function printMarketCloseHints(rows: any[] | undefined, tradeQty: number | null | undefined): void {
+  if (!rows?.length) return;
+  const markets = rows.filter((r) => getBybitField<string>(r, 'orderType', 'order_type') === 'Market');
+  if (markets.length < 2) return;
+
+  const qtys = markets.map((r) =>
+    parseFloat(
+      getBybitField<string>(r, 'closedSize', 'closed_size') ||
+        getBybitField<string>(r, 'qty', 'qty') ||
+        '0'
+    )
+  );
+  const orderIds = markets.map((r) => getBybitField<string>(r, 'orderId', 'order_id') || '');
+  const distinctIds = new Set(orderIds.filter(Boolean));
+  const allSameQty = qtys.length > 1 && qtys.every((q) => Math.abs(q - qtys[0]) < 1e-6);
+  const tq = tradeQty && tradeQty > 0 ? tradeQty : 0;
+  const pctOfTrade = tq > 0 && qtys[0] > 0 ? (qtys[0] / tq) * 100 : null;
+
+  console.log('\n=== Market close pattern (trace in codebase / logs) ===');
+  console.log(
+    `Bybit shows ${markets.length} Market close row(s) with ${distinctIds.size} distinct orderId(s).`
+  );
+  if (distinctIds.size === markets.length && markets.length > 1) {
+    console.log(
+      'Each row has a different orderId → separate submitOrder calls on the exchange (not one parent order split into child fills).'
+    );
+  }
+  if (allSameQty && pctOfTrade != null && Math.abs(pctOfTrade - 20) < 2) {
+    console.log(
+      `Each leg ~${qtys[0]} contracts (~${pctOfTrade.toFixed(1)}% of trade qty ${tq}) — matches repeated partial closes (e.g. close_percentage) or repeated manual partials.`
+    );
+  }
+  console.log('Bot code paths that submit Market reduceOnly on Bybit:');
+  console.log('  - src/managers/closePercentageManager.ts — partial % per management command');
+  console.log('  - src/managers/positionUtils.ts closePosition — typically one full close');
+  console.log('  - src/managers/closeAllTradesManager.ts — one closePosition per active trade');
+  console.log('  - src/initiators/bybitInitiator.ts — emergency close when TPs invalid vs fill (single order)');
+  console.log('  - Same API keys in UI / another client → also Market rows here.');
+  console.log('Logs: grep Loggly for "Partial position closed", "close_percentage", "Closing all active", messageId + channel.');
+}
 
 async function getBybitClient(accountName: string, config: BotConfig | null): Promise<RestClientV5 | null> {
   const account = config?.accounts?.find((a) => a.name === accountName);
@@ -61,7 +109,7 @@ async function main() {
     process.exit(1);
   }
 
-  const symbol = normalizeSymbol(trade.trading_pair);
+  const symbol = normalizeBybitSymbol(trade.trading_pair);
   const orders = await db.getOrdersByTradeId(tradeId);
   const tpOrders = orders.filter((o) => o.order_type === 'take_profit' && o.order_id);
 
@@ -82,10 +130,12 @@ async function main() {
       ...(endMs > 0 && { endTime: endMs }),
     });
     if (closedPnL.retCode === 0 && closedPnL.result?.list?.length) {
-      const list = (closedPnL.result.list as any[])
+      const rawList = (closedPnL.result.list as any[]) || [];
+      const list = rawList
         .filter((r) => parseFloat(r.createdTime || '0') >= entryTime)
         .sort((a, b) => parseFloat(a.updatedTime || '0') - parseFloat(b.updatedTime || '0'));
-      const entryTolerance = trade.entry_price * 0.02;
+      // Widen vs strict 2%: limit fills often differ from DB entry_price (signal price).
+      const entryTolerance = trade.entry_price * 0.05;
       const nearEntry = (p: number) => Math.abs(p - trade.entry_price) < entryTolerance;
       const relevant = list.filter(
         (r) => nearEntry(parseFloat(r.avgEntryPrice || '0')) || list.length <= 10
@@ -102,11 +152,15 @@ async function main() {
           execType: getBybitField<string>(r, 'execType', 'exec_type'),
           side: getBybitField<string>(r, 'side'),
           closedSize: getBybitField<string>(r, 'closedSize', 'closed_size'),
+          avgEntryPrice: getBybitField<string>(r, 'avgEntryPrice', 'avg_entry_price'),
           avgExitPrice: getBybitField<string>(r, 'avgExitPrice', 'avg_exit_price'),
+          closedPnl: getBybitField<string>(r, 'closedPnl', 'closed_pnl'),
           createdTime: r.createdTime ? new Date(parseInt(r.createdTime, 10)).toISOString() : null,
           ourOrder: ourOrder ? 'YES' : '*** EXTERNAL ***',
         });
       }
+      // Hints use full API list: one leg can have createdTime slightly before entry_filled_at but still belong to this close.
+      printMarketCloseHints(rawList, trade.quantity);
     } else {
       console.log('Closed PnL: no results or error', (closedPnL as any).retMsg);
     }

@@ -31,6 +31,7 @@ import {
 
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { getTakeProfitLevelCount, resolveBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 
 // This monitor uses Bybit Futures API (category: 'linear' for perpetual futures)
 
@@ -43,21 +44,6 @@ const BREAKEVEN_TRIGGER_LEAD_TICKS = 5;
  * Backup SL is M ticks worse than BE than the trigger lead, so the limit has room to fill first.
  */
 const BREAKEVEN_SL_BACKUP_WORSE_TICKS = 12;
-
-/**
- * Normalize trading pair symbol for Bybit API calls
- * Converts "XAUT" or "XAUT/USDT" to "XAUTUSDT"
- */
-const normalizeBybitSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  
-  // If symbol doesn't end with USDT or USDC, add USDT
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  
-  return normalized;
-};
 
 type TickerDiagnostic = {
   symbol: string;

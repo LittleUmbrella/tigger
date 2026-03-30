@@ -7,6 +7,7 @@
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../../utils/logger.js';
 import { getBybitField } from '../../utils/bybitFieldHelper.js';
+import { normalizeBybitSymbol } from '../../utils/normalizeBybitSymbol.js';
 import { serializeErrorForLog } from '../../utils/errorUtils.js';
 
 export interface OrderDetails {
@@ -26,17 +27,6 @@ export interface OrderDetails {
   updatedTime?: string;
   error?: string;
 }
-
-/**
- * Normalize trading pair symbol for Bybit API calls
- */
-const normalizeBybitSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  return normalized;
-};
 
 /**
  * Query Bybit for order details by order ID

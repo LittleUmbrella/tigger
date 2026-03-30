@@ -9,26 +9,12 @@ import { DatabaseManager, Trade, Order } from '../db/schema.js';
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../utils/logger.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import { BotConfig, AccountConfig } from '../types/config.js';
 import fs from 'fs-extra';
 import dotenv from 'dotenv';
 
 dotenv.config();
-
-/**
- * Normalize trading pair symbol for Bybit API calls
- * Converts "XAUT" or "XAUT/USDT" to "XAUTUSDT"
- */
-const normalizeBybitSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  
-  // If symbol doesn't end with USDT or USDC, add USDT
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  
-  return normalized;
-};
 
 async function troubleshootTrade(tradeId: number) {
   logger.info('Starting trade troubleshooting', { tradeId });

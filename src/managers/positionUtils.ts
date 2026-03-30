@@ -6,6 +6,7 @@ import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 
 /**
  * Helper function to close a position
@@ -49,7 +50,7 @@ export async function closePosition(
       throw error;
     }
   } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
-    const symbol = trade.trading_pair.replace('/', '');
+    const symbol = normalizeBybitSymbol(trade.trading_pair);
     
     // Get current position info
     const positions = await withBybitRateLimitRetry(() =>

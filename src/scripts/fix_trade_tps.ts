@@ -9,23 +9,13 @@ import { DatabaseManager, Trade } from '../db/schema.js';
 import { RestClientV5 } from 'bybit-api';
 import { logger } from '../utils/logger.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import { BotConfig, AccountConfig } from '../types/config.js';
 import fs from 'fs-extra';
 import dotenv from 'dotenv';
 import dayjs from 'dayjs';
 
 dotenv.config();
-
-/**
- * Normalize trading pair symbol for Bybit API calls
- */
-const normalizeBybitSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  return normalized;
-};
 
 async function fixTradeTPs(tradeId: number, accountName?: string) {
   logger.info('Starting trade TP fix', { tradeId, accountName });

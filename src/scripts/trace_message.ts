@@ -25,6 +25,7 @@ import dotenv from 'dotenv';
 import { parseMessage } from '../parsers/signalParser.js';
 import { parseManagementCommand } from '../managers/index.js';
 import { validateBybitSymbol } from '../initiators/symbolValidator.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import dayjs from 'dayjs';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -64,17 +65,6 @@ interface TraceResult {
   failurePoint?: string;
   recommendations: string[];
 }
-
-/**
- * Normalize trading pair symbol for Bybit API calls
- */
-const normalizeBybitSymbol = (tradingPair: string): string => {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  return normalized;
-};
 
 /**
  * Get account credentials for a trade
@@ -583,6 +573,12 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
 
           let allTPOrdersFound = true;
           for (const order of orders) {
+            // Bybit: SL is set via setTradingStop on the position (with entry / monitor), not as a
+            // standalone order — the DB row is tracking-only and has no exchange order_id by design.
+            if (order.order_type === 'stop_loss' && !order.order_id) {
+              continue;
+            }
+
             if (!order.order_id) {
               allTPOrdersFound = false;
               recommendations.push(`Trade ${i + 1}: ${order.order_type} order (TP ${order.tp_index || 'N/A'}) was never created`);

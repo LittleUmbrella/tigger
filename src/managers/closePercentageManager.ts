@@ -5,6 +5,7 @@ import { RestClientV5 } from 'bybit-api';
 import { extractReplyContext, findTradesByContext } from './replyContextExtractor.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import { Trade, DatabaseManager } from '../db/schema.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
@@ -173,8 +174,8 @@ async function closePercentageOfPosition(
       });
     }
   } else if (trade.exchange === 'bybit' && bybitClient && trade.position_id) {
-    const symbol = trade.trading_pair.replace('/', '');
-    
+    const symbol = normalizeBybitSymbol(trade.trading_pair);
+
     const positions = await bybitClient.getPositionInfo({ category: 'linear', symbol });
 
     if (positions.retCode === 0 && positions.result && positions.result.list) {

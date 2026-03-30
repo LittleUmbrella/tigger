@@ -25,3 +25,8 @@ Always structure your response as:
 2. The actual code changes / diffs.
 
 "Use functional and declarative programming patterns; avoid classes in Node.js. Prefer iteration and modularization over code duplication. Use descriptive variable names."
+
+# 5. INVESTIGATION / MESSAGE TRACE (Bybit)
+When tracing trades or interpreting `orders` rows: on Bybit, stop loss is applied at the **position** via `setTradingStop` (initiator/monitor), not as a separate limit/stop order ID. A `stop_loss` row with `order_id` null in the DB is **expected** and does **not** mean SL was missing if the position opened — do not treat that alone as a failure.
+
+For **Bybit REST** calls (`getClosedPnL`, `getExecutionList`, `getPositionInfo`, etc.), always normalize the DB trading pair with `normalizeBybitSymbol` from `src/utils/normalizeBybitSymbol.ts` (e.g. `FLUX` → `FLUXUSDT`). Do not use only `trading_pair.replace('/', '')`.

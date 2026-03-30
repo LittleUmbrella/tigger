@@ -17,14 +17,7 @@ import { RestClientV5 } from 'bybit-api';
 import fs from 'fs-extra';
 import { BotConfig } from '../../types/config.js';
 import { Order } from '../../db/schema.js';
-
-function normalizeBybitSymbol(tradingPair: string): string {
-  let normalized = tradingPair.replace('/', '').toUpperCase();
-  if (!normalized.endsWith('USDT') && !normalized.endsWith('USDC')) {
-    normalized = `${normalized}USDT`;
-  }
-  return normalized;
-}
+import { normalizeBybitSymbol } from '../../utils/normalizeBybitSymbol.js';
 
 async function getAccountCredentials(
   accountName: string | undefined,
