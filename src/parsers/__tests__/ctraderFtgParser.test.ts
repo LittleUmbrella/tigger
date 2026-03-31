@@ -9,7 +9,7 @@ describe('ctraderFtgParser', () => {
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('long');
-    expect(order!.entryPrice).toBe(4410);
+    expect(order!.entryPrice).toBeUndefined();
     expect(order!.stopLoss).toBe(4404);
     expect(order!.takeProfits).toEqual([4420, 4425, 4430, 4435, 4440, 4450]);
   });
@@ -20,7 +20,7 @@ describe('ctraderFtgParser', () => {
     const order = ctraderFtgParser(msg);
     expect(order).not.toBeNull();
     expect(order!.signalType).toBe('short');
-    expect(order!.entryPrice).toBe(2655);
+    expect(order!.entryPrice).toBeUndefined();
     expect(order!.stopLoss).toBe(2660);
   });
 

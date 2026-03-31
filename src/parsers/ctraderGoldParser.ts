@@ -10,8 +10,9 @@ import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js
  * Asset: gold, XAU, XAUT, or XAUUSD (case-insensitive)
  * SL/TP: space or colon separator (e.g. "SL 5184" or "SL:5184", "TP 5203" or "TP:5203")
  *
- * When "now" precedes the entry range (e.g. "gold buy Now!! - 5054"), the signal
- * is treated as a market order and the entry price range is ignored.
+ * All supported formats are treated as market orders: any @ price, dash range, or zone
+ * in the message is informational only; entryPrice is omitted so the cTrader initiator
+ * executes at market (see channel useLimitOrderForEntry).
  *
  * Format 1:
  * gold buy Now!! - 5054
@@ -49,42 +50,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     if (!buyMatch && !sellMatch) return null;
     const signalType: 'long' | 'short' = buyMatch ? 'long' : 'short';
     
-    let entryPrice: number | undefined;
     let stopLoss: number | undefined;
-    
-    // When "now" precedes the entry range, treat as market order and ignore entry price
-    const firstLine = normalizedContent.split(/\r?\n/)[0] ?? '';
-    const nowPrecedesEntry = /\bnow\b/i.test(firstLine);
-    
-    // Try Format 2 first: "gold buy Now!!@5055 - 5051"
-    // Entry price after @, value after dash might be stop loss or something else
-    // We'll use the SL line for stop loss, but extract entry from @
-    if (!nowPrecedesEntry) {
-      const format2Match = normalizedContent.match(/@\s*([\d.]+)/i);
-      if (format2Match) {
-        const entryPriceStr = format2Match[1];
-        entryPrice = parseFloat(entryPriceStr);
-        
-        if (isNaN(entryPrice) || entryPrice <= 0) {
-          return null;
-        }
-        // Stop loss will be extracted from SL line below
-      } else {
-        // Try Format 1: "gold buy Now!! - 5054"
-        // Entry price after dash on first line
-        const format1Match = normalizedContent.match(/-\s*([\d.]+)/);
-        if (format1Match) {
-          const entryPriceStr = format1Match[1];
-          entryPrice = parseFloat(entryPriceStr);
-          
-          if (isNaN(entryPrice) || entryPrice <= 0) {
-            return null;
-          }
-        } else {
-          return null; // Neither format matched
-        }
-      }
-    }
     
     // Extract stop loss - look for "SL" followed by number (case-insensitive)
     // Only extract if not already found in Format 2
@@ -132,7 +98,7 @@ export const ctraderGoldParser = (content: string, options?: ParserOptions): Par
     
     const parsedOrder: ParsedOrder = {
       tradingPair,
-      entryPrice,
+      entryPrice: undefined,
       stopLoss,
       takeProfits: deduplicatedTPs,
       leverage,

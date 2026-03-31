@@ -109,7 +109,7 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
 /**
  * Parser for DGF-style cTrader signals (channel ctrader_dgf): gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
- * other symbols (e.g. EURNZD) are left unchanged.
+ * other symbols (e.g. EURNZD) are left unchanged. ParsedOrder never includes entryPrice (market execution).
  *
  * Format 1:
  * XAUUSD BUY NOW @ 4450
@@ -159,6 +159,9 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
  * SL @ 1.98373
  *
  * TP @ 2.01364
+ *
+ * Entry prices in the message are used only to validate structure; ParsedOrder omits
+ * entryPrice so execution is always market (cTrader initiator).
  */
 export const ctraderDgfParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
@@ -176,18 +179,20 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
 
     let tradingPair: string;
     let signalType: 'long' | 'short';
-    let entryPrice: number | undefined;
+
+    const validatePositivePrice = (raw: string): boolean => {
+      const n = parseFloat(raw);
+      return !isNaN(n) && n > 0;
+    };
 
     if (hashNowPair) {
       signalType = hashNowPair[1].toLowerCase() === 'buy' ? 'long' : 'short';
       tradingPair = normalizeAssetAliasToCTraderPair(hashNowPair[2]);
-      entryPrice = parseFloat(hashNowPair[3]);
-      if (isNaN(entryPrice) || entryPrice <= 0) return null;
+      if (!validatePositivePrice(hashNowPair[3])) return null;
     } else if (sideFirst) {
       signalType = sideFirst[1].toLowerCase() === 'buy' ? 'long' : 'short';
       tradingPair = normalizeAssetAliasToCTraderPair(sideFirst[2]);
-      entryPrice = parseFloat(sideFirst[3]);
-      if (isNaN(entryPrice) || entryPrice <= 0) return null;
+      if (!validatePositivePrice(sideFirst[3])) return null;
     } else {
       const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
       if (!tradingPairMatch) return null;
@@ -201,24 +206,18 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
 
       const entryAtFirst = firstLine.match(/@\s*([\d.]+)/i);
       if (entryAtFirst) {
-        entryPrice = parseFloat(entryAtFirst[1]);
-        if (isNaN(entryPrice) || entryPrice <= 0) return null;
+        if (!validatePositivePrice(entryAtFirst[1])) return null;
       } else {
         const dashEntry = firstLine.match(/-\s*([\d.]+)/);
         if (dashEntry) {
-          entryPrice = parseFloat(dashEntry[1]);
-          if (isNaN(entryPrice) || entryPrice <= 0) return null;
+          if (!validatePositivePrice(dashEntry[1])) return null;
         } else {
           const plusRange = firstLine.match(/([\d.]+)\s*\+\s*([\d.]+)/);
           if (plusRange) {
-            entryPrice = parseFloat(plusRange[2]);
-            if (isNaN(entryPrice) || entryPrice <= 0) return null;
+            if (!validatePositivePrice(plusRange[2])) return null;
           } else {
             const nowSingle = firstLine.match(/\bnow\s+([\d.]+)/i);
-            if (nowSingle) {
-              entryPrice = parseFloat(nowSingle[1]);
-              if (isNaN(entryPrice) || entryPrice <= 0) return null;
-            }
+            if (nowSingle && !validatePositivePrice(nowSingle[1])) return null;
           }
         }
       }
@@ -267,7 +266,7 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
 
     const parsedOrder: ParsedOrder = {
       tradingPair,
-      entryPrice,
+      entryPrice: undefined,
       stopLoss,
       takeProfits: deduplicatedTPs,
       leverage,

@@ -16,13 +16,10 @@ import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js
  *
  * Symbol: optional # or $ prefix; GOLD / XAU / XAUT / XAUUSD (normalized to XAUUSD).
  * Side: BUY NOW or SELL NOW followed by entry range low/high separated by /.
- * Entry: long → min(low, high), short → max(low, high) (same convention as ctraderFtgParser).
+ * Entry range on the signal line is informational only; ParsedOrder omits entryPrice (market execution).
  * Take profits: lines starting with TP optional colon/spaces before the price.
  * Stop loss: line starting with SL, flexible spaces/colon before the price (e.g. "SL : 4530").
  */
-const entryZone = (signalType: 'long' | 'short', a: number, b: number): number =>
-  signalType === 'long' ? Math.min(a, b) : Math.max(a, b);
-
 export const ctraderKlhParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     const normalizedContent = content.trim();
@@ -30,7 +27,6 @@ export const ctraderKlhParser = (content: string, options?: ParserOptions): Pars
 
     let tradingPair: string | undefined;
     let signalType: 'long' | 'short' | undefined;
-    let entryPrice: number | undefined;
 
     const signalLineRe =
       /#?\$?\s*(GOLD|XAUUSD|XAU|XAUT)\s+(BUY|SELL)\s+NOW\s+([\d.]+)\s*\/\s*([\d.]+)/i;
@@ -43,11 +39,10 @@ export const ctraderKlhParser = (content: string, options?: ParserOptions): Pars
       const a = parseFloat(m[3]);
       const b = parseFloat(m[4]);
       if (isNaN(a) || isNaN(b) || a <= 0 || b <= 0) return null;
-      entryPrice = entryZone(signalType, a, b);
       break;
     }
 
-    if (!tradingPair || !signalType || entryPrice === undefined) return null;
+    if (!tradingPair || !signalType) return null;
 
     let stopLoss: number | undefined;
     for (const line of lines) {
@@ -85,7 +80,7 @@ export const ctraderKlhParser = (content: string, options?: ParserOptions): Pars
 
     const parsedOrder: ParsedOrder = {
       tradingPair,
-      entryPrice,
+      entryPrice: undefined,
       stopLoss,
       takeProfits: deduplicatedTPs,
       leverage,

@@ -46,14 +46,13 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * SL: 4534.72
  * TP: 4608.96
  * (Also: #XAUUSD BUY on one line, or GOLD BUY NOW with no slash entry line.)
- * #XAUUSD BUY NOW may include ENTRIES:a__b for humans; it is still a market order (only GOLD BUYING|SELLING NOW uses ENTRIES for entry).
+ * #XAUUSD BUY NOW may include ENTRIES:a__b for humans; entry zones are informational (ParsedOrder omits entryPrice).
  *
  * Format 9 (single-line — Format 3 compacted onto one line; **market order**):
  * $GOLD SELL NOW 📉4536/4539📉 TP¹✔️4533 TP²✔️4530 … ♨️ SL 4544
  * The 📉a/b📉 zone is informational; entryPrice is omitted (same as Format 8 market).
  *
- * Entry from two prices: long → min, short → max. Falls back to ctraderGoldParser
- * when FTG patterns do not match.
+ * Falls back to ctraderGoldParser when FTG patterns do not match. All successful parses omit entryPrice (market).
  */
 
 const entryZone = (signalType: 'long' | 'short', a: number, b: number): number =>
@@ -266,7 +265,7 @@ export const ctraderFtgParser = (content: string, options?: ParserOptions): Pars
     if (!pricedEntry && !marketDir) return ctraderGoldParser(content, options);
 
     const signalType = pricedEntry ? pricedEntry.signalType : marketDir!.signalType;
-    const entryPrice = format9Market ? undefined : pricedEntry?.entryPrice;
+    const entryPrice = undefined;
 
     const stopLoss = extractStopLoss(normalizedContent);
     if (stopLoss === undefined) return ctraderGoldParser(content, options);
