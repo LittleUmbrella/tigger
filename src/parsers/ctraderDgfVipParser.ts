@@ -141,78 +141,13 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
 };
 
 /**
- * Parser for DGF-style cTrader signals (channel ctrader_dgf): gold/XAU and
+ * Parser for DGF-style cTrader signals (channel dgfvip): same formats as ctrader_dgf — gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
  * other symbols (e.g. EURNZD) are left unchanged. Most formats omit entryPrice (market); Format 8 sets entryPrice (limit).
  *
- * Format 1:
- * XAUUSD BUY NOW @ 4450
- *
- * SL: Solid break @ 4442
- * SL: Solid break 4442
- *
- * TP: 4458
- * TP: 4466
- *
- * Format 2:
- * SELL XAUUSD 4455.7
- *
- * TP1: 4453.7
- * TP2: 4450.7
- * TP3: 4440.7
- *
- * SL: 4470.7
- *
- * Format 3:
- * Gold buy now 4561 - 4557
- *
- * SL: 4552
- *
- * TP: 4563
- * TP: 4565
- * …
- * TP: open
- *
- * Entry: price after the last "-" on the first line (same idea as ctrader gold " - 5054"), or a single price after "now" if there is no dash range.
- * "TP: open" is extrapolated from the mean gap between numeric TPs (or between adjacent numerics when open is between them). With only one numeric TP, open lines are ignored.
- *
- * Format 4:
- * XAUUSD SELL NOW 4345+4350
- *
- * SL 4364
- *
- * TP 4340
- * …
- *
- * Entry range A+B: use the price after "+" (here 4350), analogous to the price after "-" in Format 3.
- *
- * Format 5 (forex / any symbol; # before pair optional):
- * Buy NOW #EURNZD @ 1.99376
- * Buy NOW EURNZD @ 2.00467 SL @ 1.99465 TP @ 2.02456
- *
- * SL @ 1.98373
- *
- * TP @ 2.01364
- *
- * Entry prices in the message are used only to validate structure; ParsedOrder omits
- * entryPrice so execution is always market (cTrader initiator).
- *
- * Format 6 (symbol before side; optional emoji prefix; slash or dash entry range):
- * 🛡XAUUSD SELL 4782/4785
- * 🛡XAUUSD BUY 4718-4714
- *
- * TP¹ 4779 … / Tp1: 4728 …
- * 💣 SL 4791 / 💣Sl: 4710
- *
- * Format 7:
- * 🛡XAUUSD | BUY  4713-4718
- * TP1 ➝ 4723 / Tp 4 — 4738
- *
- * Format 8 (limit — $ prefix, long/short, RR header; Entry/SL/TP lines):
- * $XAUUSD long | +8RR
- * Entry : 4720.00 / SL : 4702.20 / TP : 4800.00
+ * Format 6 (symbol before side; optional emoji prefix; slash entry range): see ctraderDgfParser.
  */
-export const ctraderDgfParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
+export const ctraderDgfVipParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     const normalizedContent = content.trim();
     const lines = normalizedContent.split(/\r?\n/);
@@ -238,7 +173,7 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
         .filter((t): t is { kind: 'number'; value: number } => t.kind === 'number')
         .map((t) => t.value);
       if (numericTps.length === 0) {
-        logger.warn('ctrader_dgf: Format 8 — no numeric take profits; skipping message', {
+        logger.warn('dgfvip: Format 8 — no numeric take profits; skipping message', {
           preview: normalizedContent.slice(0, 200),
         });
         return null;
@@ -358,7 +293,7 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
       .map((t) => t.value);
 
     if (numericTps.length === 0) {
-      logger.warn('ctrader_dgf: no numeric take profits; skipping message', {
+      logger.warn('dgfvip: no numeric take profits; skipping message', {
         preview: normalizedContent.slice(0, 200),
       });
       return null;

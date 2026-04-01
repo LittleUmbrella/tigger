@@ -176,6 +176,9 @@ const executeTradeForAccount = async (
 ): Promise<void> => {
   const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry } = context;
 
+  /** False → real market order (relative SL/TP). True → limit at current price ("limit-at-touch"). Parsers may set order.marketExecution to force the market path. */
+  const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
+
   let ctraderClient: CTraderClient | undefined = undefined;
 
   try {
@@ -1105,10 +1108,8 @@ const executeTradeForAccount = async (
         );
       }
       try {
-        // useLimitOrderForEntry: true (default) = convert market to limit at current price (like Bybit)
-        // useLimitOrderForEntry: false = use actual market order with relative SL/TP (cTrader rejects absolute on MARKET)
-        const useLimit = useLimitOrderForEntry !== false;
-        const limitPrice = (isMarketOrder && useLimit ? currentPriceForMarketOrder : null) ?? roundedEntryPrice;
+        // useLimitAtTouch: convert market to limit at current price. order.marketExecution forces market (e.g. DGF).
+        const limitPrice = (isMarketOrder && useLimitAtTouch ? currentPriceForMarketOrder : null) ?? roundedEntryPrice;
 
         // N-trades path: one trade per TP, each order has SL+TP - works for both limit and market
         // Reuse TP quantity logic: distribute + validate (volumeStep, min/max, redistribution when slices too small)
@@ -1133,7 +1134,7 @@ const executeTradeForAccount = async (
             const ids: string[] = [];
             const quantities = validTPOrders.map((tp) => tp.quantity);
 
-            if (useLimit) {
+            if (useLimitAtTouch) {
               for (const tp of validTPOrders) {
                 const sid = await ctraderClient.placeLimitOrder({
                   symbol,
@@ -1261,7 +1262,7 @@ const executeTradeForAccount = async (
         }
 
         if (!nTradeData) {
-          if (isMarketOrder && useLimit) {
+          if (isMarketOrder && useLimitAtTouch) {
           // Convert market to limit at current price for predictable cost and SL/TP support
           const marketLimitPrice = currentPriceForMarketOrder ?? roundedEntryPrice;
           logger.info('Placing cTrader limit order (market converted)', {
@@ -1279,7 +1280,7 @@ const executeTradeForAccount = async (
             tradeSide,
             price: marketLimitPrice
           });
-        } else if (isMarketOrder && !useLimit) {
+        } else if (isMarketOrder && !useLimitAtTouch) {
           // Actual market order: must use relative SL/TP (absolute rejected by cTrader)
           // Require current price - do not place without SL/TP; monitor fallback is unsafe
           if (currentPriceForMarketOrder == null || currentPriceForMarketOrder <= 0) {
@@ -1401,7 +1402,7 @@ const executeTradeForAccount = async (
             exchange: 'ctrader',
             account_name: accountName || undefined,
             order_id: nTradeData.orderIds[i],
-            entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
+            entry_order_type: isMarketOrder && !useLimitAtTouch ? 'market' : 'limit',
             status: 'pending',
             stop_loss_breakeven: false,
             expires_at: expiresAt
@@ -1435,7 +1436,7 @@ const executeTradeForAccount = async (
           exchange: 'ctrader',
           account_name: accountName || undefined,
           order_id: orderId,
-          entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
+          entry_order_type: isMarketOrder && !useLimitAtTouch ? 'market' : 'limit',
           status: 'pending',
           stop_loss_breakeven: false,
           expires_at: expiresAt
@@ -1974,7 +1975,7 @@ const executeTradeForAccount = async (
           exchange: 'ctrader',
           account_name: accountName || undefined,
           order_id: orderId,
-          entry_order_type: isMarketOrder && useLimitOrderForEntry === false ? 'market' : 'limit',
+          entry_order_type: isMarketOrder && !useLimitAtTouch ? 'market' : 'limit',
           status: 'pending',
         stop_loss_breakeven: false,
         expires_at: expiresAt,

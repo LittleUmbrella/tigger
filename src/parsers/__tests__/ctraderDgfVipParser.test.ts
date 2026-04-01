@@ -1,11 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { ctraderDgfParser } from '../ctraderDgfParser.js';
+import { ctraderDgfVipParser } from '../ctraderDgfVipParser.js';
 
-describe('ctraderDgfParser', () => {
+describe('ctraderDgfVipParser', () => {
   it('parses single-line XAUUSD with SL: Solid break <price> (no @)', () => {
     const msg =
       'XAUUSD SELL NOW @ 4438 SL: Solid break 4446 TP: 4430 TP: 4422';
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.marketExecution).toBe(true);
     expect(order!.tradingPair).toBe('XAUUSD');
@@ -21,7 +21,7 @@ describe('ctraderDgfParser', () => {
 SL @ 1.98373
 
 TP @ 2.01364`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('EURNZD');
     expect(order!.signalType).toBe('long');
@@ -32,7 +32,7 @@ TP @ 2.01364`;
 
   it('parses Format 5 forex single-line without # before symbol', () => {
     const msg = 'Buy NOW EURNZD @ 2.00467 SL @ 1.99465 TP @ 2.02456';
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('EURNZD');
     expect(order!.signalType).toBe('long');
@@ -48,7 +48,7 @@ SL: Solid break @ 4442
 
 TP: 4458
 TP: 4466`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.stopLoss).toBe(4442);
   });
@@ -56,7 +56,7 @@ TP: 4466`;
   it('parses TP labels with Unicode superscript ordinals (TP¹ TP² …)', () => {
     const msg =
       'XAUUSD BUY 4722 TP¹ 4708 TP² 4711 TP³ 4714 TP⁴ 4717 TP⁵ 4720 TP⁶ 4725 SL 4693';
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('long');
@@ -75,7 +75,7 @@ TP⁵ 4767
 TP⁶ 4764
 
 💣 SL 4791`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('short');
@@ -95,7 +95,7 @@ Tp3: 4748
 Tp4: 4768
 
 Use proper money management. Consistency is 🔑`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('long');
@@ -114,7 +114,7 @@ TP3 ➝ 4733
 Tp 4 — 4738
 
 Use proper money management. Consistency is 🔑`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('long');
@@ -130,7 +130,7 @@ SL : 4702.20
 TP : 4800.00
 
  Use proper money management. Consistency is 🔑`;
-    const order = ctraderDgfParser(msg);
+    const order = ctraderDgfVipParser(msg);
     expect(order).not.toBeNull();
     expect(order!.tradingPair).toBe('XAUUSD');
     expect(order!.signalType).toBe('long');
