@@ -51,4 +51,15 @@ TP: 4466`;
     expect(order).not.toBeNull();
     expect(order!.stopLoss).toBe(4442);
   });
+
+  it('parses TP labels with Unicode superscript ordinals (TP¹ TP² …)', () => {
+    const msg =
+      'XAUUSD BUY 4722 TP¹ 4708 TP² 4711 TP³ 4714 TP⁴ 4717 TP⁵ 4720 TP⁶ 4725 SL 4693';
+    const order = ctraderDgfParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.stopLoss).toBe(4693);
+    expect(order!.takeProfits).toEqual([4708, 4711, 4714, 4717, 4720, 4725]);
+  });
 });

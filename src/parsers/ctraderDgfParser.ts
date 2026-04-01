@@ -7,12 +7,36 @@ import { logger } from '../utils/logger.js';
 
 type TpToken = { kind: 'number'; value: number } | { kind: 'open' };
 
+/**
+ * Unicode superscript ordinals after "TP" (e.g. TP¹ TP² …) are not matched by `\d*`.
+ * Normalize to ASCII digits so the existing TP regex applies.
+ */
+const SUPERSCRIPT_DIGIT_MAP: Record<string, string> = {
+  '\u00B9': '1',
+  '\u00B2': '2',
+  '\u00B3': '3',
+  '\u2070': '0',
+  '\u2074': '4',
+  '\u2075': '5',
+  '\u2076': '6',
+  '\u2077': '7',
+  '\u2078': '8',
+  '\u2079': '9',
+};
+
+const normalizeTpSuperscriptLabels = (content: string): string =>
+  content.replace(/(T[Pp])([\u00B9\u00B2\u00B3\u2070\u2074-\u2079]+)/gi, (_full, tp: string, subs: string) => {
+    const digits = [...subs].map((ch) => SUPERSCRIPT_DIGIT_MAP[ch] ?? '').join('');
+    return digits ? `${tp}${digits}` : _full;
+  });
+
 /** Ordered TP lines: numeric price or the word "open" (case-insensitive). */
 const parseTpTokens = (content: string): TpToken[] => {
+  const normalized = normalizeTpSuperscriptLabels(content);
   const re = /T[Pp]\d*[\s:]*@?\s*([\d.]+|open)\b/gi;
   const out: TpToken[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(content)) !== null) {
+  while ((m = re.exec(normalized)) !== null) {
     const raw = m[1].trim().toLowerCase();
     if (raw === 'open') {
       out.push({ kind: 'open' });
