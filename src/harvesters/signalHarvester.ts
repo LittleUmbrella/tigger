@@ -256,6 +256,37 @@ const sleep = (ms: number): Promise<void> => {
   });
 };
 
+/** Match list_channels / TelegramClient.iterDialogs — avoid missing channels past the first N dialogs. */
+const MAX_DIALOGS_TO_SCAN_FOR_CHANNEL = 5000;
+
+const channelMatchesConfig = (entity: Api.Channel, channel: string): boolean => {
+  const usernameMatch = entity.username && (
+    entity.username === channel ||
+    entity.username === channel.replace('@', '')
+  );
+  const idMatch = String(entity.id) === channel;
+  const titleMatch = entity.title && entity.title.toLowerCase() === channel.toLowerCase();
+  return !!(usernameMatch || idMatch || titleMatch);
+};
+
+/**
+ * Scan dialogs (newest-first) until the configured channel is found or the limit is reached.
+ * Required when access hash env is missing/wrong and getEntity fails for large numeric IDs.
+ */
+const findChannelInDialogs = async (
+  client: TelegramClient,
+  config: HarvesterConfig,
+  maxDialogs: number
+): Promise<Api.Channel | undefined> => {
+  for await (const d of client.iterDialogs({ limit: maxDialogs })) {
+    const entity = d.entity;
+    if (entity instanceof Api.Channel && channelMatchesConfig(entity, config.channel)) {
+      return entity;
+    }
+  }
+  return undefined;
+};
+
 const connectTelegram = async (
   config: HarvesterConfig,
   client: TelegramClient,
@@ -332,10 +363,7 @@ const resolveEntity = async (
         accessHash: BigInt(accessHashValue) as any
       });
     }
-    
-    // Get dialogs once and reuse (optimization)
-    const dialogs = await client.getDialogs({ limit: 200 });
-    
+
     if (config.channel.startsWith('https://t.me/+') || config.channel.startsWith('t.me/+')) {
       const hash = config.channel.split('+')[1];
       const res = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
@@ -350,47 +378,26 @@ const resolveEntity = async (
       }
       throw new Error('Invite import returned no chats');
     }
-    
-    // Try to resolve by username/channel name using dialogs (safer for large IDs)
-    // This avoids getEntity which may have issues with large channel IDs
-    const foundDialog = dialogs.find(d => {
-      const entity = d.entity;
-      if (entity instanceof Api.Channel) {
-        // Match by username (without @), numeric ID, or title
-        const usernameMatch = entity.username && (
-          entity.username === config.channel || 
-          entity.username === config.channel.replace('@', '')
-        );
-        const idMatch = String(entity.id) === config.channel;
-        const titleMatch = entity.title && entity.title.toLowerCase() === config.channel.toLowerCase();
-        return usernameMatch || idMatch || titleMatch;
-      }
-      return false;
-    });
-    
-    if (foundDialog && foundDialog.entity instanceof Api.Channel) {
+
+    // Resolve via dialogs (up to MAX_DIALOGS_TO_SCAN_FOR_CHANNEL) — avoids getEntity limits on large IDs
+    const foundChannel = await findChannelInDialogs(client, config, MAX_DIALOGS_TO_SCAN_FOR_CHANNEL);
+
+    if (foundChannel) {
       logger.debug('Found channel in dialogs', {
         channel: config.channel,
-        channelId: String(foundDialog.entity.id),
-        username: foundDialog.entity.username,
-        title: foundDialog.entity.title
+        channelId: String(foundChannel.id),
+        username: foundChannel.username,
+        title: foundChannel.title
       });
       return new Api.InputPeerChannel({
-        channelId: BigInt(String(foundDialog.entity.id)) as any,
-        accessHash: foundDialog.entity.accessHash || BigInt(0) as any
+        channelId: BigInt(String(foundChannel.id)) as any,
+        accessHash: foundChannel.accessHash || BigInt(0) as any
       });
     }
-    
+
     logger.debug('Channel not found in dialogs, will try getEntity', {
       channel: config.channel,
-      dialogsChecked: dialogs.length,
-      availableChannels: dialogs
-        .filter(d => d.entity instanceof Api.Channel)
-        .map(d => ({
-          id: String((d.entity as Api.Channel).id),
-          username: (d.entity as Api.Channel).username,
-          title: (d.entity as Api.Channel).title
-        }))
+      maxDialogsScanned: MAX_DIALOGS_TO_SCAN_FOR_CHANNEL
     });
     
     // Fallback to getEntity if not found in dialogs
