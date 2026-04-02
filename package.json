@@ -17,6 +17,7 @@
     "test-session": "tsx src/scripts/test_session.ts",
     "list-channels": "tsx src/scripts/list_channels/index.ts",
     "replay-messages": "tsx src/scripts/replay_messages.ts",
+    "reprocess-message": "tsx src/scripts/reprocess_message.ts",
     "test-bybit-credentials": "tsx src/scripts/test_bybit_credentials.ts",
     "test-ctrader-balance": "tsx src/scripts/test_ctrader_balance.ts",
     "test-ctrader-positions": "tsx src/scripts/test_ctrader_positions.ts",
