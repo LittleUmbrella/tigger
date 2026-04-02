@@ -143,7 +143,7 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
 /**
  * Parser for DGF-style cTrader signals (channel dgfvip): same formats as ctrader_dgf — gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
- * other symbols (e.g. EURNZD) are left unchanged. Most formats omit entryPrice (market); Format 8 sets entryPrice (limit).
+ * other symbols (e.g. EURNZD) are left unchanged. Most formats omit entryPrice (market); Formats 8–9 set entryPrice (limit).
  *
  * Format 6 (symbol before side; optional emoji prefix; slash entry range): see ctraderDgfParser.
  */
@@ -181,6 +181,74 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
 
       const signalType = format8Header[2].toLowerCase() === 'long' ? 'long' : 'short';
       const tradingPair = normalizeAssetAliasToCTraderPair(format8Header[1]);
+      let takeProfits: number[];
+      if (numericTps.length === 1) {
+        takeProfits = [numericTps[0]];
+      } else {
+        const hasOpen = tpTokens.some((t) => t.kind === 'open');
+        if (hasOpen) {
+          const avgStep = meanNumericGap(numericTps);
+          takeProfits = resolveTpTokensWithOpen(tpTokens, avgStep);
+        } else {
+          takeProfits = [...numericTps];
+        }
+      }
+      if (takeProfits.length === 0) return null;
+      if (signalType === 'long') {
+        takeProfits.sort((a, b) => a - b);
+      } else {
+        takeProfits.sort((a, b) => b - a);
+      }
+      const deduplicatedTPs = deduplicateTakeProfits(takeProfits, signalType);
+      if (deduplicatedTPs.length === 0) return null;
+
+      const parsedOrder: ParsedOrder = {
+        tradingPair,
+        entryPrice,
+        marketExecution: false,
+        stopLoss,
+        takeProfits: deduplicatedTPs,
+        leverage: 20,
+        signalType,
+      };
+      if (!validateParsedOrder(parsedOrder, { message: content })) {
+        return null;
+      }
+      return parsedOrder;
+    }
+
+    /**
+     * Format 9: pipe + BUY/SELL SIGNAL + Entry line (limit). Optional emoji on first line.
+     * Entry: 4705-4700 → limit at second bound (same as Format 3 dash convention: price after last `-`).
+     */
+    const format9Header = firstLine.match(
+      /(gold|XAU|XAUT|XAUUSD)\s*\|\s*(buy|sell)\s+signal\b/i,
+    );
+    if (format9Header) {
+      const entryMatch = normalizedContent.match(/\bEntry\s*:\s*([\d.]+)(?:\s*-\s*([\d.]+))?/i);
+      if (!entryMatch) return null;
+      const entryRaw = entryMatch[2] ?? entryMatch[1];
+      const entryPrice = parseFloat(entryRaw);
+      if (isNaN(entryPrice) || entryPrice <= 0) return null;
+
+      const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
+      const slClause = slClauseMatch?.[0] ?? '';
+      const stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
+      if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return null;
+
+      const tpTokens = parseTpTokens(normalizedContent);
+      const numericTps = tpTokens
+        .filter((t): t is { kind: 'number'; value: number } => t.kind === 'number')
+        .map((t) => t.value);
+      if (numericTps.length === 0) {
+        logger.warn('dgfvip: Format 9 — no numeric take profits; skipping message', {
+          preview: normalizedContent.slice(0, 200),
+        });
+        return null;
+      }
+
+      const signalType = format9Header[2].toLowerCase() === 'buy' ? 'long' : 'short';
+      const tradingPair = normalizeAssetAliasToCTraderPair(format9Header[1]);
       let takeProfits: number[];
       if (numericTps.length === 1) {
         takeProfits = [numericTps[0]];

@@ -139,4 +139,17 @@ TP : 4800.00
     expect(order!.stopLoss).toBe(4702.2);
     expect(order!.takeProfits).toEqual([4800]);
   });
+
+  it('parses Format 9 as limit: emoji, XAUUSD | SELL SIGNAL, Entry range, TP arrows', () => {
+    const msg =
+      '📢 XAUUSD | SELL SIGNAL 🟢 Entry: 4705-4700 💣 SL: 4715 TP1 ➝ 4695 TP2 ➝ 4690 TP3 ➝ 4685 Tp 4 — 4680 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBe(4700);
+    expect(order!.marketExecution).toBe(false);
+    expect(order!.stopLoss).toBe(4715);
+    expect(order!.takeProfits).toEqual([4695, 4690, 4685, 4680]);
+  });
 });
