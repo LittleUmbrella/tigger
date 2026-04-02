@@ -140,6 +140,18 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
   return undefined;
 };
 
+/** Prefer first `SL …` clause on a line; if parsing fails, scan full message (single-line layouts). */
+const resolveStopLossFromDgfContent = (normalizedContent: string): number | undefined => {
+  const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
+  const slClause = slClauseMatch?.[0] ?? '';
+  let stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
+  if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) {
+    stopLoss = parseStopLossFromSlClause(normalizedContent);
+  }
+  if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return undefined;
+  return stopLoss;
+};
+
 /**
  * Parser for DGF-style cTrader signals (channel ctrader_dgf): gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
@@ -232,10 +244,8 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
       const entryPrice = parseFloat(entryMatch[1]);
       if (isNaN(entryPrice) || entryPrice <= 0) return null;
 
-      const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
-      const slClause = slClauseMatch?.[0] ?? '';
-      const stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
-      if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return null;
+      const stopLoss = resolveStopLossFromDgfContent(normalizedContent);
+      if (stopLoss === undefined) return null;
 
       const tpTokens = parseTpTokens(normalizedContent);
       const numericTps = tpTokens
@@ -300,10 +310,8 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
       const entryPrice = parseFloat(entryRaw);
       if (isNaN(entryPrice) || entryPrice <= 0) return null;
 
-      const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
-      const slClause = slClauseMatch?.[0] ?? '';
-      const stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
-      if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return null;
+      const stopLoss = resolveStopLossFromDgfContent(normalizedContent);
+      if (stopLoss === undefined) return null;
 
       const tpTokens = parseTpTokens(normalizedContent);
       const numericTps = tpTokens
@@ -419,10 +427,8 @@ export const ctraderDgfParser = (content: string, options?: ParserOptions): Pars
       }
     }
 
-    const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
-    const slClause = slClauseMatch?.[0] ?? '';
-    const stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
-    if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) return null;
+    const stopLoss = resolveStopLossFromDgfContent(normalizedContent);
+    if (stopLoss === undefined) return null;
 
     const tpTokens = parseTpTokens(normalizedContent);
     const numericTps = tpTokens

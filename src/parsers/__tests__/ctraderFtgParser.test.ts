@@ -70,6 +70,16 @@ TP: 4608.96`;
     expect(order!.takeProfits).toEqual([4608.96]);
   });
 
+  it('parses Format 8 single-line: BUY + SL: + TP: (inline colon TPs)', () => {
+    const msg = '#XAUUSD BUY SL: 4534.72 TP: 4608.96';
+    const order = ctraderFtgParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.stopLoss).toBe(4534.72);
+    expect(order!.takeProfits).toEqual([4608.96]);
+  });
+
   it('parses Format 8: #XAUUSD BUY one line, SL/TP', () => {
     const msg = `#XAUUSD BUY
 SL: 4500

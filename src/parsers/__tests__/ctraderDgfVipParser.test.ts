@@ -140,6 +140,16 @@ TP : 4800.00
     expect(order!.takeProfits).toEqual([4800]);
   });
 
+  it('parses Format 8 limit on one line (Entry / SL / TP)', () => {
+    const msg =
+      '$XAUUSD long | +8RR Entry : 4720.00 / SL : 4702.20 / TP : 4800.00';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.entryPrice).toBe(4720);
+    expect(order!.stopLoss).toBe(4702.2);
+    expect(order!.takeProfits).toEqual([4800]);
+  });
+
   it('parses Format 9 as limit: emoji, XAUUSD | SELL SIGNAL, Entry range, TP arrows', () => {
     const msg =
       '📢 XAUUSD | SELL SIGNAL 🟢 Entry: 4705-4700 💣 SL: 4715 TP1 ➝ 4695 TP2 ➝ 4690 TP3 ➝ 4685 Tp 4 — 4680 Use proper money management. Consistency is 🔑';

@@ -227,15 +227,15 @@ const extractTakeProfits = (content: string): number[] => {
   }
   if (tps.length > 0) return tps;
 
-  // Single-line compact: … TP 4455 … or TP¹✔️4533 (¹–⁹ + ✔ optional VS U+FE0F, then price)
+  // Single-line compact: TP: 4608, TP1: …, TP 4455, TP¹✔️4533 (¹–⁹ + ✔ optional VS U+FE0F, then price)
   const superscripts = '\u00b9\u00b2\u00b3\u2074\u2075\u2076\u2077\u2078\u2079';
   const inlineTpPattern = new RegExp(
-    String.raw`\bTP\s*\d+\s*:\s*([\d.]+)|\bTP\s+([\d.]+)|\bTP[${superscripts}]*\s*[\u2713\u2714]+\uFE0F?\s*([\d.]+)`,
+    String.raw`\bTP\s*:\s*([\d.]+)|\bTP\s*\d+\s*:\s*([\d.]+)|\bTP\s+([\d.]+)|\bTP[${superscripts}]*\s*[\u2713\u2714]+\uFE0F?\s*([\d.]+)`,
     'gi',
   );
   let im: RegExpExecArray | null;
   while ((im = inlineTpPattern.exec(content)) !== null) {
-    const v = parseFloat(im[1] ?? im[2] ?? im[3] ?? '');
+    const v = parseFloat(im[1] ?? im[2] ?? im[3] ?? im[4] ?? '');
     if (!isNaN(v) && v > 0) tps.push(v);
   }
   return tps;
