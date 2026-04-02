@@ -19,7 +19,54 @@ import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js
  * Entry range on the signal line is informational only; ParsedOrder omits entryPrice (market execution).
  * Take profits: lines starting with TP optional colon/spaces before the price.
  * Stop loss: line starting with SL, flexible spaces/colon before the price (e.g. "SL : 4530").
+ *
+ * Format 2 (single line): same tokens on one line, e.g.
+ * #XAUUSD BUY NOW 4788/4786 TP: 4793 TP: 4798 SL : 4778
  */
+const collectTakeProfitsLineAnchored = (lines: string[]): number[] => {
+  const takeProfits: number[] = [];
+  for (const line of lines) {
+    const m = line.match(/^\s*T[Pp]\s*:?\s*([\d.]+)/);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!isNaN(v) && v > 0) takeProfits.push(v);
+    }
+  }
+  return takeProfits;
+};
+
+/** TP segments after whitespace or line start (single-line and inline tails). */
+const collectTakeProfitsFromFullText = (text: string): number[] => {
+  const takeProfits: number[] = [];
+  const re = /(?:^|\s)T[Pp]\s*:?\s*([\d.]+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const v = parseFloat(m[1]);
+    if (!isNaN(v) && v > 0) takeProfits.push(v);
+  }
+  return takeProfits;
+};
+
+const findStopLossLineAnchored = (lines: string[]): number | undefined => {
+  for (const line of lines) {
+    const m = line.match(/^\s*S[Ll]\s*[\s:]*([\d.]+)/i);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!isNaN(v) && v > 0) return v;
+    }
+  }
+  return undefined;
+};
+
+/** SL after line start or whitespace (same line as signal when not line-leading). */
+const findStopLossInFullText = (text: string): number | undefined => {
+  const m = text.match(/(?:^|\s)S[Ll]\s*[\s:]*([\d.]+)/i);
+  if (!m) return undefined;
+  const v = parseFloat(m[1]);
+  if (isNaN(v) || v <= 0) return undefined;
+  return v;
+};
+
 export const ctraderKlhParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     const normalizedContent = content.trim();
@@ -44,26 +91,15 @@ export const ctraderKlhParser = (content: string, options?: ParserOptions): Pars
 
     if (!tradingPair || !signalType) return null;
 
-    let stopLoss: number | undefined;
-    for (const line of lines) {
-      const m = line.match(/^\s*S[Ll]\s*[\s:]*([\d.]+)/i);
-      if (m) {
-        const v = parseFloat(m[1]);
-        if (!isNaN(v) && v > 0) {
-          stopLoss = v;
-          break;
-        }
-      }
+    let stopLoss = findStopLossLineAnchored(lines);
+    if (stopLoss === undefined) {
+      stopLoss = findStopLossInFullText(normalizedContent);
     }
     if (stopLoss === undefined) return null;
 
-    const takeProfits: number[] = [];
-    for (const line of lines) {
-      const m = line.match(/^\s*T[Pp]\s*:?\s*([\d.]+)/);
-      if (m) {
-        const v = parseFloat(m[1]);
-        if (!isNaN(v) && v > 0) takeProfits.push(v);
-      }
+    let takeProfits = collectTakeProfitsLineAnchored(lines);
+    if (takeProfits.length === 0) {
+      takeProfits = collectTakeProfitsFromFullText(normalizedContent);
     }
     if (takeProfits.length === 0) return null;
 
