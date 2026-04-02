@@ -106,9 +106,18 @@ export const updateStopLossManager: ManagerFunction = async (context: ManagerCon
         });
         return;
       }
+      let knownTakeProfit: number | undefined;
+      try {
+        const tps: number[] = JSON.parse(trade.take_profits || '[]');
+        const last = tps[tps.length - 1];
+        if (isFinite(last) && last > 0) knownTakeProfit = last;
+      } catch { /* ignore parse errors */ }
+
       await ctraderClient.modifyPosition({
         positionId: trade.position_id,
-        stopLoss: newOrder.stopLoss
+        stopLoss: newOrder.stopLoss,
+        knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
+        knownTakeProfit
       });
       await db.updateTrade(trade.id, {
         stop_loss: newOrder.stopLoss,

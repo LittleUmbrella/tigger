@@ -1387,32 +1387,122 @@ export class CTraderClient {
   }
 
   /**
-   * Modify position (set stop loss, take profit)
+   * Modify position (set stop loss, take profit).
+   *
+   * ProtoOAAmendPositionSLTPReq removes SL/TP when the field is absent from
+   * the message. To avoid accidentally wiping the TP when only updating SL
+   * (or vice-versa), this method:
+   *  1. Fetches the current position to get existing SL/TP
+   *  2. Falls back to caller-provided `knownStopLoss`/`knownTakeProfit` (from DB)
+   *  3. If the missing field still can't be resolved, aborts without modifying
    */
   async modifyPosition(params: {
     positionId: string;
     stopLoss?: number;
     takeProfit?: number;
+    /** Fallback SL from DB — used when exchange position lookup fails */
+    knownStopLoss?: number;
+    /** Fallback TP from DB — used when exchange position lookup fails */
+    knownTakeProfit?: number;
   }): Promise<void> {
     await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
       throw new Error('Not authenticated with cTrader OpenAPI');
     }
 
+    let effectiveStopLoss = params.stopLoss;
+    let effectiveTakeProfit = params.takeProfit;
+
+    if (effectiveStopLoss === undefined || effectiveTakeProfit === undefined) {
+      let resolvedFromExchange = false;
+      try {
+        const response = await this.connection.sendCommand('ProtoOAReconcileReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10)
+        });
+        const positions: any[] = response?.position || [];
+        const posIdNum = parseInt(params.positionId, 10);
+        const current = positions.find((p: any) => {
+          const pid = typeof p.positionId === 'object' && p.positionId?.low != null
+            ? p.positionId.low
+            : p.positionId;
+          return pid === posIdNum || String(pid) === params.positionId;
+        });
+        if (current) {
+          resolvedFromExchange = true;
+          if (effectiveStopLoss === undefined) {
+            const sl = typeof current.stopLoss === 'number' ? current.stopLoss : parseFloat(current.stopLoss);
+            if (isFinite(sl) && sl > 0) effectiveStopLoss = sl;
+          }
+          if (effectiveTakeProfit === undefined) {
+            const tp = typeof current.takeProfit === 'number' ? current.takeProfit : parseFloat(current.takeProfit);
+            if (isFinite(tp) && tp > 0) effectiveTakeProfit = tp;
+          }
+        }
+      } catch (error) {
+        logger.warn('Failed to fetch position from exchange for SL/TP preservation', {
+          positionId: params.positionId,
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+          error: serializeErrorForLog(error)
+        });
+      }
+
+      if (!resolvedFromExchange) {
+        if (effectiveStopLoss === undefined && params.knownStopLoss != null && isFinite(params.knownStopLoss) && params.knownStopLoss > 0) {
+          effectiveStopLoss = params.knownStopLoss;
+        }
+        if (effectiveTakeProfit === undefined && params.knownTakeProfit != null && isFinite(params.knownTakeProfit) && params.knownTakeProfit > 0) {
+          effectiveTakeProfit = params.knownTakeProfit;
+        }
+      }
+
+      logger.debug('Resolved SL/TP for position amend', {
+        positionId: params.positionId,
+        requestedSl: params.stopLoss,
+        requestedTp: params.takeProfit,
+        effectiveStopLoss,
+        effectiveTakeProfit,
+        source: resolvedFromExchange ? 'exchange' : 'db-fallback'
+      });
+
+      if (effectiveStopLoss === undefined || effectiveTakeProfit === undefined) {
+        logger.warn('Aborting position modify — cannot resolve both SL and TP; would wipe the missing field', {
+          positionId: params.positionId,
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+          effectiveStopLoss,
+          effectiveTakeProfit,
+          requestedSl: params.stopLoss,
+          requestedTp: params.takeProfit,
+          knownSl: params.knownStopLoss,
+          knownTp: params.knownTakeProfit
+        });
+        return;
+      }
+    }
+
     try {
       await this.connection.sendCommand('ProtoOAAmendPositionSLTPReq', {
         ctidTraderAccountId: parseInt(this.config.accountId!, 10),
         positionId: parseInt(params.positionId, 10),
-        ...(params.stopLoss !== undefined && { stopLoss: params.stopLoss }),
-        ...(params.takeProfit !== undefined && { takeProfit: params.takeProfit })
+        ...(effectiveStopLoss !== undefined && effectiveStopLoss > 0 && { stopLoss: effectiveStopLoss }),
+        ...(effectiveTakeProfit !== undefined && effectiveTakeProfit > 0 && { takeProfit: effectiveTakeProfit })
       });
 
-      logger.info('Position modified on cTrader', params);
+      logger.info('Position modified on cTrader', {
+        positionId: params.positionId,
+        stopLoss: effectiveStopLoss,
+        takeProfit: effectiveTakeProfit,
+        preservedExistingSl: params.stopLoss === undefined && effectiveStopLoss !== undefined,
+        preservedExistingTp: params.takeProfit === undefined && effectiveTakeProfit !== undefined
+      });
     } catch (error) {
       logger.error('Failed to modify position', {
         positionId: params.positionId,
-        stopLoss: params.stopLoss,
-        takeProfit: params.takeProfit,
+        stopLoss: effectiveStopLoss,
+        takeProfit: effectiveTakeProfit,
+        requestedStopLoss: params.stopLoss,
+        requestedTakeProfit: params.takeProfit,
         accountId: this.config.accountId,
         exchange: 'ctrader',
         error: serializeErrorForLog(error)

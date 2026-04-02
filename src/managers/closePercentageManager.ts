@@ -320,9 +320,18 @@ async function closePercentageOfPosition(
           const isLong = trade.direction === 'long' || (trade.stop_loss != null && trade.stop_loss < trade.entry_price);
           const rawSlPrice = isLong ? bePrice - minNudge : bePrice + minNudge;
           const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
+          let knownTakeProfit: number | undefined;
+          try {
+            const tps: number[] = JSON.parse(trade.take_profits || '[]');
+            const last = tps[tps.length - 1];
+            if (isFinite(last) && last > 0) knownTakeProfit = last;
+          } catch { /* ignore parse errors */ }
+
           await ctraderClient.modifyPosition({
             positionId: trade.position_id,
-            stopLoss: slPrice
+            stopLoss: slPrice,
+            knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
+            knownTakeProfit
           });
           await db.updateTrade(trade.id, {
             stop_loss: slPrice,

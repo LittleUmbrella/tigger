@@ -2275,9 +2275,18 @@ const monitorTrade = async (
             const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
 
             if (ctraderClient && trade.position_id) {
+              let knownTakeProfit: number | undefined;
+              try {
+                const tps: number[] = JSON.parse(trade.take_profits || '[]');
+                const last = tps[tps.length - 1];
+                if (isFinite(last) && last > 0) knownTakeProfit = last;
+              } catch { /* ignore parse errors */ }
+
               await ctraderClient.modifyPosition({
                 positionId: trade.position_id,
-                stopLoss: slPrice
+                stopLoss: slPrice,
+                knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
+                knownTakeProfit
               });
             }
 

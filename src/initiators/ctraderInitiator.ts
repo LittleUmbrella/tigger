@@ -1496,9 +1496,12 @@ const executeTradeForAccount = async (
             });
             
             // Set stop loss using modifyPosition
+            const bestTpFallback = roundedTPPrices?.[roundedTPPrices.length - 1];
             await ctraderClient.modifyPosition({
               positionId,
-              stopLoss: roundedStopLoss
+              stopLoss: roundedStopLoss,
+              knownStopLoss: order.stopLoss > 0 ? order.stopLoss : undefined,
+              knownTakeProfit: bestTpFallback != null && bestTpFallback > 0 ? bestTpFallback : undefined
             });
             
             // Update stop loss order quantity in database for tracking
