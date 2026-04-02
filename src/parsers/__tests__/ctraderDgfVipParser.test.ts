@@ -103,6 +103,19 @@ Use proper money management. Consistency is 🔑`;
     expect(order!.takeProfits).toEqual([4728, 4738, 4748, 4768]);
   });
 
+  it('parses single-line XAUUSD BUY NOW with dash entry range and Tp labels', () => {
+    const msg =
+      '🛡XAUUSD BUY NOW 4650-4646 💣 Sl: 4642 Tp1: 4660 Tp2: 4670 Tp3: 4680 Tp4: 4700 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.marketExecution).toBe(true);
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4642);
+    expect(order!.takeProfits).toEqual([4660, 4670, 4680, 4700]);
+  });
+
   it('parses Format 7: pipe before side, TP arrow lines, Tp N — price', () => {
     const msg = `🛡XAUUSD | BUY  4713-4718
 

@@ -301,9 +301,9 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       /^\s*(buy|sell)\s+(gold|XAU|XAUT|XAUUSD)\s+([\d.]+)/i,
     );
 
-    /** XAUUSD SELL 4782, XAUUSD | BUY 4713-4718, etc. — symbol before buy/sell (optional |; leading emoji ok). */
+    /** XAUUSD SELL 4782, XAUUSD | BUY 4713-4718, XAUUSD BUY NOW 4650-4646, etc. — symbol before buy/sell (optional |/NOW; leading emoji ok). */
     const symbolSideEntry = firstLine.match(
-      /(gold|XAU|XAUT|XAUUSD)(?:\s+\|\s+|\s+)(buy|sell)\s+([\d.]+)(?:\/([\d.]+)|-([\d.]+))?/i,
+      /(gold|XAU|XAUT|XAUUSD)(?:\s+\|\s+|\s+)(buy|sell)\s+(?:now\s+)?([\d.]+)(?:\/([\d.]+)|-([\d.]+))?/i,
     );
 
     let tradingPair: string;
