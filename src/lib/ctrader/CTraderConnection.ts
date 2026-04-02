@@ -18,7 +18,23 @@ export interface CTraderConnectionConfig {
 interface PendingOrderCommand {
   resolve: (value: any) => void;
   reject: (reason: any) => void;
+  payloadName: string;
+  timer: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * Commands that cTrader responds to with ProtoOAExecutionEvent / ProtoOAOrderErrorEvent
+ * instead of a *Res message. All of these must wait for the event before resolving.
+ */
+const EVENT_RESPONSE_COMMANDS = new Set([
+  'ProtoOANewOrderReq',
+  'ProtoOAAmendPositionSLTPReq',
+  'ProtoOACancelOrderReq',
+  'ProtoOAClosePositionReq',
+  'ProtoOAAmendOrderReq',
+]);
+
+const EVENT_RESPONSE_TIMEOUT_MS = 15_000;
 
 export class CTraderConnection {
   private socket: CTraderSocket;
@@ -28,7 +44,7 @@ export class CTraderConnection {
   private encoderDecoder: MessageEncoderDecoder;
   private connected: boolean = false;
   private initialized: boolean = false;
-  private pendingOrderCommand: PendingOrderCommand | null = null;
+  private pendingOrderCommands: PendingOrderCommand[] = [];
   /** Called when the underlying socket closes — allows CTraderClient to detect dead connections */
   onClose?: () => void;
 
@@ -55,20 +71,19 @@ export class CTraderConnection {
         error: error.message,
         exchange: 'ctrader'
       });
-      if (this.pendingOrderCommand) {
-        this.pendingOrderCommand.reject(new Error(`CTrader socket error: ${error.message}`));
-        this.pendingOrderCommand = null;
-      }
+      this.rejectAllPendingOrderCommands(new Error(`CTrader socket error: ${error.message}`));
     });
 
     this.socket.on('close', () => {
       const wasPreviouslyConnected = this.connected;
       this.connected = false;
       logger.info('CTrader socket closed');
-      if (this.pendingOrderCommand) {
-        logger.warn('Rejecting pending order due to socket close', { exchange: 'ctrader' });
-        this.pendingOrderCommand.reject(new Error('CTrader socket closed - no order response received'));
-        this.pendingOrderCommand = null;
+      if (this.pendingOrderCommands.length > 0) {
+        logger.warn('Rejecting pending order commands due to socket close', {
+          count: this.pendingOrderCommands.length,
+          exchange: 'ctrader'
+        });
+        this.rejectAllPendingOrderCommands(new Error('CTrader socket closed - no order response received'));
       }
       const pendingCount = this.commandMap.getPendingCommands().length;
       if (pendingCount > 0) {
@@ -127,26 +142,25 @@ export class CTraderConnection {
       return Promise.resolve({});
     }
     if (payloadName.endsWith('Req') || payloadName.endsWith('REQ')) {
-      // ProtoOANewOrderReq: cTrader responds with ProtoOAExecutionEvent (success) or ProtoOAOrderErrorEvent (failure), not Res
-      if (payloadName === 'ProtoOANewOrderReq') {
-        logger.info('Sending ProtoOANewOrderReq, waiting for ExecutionEvent or OrderErrorEvent', {
-          payloadName: 'ProtoOANewOrderReq',
+      if (EVENT_RESPONSE_COMMANDS.has(payloadName)) {
+        logger.debug('Sending event-response command, waiting for ExecutionEvent or OrderErrorEvent', {
+          payloadName,
           exchange: 'ctrader'
         });
         return new Promise<any>((resolve, reject) => {
-          this.pendingOrderCommand = { resolve, reject };
-          this.sendMessage(message);
-          // Timeout after 15s - if server never sends ExecutionEvent/OrderErrorEvent, fail fast
-          setTimeout(() => {
-            if (this.pendingOrderCommand) {
-              logger.warn('Order request timed out - no ExecutionEvent or OrderErrorEvent received', {
-                payloadName: 'ProtoOANewOrderReq',
+          const timer = setTimeout(() => {
+            const idx = this.pendingOrderCommands.findIndex((c) => c.resolve === resolve);
+            if (idx !== -1) {
+              logger.warn('Event-response command timed out - no ExecutionEvent or OrderErrorEvent received', {
+                payloadName,
                 exchange: 'ctrader'
               });
-              this.pendingOrderCommand.reject(new Error('Order request timed out - no response from cTrader'));
-              this.pendingOrderCommand = null;
+              this.pendingOrderCommands.splice(idx, 1);
+              reject(new Error(`${payloadName} timed out - no response from cTrader`));
             }
-          }, 15000);
+          }, EVENT_RESPONSE_TIMEOUT_MS);
+          this.pendingOrderCommands.push({ resolve, reject, payloadName, timer });
+          this.sendMessage(message);
         });
       }
       // Check if there's a corresponding RES type
@@ -230,6 +244,14 @@ export class CTraderConnection {
    */
   removeEventListener(uuid: string): void {
     this.eventEmitter.removeEventListener(uuid);
+  }
+
+  private rejectAllPendingOrderCommands(error: Error): void {
+    for (const cmd of this.pendingOrderCommands) {
+      clearTimeout(cmd.timer);
+      cmd.reject(error);
+    }
+    this.pendingOrderCommands = [];
   }
 
   /**
@@ -324,24 +346,21 @@ export class CTraderConnection {
 
     // Check if it's an event (case-insensitive check)
     if (payloadName.toUpperCase().endsWith('EVENT')) {
-      // ProtoOAExecutionEvent / ProtoOAOrderErrorEvent: these are the actual responses to ProtoOANewOrderReq
-      if (this.pendingOrderCommand) {
-        logger.info('Event received while waiting for order response', {
-          payloadName,
-          exchange: 'ctrader'
-        });
+      if (this.pendingOrderCommands.length > 0) {
         if (payloadName === 'ProtoOAExecutionEvent') {
+          const pending = this.pendingOrderCommands.shift()!;
+          clearTimeout(pending.timer);
           const errorCode = response.errorCode;
-          const executionType = response.executionType ?? response.order?.orderStatus;
           logger.info('ProtoOAExecutionEvent received', {
             executionType: response.executionType ?? response.order?.orderStatus,
             orderId: response.order?.orderId ?? response.deal?.orderId,
             hasPosition: !!response.position,
             hasDeal: !!response.deal,
+            forCommand: pending.payloadName,
             exchange: 'ctrader'
           });
           if (errorCode) {
-            this.pendingOrderCommand.reject(new Error(`Order rejected: ${errorCode} - ${response.description || ''}`));
+            pending.reject(new Error(`Order rejected: ${errorCode} - ${response.description || ''}`));
           } else {
             const order = response.order;
             const deal = response.deal;
@@ -350,16 +369,17 @@ export class CTraderConnection {
               orderId = orderId.low;
             }
             if (orderId !== undefined && orderId !== null) {
-              this.pendingOrderCommand.resolve({ orderId: String(orderId), order, deal });
+              pending.resolve({ orderId: String(orderId), order, deal });
             } else {
-              this.pendingOrderCommand.resolve(response);
+              pending.resolve(response);
             }
           }
-          this.pendingOrderCommand = null;
           this.eventEmitter.emitEvent(decoded.payloadType.toString(), response);
           return;
         }
         if (payloadName === 'ProtoOAOrderErrorEvent') {
+          const pending = this.pendingOrderCommands.shift()!;
+          clearTimeout(pending.timer);
           const errMsg = response.description || response.errorCode || 'Order rejected';
           const orderId = response.orderId;
           const orderIdStr = orderId != null
@@ -369,10 +389,10 @@ export class CTraderConnection {
             orderId: orderIdStr,
             errorCode: response.errorCode,
             description: response.description,
+            forCommand: pending.payloadName,
             exchange: 'ctrader'
           });
-          this.pendingOrderCommand.reject(new Error(errMsg));
-          this.pendingOrderCommand = null;
+          pending.reject(new Error(errMsg));
           this.eventEmitter.emitEvent(decoded.payloadType.toString(), response);
           return;
         }
