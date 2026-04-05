@@ -7,7 +7,7 @@ import { ParserOptions } from './parserRegistry.js';
 /**
  * Parser for star format messages like:
  * 
- * Format 1:
+ * Format 1 (classic star):
  * 🌟 #RIVER/USDT 
  * 
  * 🛑 Short 
@@ -22,7 +22,7 @@ import { ParserOptions } from './parserRegistry.js';
  * 
  * ❌STOP LOSS - 31.89
  * 
- * Format 2:
+ * Format 2 (classic star with double dash targets):
  * 🌟 #SOL/USDT 
  * 
  * 🛑 Long /SPOT
@@ -36,6 +36,24 @@ import { ParserOptions } from './parserRegistry.js';
  * TARGET- - 129-131-134-140-150+
  * 
  * ❌STOP LOSS - 109.70
+ * 
+ * Format 3 (breakout expert):
+ * 🟢 LONG #ENA/USDT BUY ⚙️ Leverage: 3x — 5x
+ * ──────────────────────────
+ * 💰 Entry › $0.078100
+ * 🎯 TP1 › $0.080023
+ * 🎯 TP2 › $0.081946
+ * 🎯 TP3 › $0.084830
+ * 🛑 SL › $0.075216
+ * 
+ * Format 4 (breakout expert without leverage, with percentages):
+ * 🔴 SHORT #CTSI/USDT SELL
+ * ──────────────────────────
+ * 💰 Entry › $0.039480
+ * 🎯 TP1 › $0.035369 +10.4%
+ * 🎯 TP2 › $0.031258 +20.8%
+ * 🎯 TP3 › $0.025092 +36.4%
+ * 🛑 SL › $0.045646 15.6%
  */
 export const starFormatParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   // Trading pair - extract from "#RIVER/USDT" format
@@ -44,14 +62,20 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   if (!tradingPairMatch) return null;
   const tradingPair = tradingPairMatch[1].toUpperCase() + 'USDT';
 
-  // Signal type - extract from "🛑 Short" or "🛑 Long" format (with optional /SPOT suffix)
-  const shortMatch = content.match(/🛑\s*(?:Short|SHORT|short)(?:\s*\/SPOT)?/i);
-  const longMatch = content.match(/🛑\s*(?:Long|LONG|long)(?:\s*\/SPOT)?/i);
+  // Signal type - extract from multiple formats:
+  // Classic: "🛑 Short" / "🛑 Long" (with optional /SPOT suffix)
+  // Breakout: "🔴 SHORT #.../USDT SELL" / "🟢 LONG #.../USDT BUY"
+  const shortMatch = content.match(/🛑\s*(?:Short|SHORT|short)(?:\s*\/SPOT)?/i)
+    || content.match(/🔴\s*SHORT\b/i);
+  const longMatch = content.match(/🛑\s*(?:Long|LONG|long)(?:\s*\/SPOT)?/i)
+    || content.match(/🟢\s*LONG\b/i);
   
   if (!shortMatch && !longMatch) return null;
   const signalType: 'long' | 'short' = shortMatch ? 'short' : 'long';
 
-  // Entry price - extract from "👉 Entry = 27.65 - 29.89" format (range)
+  // Entry price - extract from multiple formats:
+  // Classic: "👉 Entry = 27.65 - 29.89" (range) or "Entry = 27.65" (single)
+  // Breakout: "💰 Entry › $0.078100" (single with $ prefix)
   const entryPriceStrategy = options?.entryPriceStrategy || 'worst';
   let entryPrice: number | undefined;
   
@@ -72,25 +96,34 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
         entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
       }
     } else {
-      // Try single entry price: "Entry = 27.65"
-      const entryPriceSingleMatch = content.match(/Entry\s*=\s*([\d.]+)/i);
-      if (entryPriceSingleMatch) {
-        entryPrice = parseFloat(entryPriceSingleMatch[1]);
+      // Try breakout format: "💰 Entry › $0.078100" or "Entry › $0.078100"
+      const entryBreakoutMatch = content.match(/Entry\s*›\s*\$?([\d.]+)/i);
+      if (entryBreakoutMatch) {
+        entryPrice = parseFloat(entryBreakoutMatch[1]);
       } else {
-        // No entry price found - allow undefined for market orders
-        entryPrice = undefined;
+        // Try single entry price: "Entry = 27.65"
+        const entryPriceSingleMatch = content.match(/Entry\s*=\s*([\d.]+)/i);
+        if (entryPriceSingleMatch) {
+          entryPrice = parseFloat(entryPriceSingleMatch[1]);
+        } else {
+          entryPrice = undefined;
+        }
       }
     }
   }
 
-  // Stop loss - extract from "❌STOP LOSS - 31.89" format
+  // Stop loss - extract from multiple formats:
+  // Classic: "❌STOP LOSS - 31.89"
+  // Breakout: "🛑 SL › $0.075216" (with optional trailing percentage)
   let stopLossMatch = content.match(/❌STOP\s*LOSS\s*-\s*([\d.]+)/i);
   if (!stopLossMatch) {
-    // Try without emoji: "STOP LOSS - 31.89"
     stopLossMatch = content.match(/STOP\s*LOSS\s*-\s*([\d.]+)/i);
   }
   if (!stopLossMatch) {
-    // Try other formats: "Stop Loss: 31.89" or "SL: 31.89"
+    // Breakout format: "🛑 SL › $0.075216"
+    stopLossMatch = content.match(/🛑\s*SL\s*›\s*\$?([\d.]+)/i);
+  }
+  if (!stopLossMatch) {
     stopLossMatch = content.match(/(?:Stop\s*Loss|SL|stop\s*loss)[:\s-]+([\d.]+)/i);
   }
   
@@ -103,34 +136,40 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   }
   const stopLoss = parseFloat(stopLossStr);
 
-  // Take profits - extract from "TARGET-  26.45 - 25.67 - 24.79 - 22.80 - 20.78+" format
-  // Also handles "TARGET- - 129-131-134-140-150+" (double dash format)
+  // Take profits - extract from multiple formats:
+  // Classic: "TARGET-  26.45 - 25.67 - 24.79 - 22.80 - 20.78+"
+  // Breakout: "🎯 TP1 › $0.080023", "🎯 TP2 › $0.081946", etc.
   const takeProfits: number[] = [];
   
-  // Try "TARGET- -" format (double dash) first
-  let takeProfitMatch = content.match(/TARGET\s*-\s*-\s*([\d.\s\-+]+)/i);
-  if (!takeProfitMatch) {
-    // Try "TARGET-" format with single dash and plus sign
-    takeProfitMatch = content.match(/TARGET\s*-\s*([\d.\s\-+]+)/i);
+  // Try breakout format first: "🎯 TP1 › $0.080023" (possibly with trailing +10.4%)
+  const breakoutTpMatches = content.matchAll(/🎯\s*TP\d+\s*›\s*\$?([\d.]+)/gi);
+  for (const m of breakoutTpMatches) {
+    const val = parseFloat(m[1]);
+    if (!isNaN(val) && val > 0) takeProfits.push(val);
   }
-  if (!takeProfitMatch) {
-    // Try "Target:" format
-    takeProfitMatch = content.match(/Target[:\s-]+([\d.\s\-+]+)/i);
-  }
-  if (!takeProfitMatch) {
-    // Try "TARGET:" format
-    takeProfitMatch = content.match(/TARGET[:\s-]+([\d.\s\-+]+)/i);
-  }
-  
-  if (takeProfitMatch) {
-    const targetsString = takeProfitMatch[1];
-    // Extract all numbers from the targets string
-    const targetNumbers = targetsString.match(/[\d.]+/g);
-    if (targetNumbers) {
-      const validTargets = targetNumbers
-        .map(t => parseFloat(t))
-        .filter(t => !isNaN(t) && t > 0);
-      takeProfits.push(...validTargets);
+
+  if (takeProfits.length === 0) {
+    // Fall back to classic TARGET format
+    let takeProfitMatch = content.match(/TARGET\s*-\s*-\s*([\d.\s\-+]+)/i);
+    if (!takeProfitMatch) {
+      takeProfitMatch = content.match(/TARGET\s*-\s*([\d.\s\-+]+)/i);
+    }
+    if (!takeProfitMatch) {
+      takeProfitMatch = content.match(/Target[:\s-]+([\d.\s\-+]+)/i);
+    }
+    if (!takeProfitMatch) {
+      takeProfitMatch = content.match(/TARGET[:\s-]+([\d.\s\-+]+)/i);
+    }
+    
+    if (takeProfitMatch) {
+      const targetsString = takeProfitMatch[1];
+      const targetNumbers = targetsString.match(/[\d.]+/g);
+      if (targetNumbers) {
+        const validTargets = targetNumbers
+          .map(t => parseFloat(t))
+          .filter(t => !isNaN(t) && t > 0);
+        takeProfits.push(...validTargets);
+      }
     }
   }
   
@@ -145,14 +184,20 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   
   if (takeProfits.length === 0) return null;
 
-  // Leverage - extract from "🧑‍🎤 Leverage: 3- 8X 🔥" format (use lowest value if range)
+  // Leverage - extract from multiple formats (use lowest value if range):
+  // Classic: "🧑‍🎤 Leverage: 3- 8X 🔥"
+  // Breakout: "⚙️ Leverage: 3x — 5x" (em-dash separator, lowercase x)
   let leverageMatch = content.match(/🧑‍🎤\s*Leverage[:\s]*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[Xx]/i);
   if (!leverageMatch) {
-    // Try without emoji: "Leverage: 3- 8X"
+    // Breakout/generic range with hyphen, en-dash, or em-dash: "Leverage: 3x — 5x"
+    leverageMatch = content.match(/Leverage[:\s]*(\d+(?:\.\d+)?)\s*[Xx]?\s*[-–—]\s*(\d+(?:\.\d+)?)\s*[Xx]/i);
+  }
+  if (!leverageMatch) {
+    // Classic range without emoji: "Leverage: 3- 8X"
     leverageMatch = content.match(/Leverage[:\s]*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*[Xx]/i);
   }
   if (!leverageMatch) {
-    // Try single value: "Leverage: 8X"
+    // Single value: "Leverage: 8X" or "Leverage: 8x"
     leverageMatch = content.match(/Leverage[:\s]*(\d+(?:\.\d+)?)\s*[Xx]/i);
   }
   
