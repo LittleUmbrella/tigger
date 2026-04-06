@@ -65,9 +65,11 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   // Signal type - extract from multiple formats:
   // Classic: "🛑 Short" / "🛑 Long" (with optional /SPOT suffix)
   // Breakout: "🔴 SHORT #.../USDT SELL" / "🟢 LONG #.../USDT BUY"
-  const shortMatch = content.match(/🛑\s*(?:Short|SHORT|short)(?:\s*\/SPOT)?/i)
+  const shortMatch = content.match(/🛑\s*(?:Short|SHORT|short)(?:\s*\/\s*SPOT)?/i)
+    || content.match(/🛑\s*SPOT\s*\/\s*(?:Short|SHORT|short)/i)
     || content.match(/🔴\s*SHORT\b/i);
-  const longMatch = content.match(/🛑\s*(?:Long|LONG|long)(?:\s*\/SPOT)?/i)
+  const longMatch = content.match(/🛑\s*(?:Long|LONG|long)(?:\s*\/\s*SPOT)?/i)
+    || content.match(/🛑\s*SPOT\s*\/\s*(?:Long|LONG|long)/i)
     || content.match(/🟢\s*LONG\b/i);
   
   if (!shortMatch && !longMatch) return null;
