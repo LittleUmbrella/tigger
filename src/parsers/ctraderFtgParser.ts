@@ -3,6 +3,7 @@ import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
+import { calculateEntryPrice } from '../utils/entryPriceStrategy.js';
 import { ctraderGoldParser } from './ctraderGoldParser.js';
 
 /**
@@ -52,7 +53,12 @@ import { ctraderGoldParser } from './ctraderGoldParser.js';
  * $GOLD SELL NOW 📉4536/4539📉 TP¹✔️4533 TP²✔️4530 … ♨️ SL 4544
  * The 📉a/b📉 zone is informational; entryPrice is omitted (same as Format 8 market).
  *
- * Falls back to ctraderGoldParser when FTG patterns do not match. All successful parses omit entryPrice (market).
+ * Format 10 (Forex — **limit**; entry zone from “between … till …”):
+ * 🔼Forex Signal Buy USDCHF at any price between 0.7970 till 0.7945 …
+ * Target 1: 0.8017 Target 2: 0.8100 … Stop Loss: 0.7882
+ * entryPrice uses calculateEntryPrice(zoneLow, zoneHigh, side, entryPriceStrategy); entryTargets = [min, max].
+ *
+ * Falls back to ctraderGoldParser when FTG patterns do not match. Gold formats omit entryPrice (market) unless priced.
  */
 
 const entryZone = (signalType: 'long' | 'short', a: number, b: number): number =>
@@ -64,6 +70,10 @@ const resolveFtgTradingPair = (content: string): string | null => {
   const tag = content.match(/#?\$?\s*(GOLD|XAUUSD|XAU|XAUT)\b/i);
   if (tag) return normalizeAssetAliasToCTraderPair(tag[1]);
   if (/\bXAUUSD\b/i.test(content)) return 'XAUUSD';
+
+  const forexSignal = content.match(/\bForex\s+Signal\s+(?:Buy|Sell)\s+([A-Z]{6})\b/i);
+  if (forexSignal) return normalizeAssetAliasToCTraderPair(forexSignal[1]);
+
   return null;
 };
 
@@ -172,6 +182,10 @@ const extractMarketDirectionOnly = (content: string): { signalType: 'long' | 'sh
     if (m) {
       return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
     }
+    m = line.match(/\bForex\s+Signal\s+(Buy|Sell)\s+[A-Z]{6}\b/i);
+    if (m) {
+      return { signalType: m[1].toLowerCase() === 'buy' ? 'long' : 'short' };
+    }
   }
   return null;
 };
@@ -179,6 +193,11 @@ const extractMarketDirectionOnly = (content: string): { signalType: 'long' | 'sh
 const extractStopLoss = (content: string): number | undefined => {
   for (const line of content.split(/\r?\n/)) {
     let m = line.match(/\bSTOPLOSS\s+([\d.]+)/i);
+    if (m) {
+      const v = parseFloat(m[1]);
+      if (!isNaN(v) && v > 0) return v;
+    }
+    m = line.match(/\bStop\s+Loss\s*:?\s*([\d.]+)/i);
     if (m) {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) return v;
@@ -225,6 +244,16 @@ const extractTakeProfits = (content: string): number[] => {
       if (!isNaN(v) && v > 0) tps.push(v);
     }
   }
+
+  if (tps.length === 0) {
+    const targetRe = /\bTarget\s*\d+\s*:\s*([\d.]+)/gi;
+    let tm: RegExpExecArray | null;
+    while ((tm = targetRe.exec(content)) !== null) {
+      const v = parseFloat(tm[1]);
+      if (!isNaN(v) && v > 0) tps.push(v);
+    }
+  }
+
   if (tps.length > 0) return tps;
 
   // Single-line compact: TP: 4608, TP1: …, TP 4455, TP¹✔️4533 (¹–⁹ + ✔ optional VS U+FE0F, then price)
@@ -251,6 +280,30 @@ const isFormat9SingleLineMarket = (t: string): boolean => {
   return new RegExp(`\\bTP[${superscripts}]`).test(t);
 };
 
+/** Forex Signal … between a till b → limit entry (not market). */
+const extractForexLimitEntry = (
+  content: string,
+  options?: ParserOptions,
+): {
+  signalType: 'long' | 'short';
+  entryPrice: number;
+  entryTargets: [number, number];
+} | null => {
+  const side = content.match(/\bForex\s+Signal\s+(Buy|Sell)\s+[A-Z]{6}\b/i);
+  if (!side) return null;
+  const range = content.match(/\bbetween\s+([\d.]+)\s+till\s+([\d.]+)/i);
+  if (!range) return null;
+  const a = parseFloat(range[1]);
+  const b = parseFloat(range[2]);
+  if (isNaN(a) || isNaN(b) || a <= 0 || b <= 0) return null;
+  const signalType = side[1].toLowerCase() === 'buy' ? 'long' : 'short';
+  const strategy = options?.entryPriceStrategy || 'worst';
+  const entryPrice = calculateEntryPrice(a, b, signalType, strategy);
+  const lo = Math.min(a, b);
+  const hi = Math.max(a, b);
+  return { signalType, entryPrice, entryTargets: [lo, hi] };
+};
+
 export const ctraderFtgParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
     const normalizedContent = content.trim();
@@ -258,6 +311,43 @@ export const ctraderFtgParser = (content: string, options?: ParserOptions): Pars
 
     const tradingPair = resolveFtgTradingPair(normalizedContent);
     if (!tradingPair) return ctraderGoldParser(content, options);
+
+    const forexLimit = extractForexLimitEntry(normalizedContent, options);
+    if (forexLimit) {
+      const stopLoss = extractStopLoss(normalizedContent);
+      if (stopLoss === undefined) return ctraderGoldParser(content, options);
+
+      const takeProfitsRaw = extractTakeProfits(normalizedContent);
+      if (takeProfitsRaw.length === 0) return ctraderGoldParser(content, options);
+
+      const takeProfits = [...takeProfitsRaw];
+      if (forexLimit.signalType === 'long') {
+        takeProfits.sort((a, b) => a - b);
+      } else {
+        takeProfits.sort((a, b) => b - a);
+      }
+
+      const deduplicatedTPs = deduplicateTakeProfits(takeProfits, forexLimit.signalType);
+      if (deduplicatedTPs.length === 0) return ctraderGoldParser(content, options);
+
+      const leverage = 20;
+
+      const parsedOrder: ParsedOrder = {
+        tradingPair,
+        entryPrice: forexLimit.entryPrice,
+        entryTargets: forexLimit.entryTargets,
+        stopLoss,
+        takeProfits: deduplicatedTPs,
+        leverage,
+        signalType: forexLimit.signalType,
+      };
+
+      if (!validateParsedOrder(parsedOrder, { message: content })) {
+        return ctraderGoldParser(content, options);
+      }
+
+      return parsedOrder;
+    }
 
     const pricedEntry = extractEntryAndSide(normalizedContent);
     const format9Market = isFormat9SingleLineMarket(normalizedContent);
