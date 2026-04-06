@@ -1,10 +1,11 @@
 import { TelegramClient, Api } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { HarvesterConfig } from '../types/config.js';
-import { DatabaseManager } from '../db/schema.js';
+import { DatabaseManager, type Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { downloadMessageImages } from '../utils/imageDownloader.js';
 import { isDuplicateKeyError, getDuplicateKeyLogger } from '../utils/duplicateKeyLogger.js';
+import { withTimeout, TimeoutError } from '../utils/withTimeout.js';
 
 interface HarvesterState {
   client: TelegramClient;
@@ -256,6 +257,96 @@ const sleep = (ms: number): Promise<void> => {
   });
 };
 
+/** Default 120s — GramJS cannot cancel in-flight MTProto; we stop awaiting and retry next poll. */
+const GET_HISTORY_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_GET_HISTORY_TIMEOUT_MS || '120000', 10)
+);
+const GET_HISTORY_SLOW_MS = Math.max(
+  1_000,
+  parseInt(process.env.TG_GET_HISTORY_SLOW_MS || '10000', 10)
+);
+
+/** Per-message media download (downloadMedia can hang on bad networks). */
+const DOWNLOAD_MEDIA_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_DOWNLOAD_MEDIA_TIMEOUT_MS || '60000', 10)
+);
+
+/** insertMessage, getMessageByMessageId, insertMessageVersion, updateMessage in harvest/edit paths. */
+const DB_OPERATION_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_DB_OPERATION_TIMEOUT_MS || '90000', 10)
+);
+
+/** getMessagesByChannel on startup (can be heavy on large DBs). */
+const DB_STARTUP_QUERY_TIMEOUT_MS = Math.max(
+  10_000,
+  parseInt(process.env.TG_DB_STARTUP_QUERY_TIMEOUT_MS || '180000', 10)
+);
+
+/** client.getMessages (e.g. edit handler). */
+const TELEGRAM_GET_MESSAGES_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_GET_MESSAGES_TIMEOUT_MS || '60000', 10)
+);
+
+const IMPORT_CHAT_INVITE_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_IMPORT_CHAT_INVITE_TIMEOUT_MS || '60000', 10)
+);
+
+const GET_ENTITY_TIMEOUT_MS = Math.max(
+  5_000,
+  parseInt(process.env.TG_GET_ENTITY_TIMEOUT_MS || '60000', 10)
+);
+
+/** Upper bound on scanning dialogs for channel resolution (iterDialogs cannot be cancelled). */
+const FIND_DIALOGS_TIMEOUT_MS = Math.max(
+  30_000,
+  parseInt(process.env.TG_FIND_DIALOGS_TIMEOUT_MS || '300000', 10)
+);
+
+class GetHistoryTimeoutError extends Error {
+  readonly timeoutMs: number;
+  readonly channel: string;
+  readonly harvesterName: string;
+
+  constructor(timeoutMs: number, channel: string, harvesterName: string) {
+    super(
+      `GetHistory timed out after ${timeoutMs}ms (harvester=${harvesterName}, channel=${channel})`
+    );
+    this.name = 'GetHistoryTimeoutError';
+    this.timeoutMs = timeoutMs;
+    this.channel = channel;
+    this.harvesterName = harvesterName;
+  }
+}
+
+/**
+ * Race Telegram invoke against a wall clock. The underlying request may still complete server-side;
+ * we only stop waiting so the harvest loop can continue for other channels sharing the client.
+ */
+const invokeGetHistoryWithTimeout = async (
+  promise: Promise<Api.messages.TypeMessages>,
+  timeoutMs: number,
+  channel: string,
+  harvesterName: string
+): Promise<Api.messages.TypeMessages> => {
+  try {
+    return await withTimeout(
+      promise,
+      timeoutMs,
+      `messages.GetHistory ${harvesterName}@${channel}`
+    );
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+      throw new GetHistoryTimeoutError(timeoutMs, channel, harvesterName);
+    }
+    throw e;
+  }
+};
+
 /** Match list_channels / TelegramClient.iterDialogs — avoid missing channels past the first N dialogs. */
 const MAX_DIALOGS_TO_SCAN_FOR_CHANNEL = 5000;
 
@@ -272,8 +363,9 @@ const channelMatchesConfig = (entity: Api.Channel, channel: string): boolean => 
 /**
  * Scan dialogs (newest-first) until the configured channel is found or the limit is reached.
  * Required when access hash env is missing/wrong and getEntity fails for large numeric IDs.
+ * Bounded by FIND_DIALOGS_TIMEOUT_MS (iterDialogs continues in the background until GC if timed out).
  */
-const findChannelInDialogs = async (
+const findChannelInDialogsScan = async (
   client: TelegramClient,
   config: HarvesterConfig,
   maxDialogs: number
@@ -285,6 +377,30 @@ const findChannelInDialogs = async (
     }
   }
   return undefined;
+};
+
+const findChannelInDialogs = async (
+  client: TelegramClient,
+  config: HarvesterConfig,
+  maxDialogs: number
+): Promise<Api.Channel | undefined> => {
+  try {
+    return await withTimeout(
+      findChannelInDialogsScan(client, config, maxDialogs),
+      FIND_DIALOGS_TIMEOUT_MS,
+      `iterDialogs scan for channel ${config.channel}`
+    );
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+      logger.warn('Dialog scan timed out before channel was found; will try getEntity if applicable', {
+        channel: config.channel,
+        timeoutMs: FIND_DIALOGS_TIMEOUT_MS,
+        note: 'Set TG_FIND_DIALOGS_TIMEOUT_MS to adjust (default 300000).',
+      });
+      return undefined;
+    }
+    throw e;
+  }
 };
 
 const connectTelegram = async (
@@ -366,7 +482,11 @@ const resolveEntity = async (
 
     if (config.channel.startsWith('https://t.me/+') || config.channel.startsWith('t.me/+')) {
       const hash = config.channel.split('+')[1];
-      const res = await client.invoke(new Api.messages.ImportChatInvite({ hash }));
+      const res = await withTimeout(
+        client.invoke(new Api.messages.ImportChatInvite({ hash })),
+        IMPORT_CHAT_INVITE_TIMEOUT_MS,
+        `ImportChatInvite channel=${config.channel}`
+      );
       if ('chats' in res && res.chats && res.chats.length) {
         const chat = res.chats[0];
         if (chat instanceof Api.Chat || chat instanceof Api.Channel) {
@@ -403,7 +523,11 @@ const resolveEntity = async (
     // Fallback to getEntity if not found in dialogs
     // Note: getEntity may fail for large channel IDs, so we catch and provide better error
     try {
-      const entity = await client.getEntity(config.channel);
+      const entity = await withTimeout(
+        client.getEntity(config.channel),
+        GET_ENTITY_TIMEOUT_MS,
+        `getEntity channel=${config.channel}`
+      );
       if (entity instanceof Api.Channel) {
         return new Api.InputPeerChannel({
           channelId: BigInt(String(entity.id)) as any,
@@ -505,16 +629,52 @@ const fetchNewMessages = async (
     // For forward polling (new messages), always get the most recent messages
     // offsetId: 0 means get the newest messages
     // We'll filter out already-processed messages below
-    const history = await client.invoke(new Api.messages.GetHistory({
-      peer: entity,
-      offsetId: 0,
-      limit: 5,
-      addOffset: 0,
-      maxId: 0,
-      minId: 0,
-      hash: BigInt(0) as any,
-    }));
-    
+    const getHistoryStarted = Date.now();
+    let history: Api.messages.TypeMessages;
+    try {
+      history = await invokeGetHistoryWithTimeout(
+        client.invoke(
+          new Api.messages.GetHistory({
+            peer: entity,
+            offsetId: 0,
+            limit: 5,
+            addOffset: 0,
+            maxId: 0,
+            minId: 0,
+            hash: BigInt(0) as any,
+          })
+        ) as Promise<Api.messages.TypeMessages>,
+        GET_HISTORY_TIMEOUT_MS,
+        config.channel,
+        config.name
+      );
+    } catch (e) {
+      if (e instanceof GetHistoryTimeoutError) {
+        logger.warn(
+          'GetHistory timed out; underlying Telegram request may still complete. Retrying next poll.',
+          {
+            channel: config.channel,
+            harvester: config.name,
+            timeoutMs: e.timeoutMs,
+            note: 'Set TG_GET_HISTORY_TIMEOUT_MS to adjust (default 120000).',
+          }
+        );
+        return lastMessageId;
+      }
+      throw e;
+    }
+
+    const getHistoryDurationMs = Date.now() - getHistoryStarted;
+    if (getHistoryDurationMs >= GET_HISTORY_SLOW_MS) {
+      logger.warn('GetHistory slow', {
+        channel: config.channel,
+        harvester: config.name,
+        durationMs: getHistoryDurationMs,
+        slowThresholdMs: GET_HISTORY_SLOW_MS,
+        note: 'Set TG_GET_HISTORY_SLOW_MS to adjust warning threshold (default 10000).',
+      });
+    }
+
     // Successfully fetched messages - reset AUTH_KEY_DUPLICATED counter
     authKeyDuplicateCounts.delete(harvesterKey);
 
@@ -623,34 +783,59 @@ const fetchNewMessages = async (
       let imagePaths: string[] = [];
       if (config.downloadImages && msg instanceof Api.Message) {
         try {
-          imagePaths = await downloadMessageImages(
-            { channel: config.channel, downloadImages: config.downloadImages },
-            client,
-            msg
+          imagePaths = await withTimeout(
+            downloadMessageImages(
+              { channel: config.channel, downloadImages: config.downloadImages },
+              client,
+              msg
+            ),
+            DOWNLOAD_MEDIA_TIMEOUT_MS,
+            `downloadMessageImages ch=${config.channel} msg=${msgId}`
           );
         } catch (error) {
-          logger.warn('Failed to download images for message', {
-            channel: config.channel,
-            messageId: msgId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-          // Continue with message insertion even if image download fails
+          if (error instanceof TimeoutError) {
+            logger.warn('Image download timed out; continuing without images', {
+              channel: config.channel,
+              messageId: msgId,
+              timeoutMs: error.timeoutMs,
+              note: 'Set TG_DOWNLOAD_MEDIA_TIMEOUT_MS to adjust (default 60000).',
+            });
+          } else {
+            logger.warn('Failed to download images for message', {
+              channel: config.channel,
+              messageId: msgId,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
         }
       }
 
       try {
-        await db.insertMessage({
-          message_id: String(msgId),
-          channel: config.channel,
-          content: String(msg.message).replace(/\s+/g, ' ').trim(),
-          sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
-          date: msgDate.toISOString(),
-          reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
-          image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined
-        });
+        await withTimeout(
+          db.insertMessage({
+            message_id: String(msgId),
+            channel: config.channel,
+            content: String(msg.message).replace(/\s+/g, ' ').trim(),
+            sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
+            date: msgDate.toISOString(),
+            reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
+            image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined
+          }),
+          DB_OPERATION_TIMEOUT_MS,
+          `insertMessage ch=${config.channel} id=${msgId}`
+        );
         newMessagesCount++;
         newLastMessageId = Math.max(newLastMessageId, msgId);
       } catch (error) {
+        if (error instanceof TimeoutError) {
+          logger.warn('insertMessage timed out; will retry on next poll if message still missing', {
+            channel: config.channel,
+            messageId: msgId,
+            timeoutMs: error.timeoutMs,
+            note: 'Set TG_DB_OPERATION_TIMEOUT_MS to adjust (default 90000).',
+          });
+          continue;
+        }
         if (isDuplicateKeyError(error)) {
           // Message already exists in database - this is expected for duplicates
           skippedCount++;
@@ -1017,7 +1202,28 @@ export const startSignalHarvester = async (
   });
 
   // Initialize lastMessageId from database to avoid reprocessing existing messages on startup
-  const existingMessages = await db.getMessagesByChannel(config.channel);
+  let existingMessages: Message[];
+  try {
+    existingMessages = await withTimeout(
+      db.getMessagesByChannel(config.channel),
+      DB_STARTUP_QUERY_TIMEOUT_MS,
+      `getMessagesByChannel startup ${config.channel}`
+    );
+  } catch (e) {
+    if (e instanceof TimeoutError) {
+      logger.error(
+        'getMessagesByChannel timed out during startup; lastMessageId starts at 0 (may reprocess recent messages)',
+        {
+          channel: config.channel,
+          timeoutMs: DB_STARTUP_QUERY_TIMEOUT_MS,
+          note: 'Set TG_DB_STARTUP_QUERY_TIMEOUT_MS to adjust (default 180000).',
+        }
+      );
+      existingMessages = [];
+    } else {
+      throw e;
+    }
+  }
   
   if (existingMessages.length > 0) {
     // Convert message_id strings to numbers for comparison (Telegram uses numeric IDs)
@@ -1058,14 +1264,22 @@ export const startSignalHarvester = async (
         const messageIdStr = String(messageIdNum);
 
         // Get the updated message
-        const messages = await client.getMessages(entity!, { ids: [messageIdNum] });
+        const messages = await withTimeout(
+          client.getMessages(entity!, { ids: [messageIdNum] }),
+          TELEGRAM_GET_MESSAGES_TIMEOUT_MS,
+          `getMessages edit ch=${config.channel} id=${messageIdStr}`
+        );
         if (!messages || messages.length === 0) return;
 
         const msg = messages[0];
         if (!msg || !('message' in msg) || !msg.message) return;
 
         // Get existing message from database
-        const existingMessage = await db.getMessageByMessageId(messageIdStr, config.channel);
+        const existingMessage = await withTimeout(
+          db.getMessageByMessageId(messageIdStr, config.channel),
+          DB_OPERATION_TIMEOUT_MS,
+          `getMessageByMessageId edit ch=${config.channel} id=${messageIdStr}`
+        );
         if (!existingMessage) {
           logger.debug('Edited message not found in database', {
             channel: config.channel,
@@ -1083,23 +1297,39 @@ export const startSignalHarvester = async (
 
         // Store the previous version in message_versions table
         try {
-          await db.insertMessageVersion(messageIdStr, config.channel, existingMessage.content);
+          await withTimeout(
+            db.insertMessageVersion(messageIdStr, config.channel, existingMessage.content),
+            DB_OPERATION_TIMEOUT_MS,
+            `insertMessageVersion edit ch=${config.channel} id=${messageIdStr}`
+          );
         } catch (error) {
-          logger.warn('Failed to insert message version, continuing with update', {
-            channel: config.channel,
-            messageId: messageIdStr,
-            error: error instanceof Error ? error.message : String(error)
-          });
+          if (error instanceof TimeoutError) {
+            logger.warn('insertMessageVersion timed out; continuing with update', {
+              channel: config.channel,
+              messageId: messageIdStr,
+              timeoutMs: error.timeoutMs,
+            });
+          } else {
+            logger.warn('Failed to insert message version, continuing with update', {
+              channel: config.channel,
+              messageId: messageIdStr,
+              error: error instanceof Error ? error.message : String(error)
+            });
+          }
         }
 
         // Update message in database with new content
         // Keep old_content for backward compatibility, but versions table is the source of truth
-        await db.updateMessage(messageIdStr, config.channel, {
-          content: newContent,
-          old_content: existingMessage.content, // Keep for backward compatibility
-          edited_at: new Date().toISOString(),
-          parsed: false // Mark as unparsed to trigger re-processing
-        });
+        await withTimeout(
+          db.updateMessage(messageIdStr, config.channel, {
+            content: newContent,
+            old_content: existingMessage.content, // Keep for backward compatibility
+            edited_at: new Date().toISOString(),
+            parsed: false // Mark as unparsed to trigger re-processing
+          }),
+          DB_OPERATION_TIMEOUT_MS,
+          `updateMessage edit ch=${config.channel} id=${messageIdStr}`
+        );
 
         logger.info('Message edit detected and stored', {
           channel: config.channel,
