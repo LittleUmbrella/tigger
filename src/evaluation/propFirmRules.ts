@@ -89,6 +89,16 @@ export const PROP_FIRM_RULES: Record<string, PropFirmRule> = {
     stopLossRequired: true,
     stopLossTimeLimit: 5, // Must set stop-loss within 5 minutes
   },
+
+  /** The5ers — drawdown limits (override initialBalance per channel/account as needed) */
+  'the5ers': {
+    name: 'the5ers',
+    displayName: 'The5ers',
+    initialBalance: 10000,
+    maxDrawdown: 10,
+    dailyDrawdown: 5,
+    dailyDrawdownMode: 'swing',
+  },
   
   'mubite': {
     name: 'mubite',

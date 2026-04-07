@@ -292,7 +292,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -312,7 +312,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -332,7 +332,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -351,7 +351,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -370,7 +370,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -389,7 +389,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -408,7 +408,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
@@ -426,7 +426,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
+      "propFirms": [{"name": "the5ers", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
