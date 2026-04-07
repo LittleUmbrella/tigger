@@ -104,7 +104,8 @@ export const processUnparsedMessages = async (
   propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
   tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
-  useLimitOrderForEntry?: boolean // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
+  useLimitOrderForEntry?: boolean, // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
+  maxSkippablePastTPs?: number // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -191,7 +192,8 @@ export const processUnparsedMessages = async (
     propFirms,
     tradeObfuscation,
     slAdjustmentTolerancePercent,
-    useLimitOrderForEntry
+    useLimitOrderForEntry,
+    maxSkippablePastTPs
   );
   
   logger.debug('Finished processing messages', {
@@ -222,7 +224,8 @@ export const processMessages = async (
   propFirms?: (string | CustomPropFirmConfig)[],
   tradeObfuscation?: TradeObfuscationConfig,
   slAdjustmentTolerancePercent?: number,
-  useLimitOrderForEntry?: boolean
+  useLimitOrderForEntry?: boolean,
+  maxSkippablePastTPs?: number
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -304,7 +307,8 @@ export const processMessages = async (
           accountFilters,
           propFirms,
           slAdjustmentTolerancePercent,
-          useLimitOrderForEntry
+          useLimitOrderForEntry,
+          maxSkippablePastTPs
         };
 
         try {

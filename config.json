@@ -296,7 +296,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "slAdjustmentTolerancePercent": 0.03
+      "slAdjustmentTolerancePercent": 0.03,
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2120484771",
@@ -315,7 +316,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "slAdjustmentTolerancePercent": 0.03
+      "slAdjustmentTolerancePercent": 0.03,
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2385521106",
@@ -333,7 +335,8 @@
       "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2889224950",
@@ -351,7 +354,8 @@
       "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2845421508",
@@ -369,7 +373,8 @@
       "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2986529706",
@@ -387,7 +392,8 @@
       "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "2498976211",
@@ -405,7 +411,8 @@
       "propFirms": [{"name": "hyrotrader", "initialBalance": 2500}],
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
-      }
+      },
+      "maxSkippablePastTPs": 1
     },
     {
       "channel": "1441399338805891174",
@@ -423,7 +430,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "slAdjustmentTolerancePercent": 0.03
+      "slAdjustmentTolerancePercent": 0.03,
+      "maxSkippablePastTPs": 1
     }
   ],
   "database": {

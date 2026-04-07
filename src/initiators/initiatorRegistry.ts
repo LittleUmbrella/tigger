@@ -27,6 +27,8 @@ export interface InitiatorContext {
   slAdjustmentTolerancePercent?: number; // Per-channel: when price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   /** cTrader only: When true, convert market orders to limit at current price. When false, use market with relative SL/TP (default: true) */
   useLimitOrderForEntry?: boolean;
+  /** cTrader market orders only: max number of TPs to skip when price has already moved past them (0 = reject, default) */
+  maxSkippablePastTPs?: number;
 }
 
 /**

@@ -174,7 +174,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs } = context;
 
   /** False → real market order (relative SL/TP). True → limit at current price ("limit-at-touch"). Parsers may set order.marketExecution to force the market path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
@@ -1167,7 +1167,52 @@ const executeTradeForAccount = async (
               const cp = currentPriceForMarketOrder;
               const isLong = order.signalType === 'long';
               const digits = pricePrecision ?? getDecimalPrecision(cp);
+
+              // Filter out TPs already past current price (configurable via maxSkippablePastTPs)
+              const maxSkippable = maxSkippablePastTPs ?? 0;
+              const pastTPs: typeof validTPOrders = [];
+              const activeTPs: typeof validTPOrders = [];
               for (const tp of validTPOrders) {
+                const tpValid = isLong ? tp.price > cp : tp.price < cp;
+                if (tpValid) {
+                  activeTPs.push(tp);
+                } else {
+                  pastTPs.push(tp);
+                }
+              }
+
+              if (pastTPs.length > 0 && pastTPs.length <= maxSkippable && activeTPs.length > 0) {
+                const redistributedQty = pastTPs.reduce((sum, tp) => sum + tp.quantity, 0);
+                const perTPExtra = redistributedQty / activeTPs.length;
+                for (const tp of activeTPs) {
+                  tp.quantity += perTPExtra;
+                }
+                logger.info('Skipped TPs already past current price, redistributed quantity', {
+                  channel,
+                  symbol,
+                  accountName: accountName || 'default',
+                  currentPrice: cp,
+                  signalType: order.signalType,
+                  skippedTPs: pastTPs.map(tp => tp.price),
+                  skippedCount: pastTPs.length,
+                  maxSkippable,
+                  remainingTPs: activeTPs.map(tp => tp.price),
+                  redistributedQty,
+                  exchange: 'ctrader'
+                });
+              } else if (pastTPs.length > maxSkippable) {
+                throw new Error(
+                  `Cannot place cTrader market order: ${pastTPs.length} TP(s) already past current price ${cp} ` +
+                  `(max skippable: ${maxSkippable}). Past TPs: ${pastTPs.map(tp => tp.price).join(', ')}`
+                );
+              } else if (pastTPs.length > 0 && activeTPs.length === 0) {
+                throw new Error(
+                  `Cannot place cTrader market order: all TPs already past current price ${cp}`
+                );
+              }
+
+              const tpsToPlace = activeTPs.length > 0 ? activeTPs : validTPOrders;
+              for (const tp of tpsToPlace) {
                 let relativeSl: number | undefined;
                 let relativeTp: number | undefined;
                 if (roundedStopLoss > 0) {
@@ -1177,17 +1222,15 @@ const executeTradeForAccount = async (
                     relativeSl = toRelativeSlTp(slDiff, digits);
                   }
                 }
-                const tpValid = isLong ? tp.price > cp : tp.price < cp;
-                if (tpValid) {
-                  const tpDiff = isLong ? tp.price - cp : cp - tp.price;
-                  relativeTp = toRelativeSlTp(tpDiff, digits);
-                }
+                const tpDiff = isLong ? tp.price - cp : cp - tp.price;
+                relativeTp = toRelativeSlTp(tpDiff, digits);
+
                 if (relativeSl == null && roundedStopLoss > 0) {
                   throw new Error(
                     `Cannot place cTrader market order: stop loss invalid relative to current price ${cp}`
                   );
                 }
-                if (relativeTp == null) {
+                if (relativeTp == null || relativeTp <= 0) {
                   throw new Error(
                     `Cannot place cTrader market order: TP ${tp.price} invalid relative to current price ${cp}`
                   );
@@ -1207,10 +1250,17 @@ const executeTradeForAccount = async (
                 symbol,
                 accountName: accountName || 'default',
                 tradeCount: ids.length,
-                quantities,
+                tpsPlaced: tpsToPlace.map(tp => tp.price),
+                tpsSkipped: pastTPs.length,
+                quantities: tpsToPlace.map(tp => tp.quantity),
                 label,
                 exchange: 'ctrader'
               });
+              // Update validTPOrders/quantities to reflect what was actually placed
+              validTPOrders.length = 0;
+              validTPOrders.push(...tpsToPlace);
+              quantities.length = 0;
+              quantities.push(...tpsToPlace.map(tp => tp.quantity));
             }
 
             orderId = ids[0];
@@ -1302,11 +1352,25 @@ const executeTradeForAccount = async (
             }
           }
           if (roundedTPPrices && roundedTPPrices.length > 0) {
-            const bestTpPrice = roundedTPPrices[roundedTPPrices.length - 1];
-            const tpValid = isLong ? bestTpPrice > cp : bestTpPrice < cp;
-            if (tpValid) {
+            // Pick the furthest valid TP (best TP still beyond current price)
+            const validTPs = roundedTPPrices.filter(tp => isLong ? tp > cp : tp < cp);
+            const bestTpPrice = validTPs.length > 0 ? validTPs[validTPs.length - 1] : undefined;
+            if (bestTpPrice !== undefined) {
               const tpDiff = isLong ? bestTpPrice - cp : cp - bestTpPrice;
               relativeTp = toRelativeSlTp(tpDiff, digits);
+            }
+            const pastCount = roundedTPPrices.length - validTPs.length;
+            if (pastCount > 0) {
+              logger.info('Single-trade market order: some TPs already past current price', {
+                channel,
+                symbol,
+                currentPrice: cp,
+                signalType: order.signalType,
+                pastTPs: roundedTPPrices.filter(tp => !(isLong ? tp > cp : tp < cp)),
+                validTPs,
+                selectedTP: bestTpPrice,
+                exchange: 'ctrader'
+              });
             }
           }
           if (relativeSl == null && roundedStopLoss && roundedStopLoss > 0) {
@@ -1316,7 +1380,7 @@ const executeTradeForAccount = async (
           }
           if (relativeTp == null && roundedTPPrices && roundedTPPrices.length > 0) {
             throw new Error(
-              `Cannot place cTrader market order: take profit invalid relative to current price ${cp} for ${order.signalType}`
+              `Cannot place cTrader market order: all take profits already past current price ${cp} for ${order.signalType}`
             );
           }
           logger.info('Placing cTrader market order with relative SL/TP', {
