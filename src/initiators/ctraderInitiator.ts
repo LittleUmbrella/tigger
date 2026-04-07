@@ -8,6 +8,12 @@ import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
+import {
+  getRangeBoundaryTpIndex,
+  getRangeBoundaryTpPrice,
+  computeSlippagePointsForBoundaryTp,
+  hasNoRoomToBoundaryTpForMarketRange
+} from '../utils/ctraderMarketRange.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
@@ -174,7 +180,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs, useMarketRangeForEntry } = context;
 
   /** False → real market order (relative SL/TP). True → limit at current price ("limit-at-touch"). Parsers may set order.marketExecution to force the market path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
@@ -1107,6 +1113,10 @@ const executeTradeForAccount = async (
           'Volume must be converted from base units to lots; without lotSize the order would be incorrectly sized.'
         );
       }
+      const pipSizeForMarketRange =
+        tickSize != null && tickSize > 0
+          ? tickSize
+          : Math.pow(10, -Math.min((pricePrecision ?? getDecimalPrecision(roundedEntryPrice)), 12));
       try {
         // useLimitAtTouch: convert market to limit at current price. order.marketExecution forces market (e.g. DGF).
         const limitPrice = (isMarketOrder && useLimitAtTouch ? currentPriceForMarketOrder : null) ?? roundedEntryPrice;
@@ -1167,6 +1177,65 @@ const executeTradeForAccount = async (
               const cp = currentPriceForMarketOrder;
               const isLong = order.signalType === 'long';
               const digits = pricePrecision ?? getDecimalPrecision(cp);
+
+              let marketRangeParams: { slippageInPoints: number } | undefined;
+              let boundaryTpForRange: number | undefined;
+              if (useMarketRangeForEntry) {
+                const rawBoundaryIdx = maxSkippablePastTPs ?? 0;
+                const usedBoundaryIdx = roundedTPPrices?.length
+                  ? getRangeBoundaryTpIndex(maxSkippablePastTPs, roundedTPPrices.length)
+                  : 0;
+                if (roundedTPPrices?.length && rawBoundaryIdx > usedBoundaryIdx) {
+                  logger.info('MARKET_RANGE boundary TP index clamped to last available TP', {
+                    channel,
+                    messageId: message.message_id,
+                    maxSkippablePastTPsRequested: rawBoundaryIdx,
+                    usedTpIndex: usedBoundaryIdx,
+                    tpCount: roundedTPPrices.length,
+                    exchange: 'ctrader'
+                  });
+                }
+                boundaryTpForRange = roundedTPPrices?.length
+                  ? getRangeBoundaryTpPrice(roundedTPPrices, maxSkippablePastTPs)
+                  : undefined;
+                marketRangeParams =
+                  boundaryTpForRange != null
+                    ? computeSlippagePointsForBoundaryTp({
+                        signalType: order.signalType,
+                        currentPrice: cp,
+                        boundaryTp: boundaryTpForRange,
+                        pipSize: pipSizeForMarketRange
+                      })
+                    : undefined;
+                if (boundaryTpForRange == null) {
+                  throw new Error(
+                    'Cannot place cTrader MARKET_RANGE: need at least one take profit (order not placed).'
+                  );
+                }
+                if (marketRangeParams == null) {
+                  const past =
+                    boundaryTpForRange != null &&
+                    hasNoRoomToBoundaryTpForMarketRange(order.signalType, cp, boundaryTpForRange);
+                  throw new Error(
+                    past
+                      ? `Cannot place cTrader MARKET_RANGE: current price ${cp} already at or past boundary TP ${boundaryTpForRange} for ${order.signalType} — order not placed.`
+                      : `Cannot place cTrader MARKET_RANGE: invalid pip size or boundary TP (boundaryTp=${boundaryTpForRange}, currentPrice=${cp}). Order not placed.`
+                  );
+                }
+                logger.info('cTrader MARKET_RANGE boundary TP (N-trades)', {
+                  channel,
+                  messageId: message.message_id,
+                  baseSlippagePrice: cp,
+                  slippageInPoints: marketRangeParams.slippageInPoints,
+                  boundaryTp: boundaryTpForRange,
+                  boundaryTpIndex: usedBoundaryIdx,
+                  maxSkippablePastTPs: maxSkippablePastTPs ?? 0,
+                  signalType: order.signalType,
+                  symbol,
+                  accountName: accountName || 'default',
+                  exchange: 'ctrader'
+                });
+              }
 
               // Filter out TPs already past current price (configurable via maxSkippablePastTPs)
               const maxSkippable = maxSkippablePastTPs ?? 0;
@@ -1235,14 +1304,26 @@ const executeTradeForAccount = async (
                     `Cannot place cTrader market order: TP ${tp.price} invalid relative to current price ${cp}`
                   );
                 }
-                const sid = await ctraderClient.placeMarketOrder({
-                  symbol,
-                  volume: tp.quantity,
-                  tradeSide,
-                  ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
-                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
-                  label
-                });
+                const sid =
+                  useMarketRangeForEntry && marketRangeParams
+                    ? await ctraderClient.placeMarketRangeOrder({
+                        symbol,
+                        volume: tp.quantity,
+                        tradeSide,
+                        baseSlippagePrice: cp,
+                        slippageInPoints: marketRangeParams.slippageInPoints,
+                        ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+                        ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
+                        label
+                      })
+                    : await ctraderClient.placeMarketOrder({
+                        symbol,
+                        volume: tp.quantity,
+                        tradeSide,
+                        ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+                        ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
+                        label
+                      });
                 ids.push(sid);
               }
               logger.info('cTrader N-trades placed (market, one per TP)', {
@@ -1342,6 +1423,66 @@ const executeTradeForAccount = async (
           const cp = currentPriceForMarketOrder;
           const isLong = order.signalType === 'long';
           const digits = pricePrecision ?? getDecimalPrecision(cp);
+
+          let marketRangeParamsSingle: { slippageInPoints: number } | undefined;
+          let boundaryTpForRangeSingle: number | undefined;
+          if (useMarketRangeForEntry) {
+            const rawBoundaryIdxSingle = maxSkippablePastTPs ?? 0;
+            const usedBoundaryIdxSingle = roundedTPPrices?.length
+              ? getRangeBoundaryTpIndex(maxSkippablePastTPs, roundedTPPrices.length)
+              : 0;
+            if (roundedTPPrices?.length && rawBoundaryIdxSingle > usedBoundaryIdxSingle) {
+              logger.info('MARKET_RANGE boundary TP index clamped to last available TP', {
+                channel,
+                messageId: message.message_id,
+                maxSkippablePastTPsRequested: rawBoundaryIdxSingle,
+                usedTpIndex: usedBoundaryIdxSingle,
+                tpCount: roundedTPPrices.length,
+                exchange: 'ctrader'
+              });
+            }
+            boundaryTpForRangeSingle = roundedTPPrices?.length
+              ? getRangeBoundaryTpPrice(roundedTPPrices, maxSkippablePastTPs)
+              : undefined;
+            marketRangeParamsSingle =
+              boundaryTpForRangeSingle != null
+                ? computeSlippagePointsForBoundaryTp({
+                    signalType: order.signalType,
+                    currentPrice: cp,
+                    boundaryTp: boundaryTpForRangeSingle,
+                    pipSize: pipSizeForMarketRange
+                  })
+                : undefined;
+            if (boundaryTpForRangeSingle == null) {
+              throw new Error(
+                'Cannot place cTrader MARKET_RANGE: need at least one take profit (order not placed).'
+              );
+            }
+            if (marketRangeParamsSingle == null) {
+              const past =
+                boundaryTpForRangeSingle != null &&
+                hasNoRoomToBoundaryTpForMarketRange(order.signalType, cp, boundaryTpForRangeSingle);
+              throw new Error(
+                past
+                  ? `Cannot place cTrader MARKET_RANGE: current price ${cp} already at or past boundary TP ${boundaryTpForRangeSingle} for ${order.signalType} — order not placed.`
+                  : `Cannot place cTrader MARKET_RANGE: invalid pip size or boundary TP (boundaryTp=${boundaryTpForRangeSingle}, currentPrice=${cp}). Order not placed.`
+              );
+            }
+            logger.info('cTrader MARKET_RANGE boundary TP (single)', {
+              channel,
+              messageId: message.message_id,
+              baseSlippagePrice: cp,
+              slippageInPoints: marketRangeParamsSingle.slippageInPoints,
+              boundaryTp: boundaryTpForRangeSingle,
+              boundaryTpIndex: usedBoundaryIdxSingle,
+              maxSkippablePastTPs: maxSkippablePastTPs ?? 0,
+              signalType: order.signalType,
+              symbol,
+              accountName: accountName || 'default',
+              exchange: 'ctrader'
+            });
+          }
+
           let relativeSl: number | undefined;
           let relativeTp: number | undefined;
           if (roundedStopLoss && roundedStopLoss > 0) {
@@ -1391,15 +1532,34 @@ const executeTradeForAccount = async (
             ...(relativeSl != null && { relativeStopLoss: relativeSl }),
             ...(relativeTp != null && { relativeTakeProfit: relativeTp }),
             accountName: accountName || 'default',
-            exchange: 'ctrader'
+            exchange: 'ctrader',
+            ...(useMarketRangeForEntry && marketRangeParamsSingle
+              ? {
+                  orderKind: 'MARKET_RANGE' as const,
+                  baseSlippagePrice: cp,
+                  slippageInPoints: marketRangeParamsSingle.slippageInPoints,
+                  boundaryTp: boundaryTpForRangeSingle
+                }
+              : {})
           });
-          orderId = await ctraderClient.placeMarketOrder({
-            symbol,
-            volume: qty,
-            tradeSide,
-            ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
-            ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
-          });
+          orderId =
+            useMarketRangeForEntry && marketRangeParamsSingle
+              ? await ctraderClient.placeMarketRangeOrder({
+                  symbol,
+                  volume: qty,
+                  tradeSide,
+                  baseSlippagePrice: cp,
+                  slippageInPoints: marketRangeParamsSingle.slippageInPoints,
+                  ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
+                })
+              : await ctraderClient.placeMarketOrder({
+                  symbol,
+                  volume: qty,
+                  tradeSide,
+                  ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
+                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
+                });
         } else {
           // Limit order at entry price
           logger.info('Placing cTrader limit order', {

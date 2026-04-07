@@ -249,7 +249,7 @@
       "type": "ctrader",
       "pollInterval": 4000,
       "dynamicBreakevenAfterTPs": true,
-      "_comment": "Optional: ctraderSymbolMap {\"XAUUSD\":\"GOLD\"}, ctraderSpotPriceTimeoutMs (default 8000), ctraderSpotPriceMaxRetries (default 3)"
+      "_comment": "Optional: ctraderSymbolMap {\"XAUUSD\":\"GOLD\"}, ctraderSpotPriceTimeoutMs (default 8000), ctraderSpotPriceMaxRetries (default 3). useMarketRangeForEntry + maxSkippablePastTPs index the boundary TP for MARKET_RANGE — validate on demo."
     }
   ],
   "channels": [
@@ -297,7 +297,8 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2120484771",
@@ -317,7 +318,8 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2385521106",
@@ -336,7 +338,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2889224950",
@@ -355,7 +358,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2845421508",
@@ -374,7 +378,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2986529706",
@@ -393,7 +398,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "2498976211",
@@ -412,7 +418,8 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     },
     {
       "channel": "1441399338805891174",
@@ -431,7 +438,8 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1
+      "maxSkippablePastTPs": 1,
+      "useMarketRangeForEntry": true
     }
   ],
   "database": {

@@ -753,6 +753,88 @@ export class CTraderClient {
   }
 
   /**
+   * Place a MARKET_RANGE order: market execution with max slippage from baseSlippagePrice (see Open API).
+   * Relative SL/TP same as placeMarketOrder.
+   */
+  async placeMarketRangeOrder(params: {
+    symbol: string;
+    volume: number;
+    tradeSide: 'BUY' | 'SELL';
+    baseSlippagePrice: number;
+    slippageInPoints: number;
+    relativeStopLoss?: number;
+    relativeTakeProfit?: number;
+    label?: string;
+  }): Promise<string> {
+    await this.ensureConnected();
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    try {
+      const symbolInfo = await this.getSymbolInfo(params.symbol);
+      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
+        ? symbolInfo.lotSize.low
+        : symbolInfo.lotSize ?? 100;
+      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
+        ? symbolInfo.stepVolume.low
+        : symbolInfo.stepVolume ?? lotSize;
+      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
+        ? symbolInfo.symbolId.low
+        : symbolInfo.symbolId;
+      const slip = Math.min(2147483647, Math.max(1, Math.floor(params.slippageInPoints)));
+      const payload: Record<string, unknown> = {
+        ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        symbolId,
+        orderType: 'MARKET_RANGE',
+        tradeSide: params.tradeSide === 'BUY' ? 'BUY' : 'SELL',
+        volume: volumeInApiUnits,
+        baseSlippagePrice: params.baseSlippagePrice,
+        slippageInPoints: slip
+      };
+      if (params.relativeStopLoss != null && params.relativeStopLoss > 0) {
+        payload.relativeStopLoss = params.relativeStopLoss;
+      }
+      if (params.relativeTakeProfit != null && params.relativeTakeProfit > 0) {
+        payload.relativeTakeProfit = params.relativeTakeProfit;
+      }
+      if (params.label != null && params.label !== '') {
+        payload.label = params.label.slice(0, 100);
+      }
+      const response = await this.connection.sendCommand('ProtoOANewOrderReq', payload);
+
+      const orderId = response?.orderId || response?.order?.orderId;
+      if (!orderId) {
+        throw new Error('No order ID returned from cTrader');
+      }
+
+      logger.info('MARKET_RANGE order placed on cTrader', {
+        orderId,
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        baseSlippagePrice: params.baseSlippagePrice,
+        slippageInPoints: slip,
+        ...(params.relativeStopLoss != null && { relativeStopLoss: params.relativeStopLoss }),
+        ...(params.relativeTakeProfit != null && { relativeTakeProfit: params.relativeTakeProfit })
+      });
+
+      return orderId.toString();
+    } catch (error) {
+      logger.error('Failed to place MARKET_RANGE order', {
+        symbol: params.symbol,
+        tradeSide: params.tradeSide,
+        volume: params.volume,
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(error)
+      });
+      throw error;
+    }
+  }
+
+  /**
    * Place a limit order.
    * When positionId is provided, the order is linked to that position (closing/reduce behaviour when side is opposite).
    * Use positionId for TP orders as a guard - ensures we modify our position, not open a new one.

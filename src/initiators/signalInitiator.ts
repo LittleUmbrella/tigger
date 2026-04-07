@@ -47,7 +47,8 @@ const isRetryableError = (error: unknown): boolean => {
     'entry price is required',
     'invalid price relationships',
     'entry order cancelled',
-    'all take profit orders failed'
+    'all take profit orders failed',
+    'cannot place cTrader MARKET_RANGE'
   ];
 
   // Check if error matches any non-retryable pattern
@@ -105,7 +106,8 @@ export const processUnparsedMessages = async (
   tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   useLimitOrderForEntry?: boolean, // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
-  maxSkippablePastTPs?: number // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
+  maxSkippablePastTPs?: number, // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
+  useMarketRangeForEntry?: boolean // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -193,7 +195,8 @@ export const processUnparsedMessages = async (
     tradeObfuscation,
     slAdjustmentTolerancePercent,
     useLimitOrderForEntry,
-    maxSkippablePastTPs
+    maxSkippablePastTPs,
+    useMarketRangeForEntry
   );
   
   logger.debug('Finished processing messages', {
@@ -225,7 +228,9 @@ export const processMessages = async (
   tradeObfuscation?: TradeObfuscationConfig,
   slAdjustmentTolerancePercent?: number,
   useLimitOrderForEntry?: boolean,
-  maxSkippablePastTPs?: number
+  maxSkippablePastTPs?: number,
+  /** cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2) */
+  useMarketRangeForEntry?: boolean
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -308,7 +313,8 @@ export const processMessages = async (
           propFirms,
           slAdjustmentTolerancePercent,
           useLimitOrderForEntry,
-          maxSkippablePastTPs
+          maxSkippablePastTPs,
+          useMarketRangeForEntry
         };
 
         try {

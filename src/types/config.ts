@@ -172,8 +172,10 @@ export interface ChannelSetConfig {
   tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection
   /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */
   slAdjustmentTolerancePercent?: number;
-  /** cTrader market orders only: max number of TPs to skip when price has already moved past them. Skipped TP quantity is redistributed to remaining valid TPs. 0 or undefined = reject if any TP is past price (default). */
+  /** cTrader market orders only: max number of TPs to skip when price has already moved past them. Skipped TP quantity is redistributed to remaining valid TPs. 0 or undefined = reject if any TP is past price (default). Same index selects the MARKET_RANGE boundary TP when useMarketRangeForEntry is true (0 = TP1, 1 = TP2, …). */
   maxSkippablePastTPs?: number;
+  /** cTrader only: when true, use MARKET_RANGE instead of MARKET for entries (base = current price, slippage capped to boundary TP chosen by maxSkippablePastTPs index). Validate on demo broker. */
+  useMarketRangeForEntry?: boolean;
 }
 
 export interface SimulationConfig {

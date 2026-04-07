@@ -29,6 +29,8 @@ export interface InitiatorContext {
   useLimitOrderForEntry?: boolean;
   /** cTrader market orders only: max number of TPs to skip when price has already moved past them (0 = reject, default) */
   maxSkippablePastTPs?: number;
+  /** cTrader: MARKET_RANGE entry; boundary TP index follows maxSkippablePastTPs */
+  useMarketRangeForEntry?: boolean;
 }
 
 /**

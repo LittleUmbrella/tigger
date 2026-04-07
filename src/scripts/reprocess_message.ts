@@ -208,7 +208,9 @@ program
         channelConfig.propFirms,
         channelConfig.tradeObfuscation,
         channelConfig.slAdjustmentTolerancePercent,
-        channelConfig.useLimitOrderForEntry
+        channelConfig.useLimitOrderForEntry,
+        channelConfig.maxSkippablePastTPs,
+        channelConfig.useMarketRangeForEntry
       );
 
       // --- Show result ---
