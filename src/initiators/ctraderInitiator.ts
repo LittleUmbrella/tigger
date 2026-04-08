@@ -515,8 +515,16 @@ const executeTradeForAccount = async (
           decimalPrecision = getQuantityPrecisionFromRiskAmount(riskAmountInAsset);
         }
         
-        pricePrecision = symbolInfo.digits !== undefined ? symbolInfo.digits : getDecimalPrecision(finalEntryPrice);
-        tickSize = symbolInfo.pipSize !== undefined ? symbolInfo.pipSize : undefined;
+        const symbolDigits = protobufLongToNumber(symbolInfo.digits);
+        pricePrecision =
+          symbolDigits != null && isFinite(symbolDigits) && symbolDigits >= 0
+            ? Math.min(12, Math.floor(symbolDigits))
+            : getDecimalPrecision(finalEntryPrice);
+        const pipFromProto = protobufLongToNumber(symbolInfo.pipSize);
+        tickSize =
+          pipFromProto !== undefined && isFinite(pipFromProto) && pipFromProto > 0
+            ? pipFromProto
+            : undefined;
         const rawLotSize = protobufLongToNumber(symbolInfo.lotSize);
         if (rawLotSize == null || rawLotSize <= 0) {
           logger.warn('Symbol missing or invalid lotSize', {
@@ -1057,7 +1065,20 @@ const executeTradeForAccount = async (
         }
       }
     }
-    
+
+    // getCurrentPrice returns quote-scaled values that can exceed symbol.digits; broker rejects those on LIMIT
+    if (
+      currentPriceForMarketOrder != null &&
+      currentPriceForMarketOrder > 0 &&
+      pricePrecision !== undefined
+    ) {
+      currentPriceForMarketOrder = roundPrice(
+        currentPriceForMarketOrder,
+        pricePrecision,
+        tickSize
+      );
+    }
+
     // Place order (assigned in N-trades path or single-order path below)
     let orderId!: string;
     /** When using N trades (one per TP), each trade has its own order with SL+TP - no separate TP orders */

@@ -83,10 +83,14 @@ export const getQuantityPrecisionFromRiskAmount = (riskAmountInAsset: number): n
 
 /**
  * Round price to exchange tick size/precision
- * 
+ *
+ * When both tickSize and pricePrecision are set (e.g. cTrader pip + digits), snap to the
+ * tick first, then clamp to decimal places — otherwise a finer pip can leave too many digits
+ * for the broker (e.g. 4747.915 when only 2 decimals are allowed).
+ *
  * @param price - Price to round
  * @param pricePrecision - Decimal precision for price (from exchange symbol info)
- * @param tickSize - Optional tick size (if provided, rounds to nearest tick)
+ * @param tickSize - Optional tick size (if provided, rounds to nearest tick first)
  * @returns Rounded price respecting exchange precision
  */
 export const roundPrice = (
@@ -95,14 +99,22 @@ export const roundPrice = (
   tickSize?: number
 ): number => {
   if (!isFinite(price)) return price;
-  
-  // If tick size is provided, round to nearest tick
+
+  let p = price;
   if (tickSize !== undefined && tickSize > 0) {
-    return Math.round(price / tickSize) * tickSize;
+    p = Math.round(price / tickSize) * tickSize;
   }
-  
-  // Otherwise, round to specified decimal precision
-  const precision = pricePrecision !== undefined ? pricePrecision : getDecimalPrecision(price);
+
+  if (pricePrecision !== undefined) {
+    const multiplier = Math.pow(10, pricePrecision);
+    return Math.round(p * multiplier) / multiplier;
+  }
+
+  if (tickSize !== undefined && tickSize > 0) {
+    return p;
+  }
+
+  const precision = getDecimalPrecision(price);
   const multiplier = Math.pow(10, precision);
   return Math.round(price * multiplier) / multiplier;
 };
