@@ -30,7 +30,7 @@ import {
 } from './shared.js';
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
-import { resolveBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
+import { resolveBreakevenAfterTPs, getTakeProfitLevelCount } from '../utils/breakevenAfterTPs.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -199,13 +199,15 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
     if (sib.status === 'stopped') return 0;
     if (sib.status !== 'closed' && sib.status !== 'completed') return 0;
 
+    const weight = Math.max(getTakeProfitLevelCount(sib), 1);
+
     const fromDb = classifyCtraderCloseFromDb(sib);
-    if (fromDb === 'take_profit') return 1;
+    if (fromDb === 'take_profit') return weight;
     if (fromDb === 'stop_loss') return 0;
 
     if (!ctraderClient) return 0;
     const fromDeals = await classifyCtraderCloseFromDeals(sib, ctraderClient);
-    return fromDeals === 'take_profit' ? 1 : 0;
+    return fromDeals === 'take_profit' ? weight : 0;
   });
 
   const results = await Promise.all(tasks);
@@ -227,9 +229,12 @@ const checkAndApplyBreakeven = async (
   if (trade.stop_loss_breakeven) return;
 
   const allSiblings = await db.getTradesByMessageId(trade.message_id, trade.channel);
-  const totalTpLevels = allSiblings.filter(
+  const relevantSiblings = allSiblings.filter(
     (t) => t.exchange === 'ctrader' && t.account_name === trade.account_name
-  ).length;
+  );
+  const totalTpLevels = relevantSiblings.reduce(
+    (sum, t) => sum + Math.max(getTakeProfitLevelCount(t), 1), 0
+  );
   const effectiveBreakevenAfterTPs = resolveBreakevenAfterTPs(totalTpLevels, {
     breakevenAfterTPs,
     dynamicBreakevenAfterTPs

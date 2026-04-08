@@ -1373,33 +1373,20 @@ const executeTradeForAccount = async (
               tpPrices: validTPOrders.map((tp) => [tp.price])
             };
 
-            // Deduplicate order IDs — cTrader netting can merge separate orders into the
-            // same orderId. Consolidate quantities and TPs so each trade row is unique.
+            // Duplicate orderIds from cTrader netting are kept as-is (one row per TP).
+            // They resolve to the same positionId in the monitor, and each row
+            // contributes its own TP level count for dynamic breakeven.
             const uniqueOrderIds = new Set(ids);
             if (uniqueOrderIds.size < ids.length) {
-              const merged = new Map<string, { quantity: number; tpPrices: number[] }>();
-              for (let idx = 0; idx < ids.length; idx++) {
-                const oid = ids[idx];
-                const existing = merged.get(oid);
-                if (existing) {
-                  existing.quantity += quantities[idx];
-                  existing.tpPrices.push(validTPOrders[idx].price);
-                } else {
-                  merged.set(oid, { quantity: quantities[idx], tpPrices: [validTPOrders[idx].price] });
-                }
-              }
-              logger.warn('Duplicate order IDs from cTrader (netting) — consolidating trade rows', {
+              logger.warn('Duplicate order IDs from cTrader (netting) — keeping separate rows per TP level', {
                 channel,
                 symbol,
                 accountName: accountName || 'default',
                 placedCount: ids.length,
-                uniqueCount: merged.size,
+                uniqueCount: uniqueOrderIds.size,
                 orderIds: ids,
                 exchange: 'ctrader'
               });
-              nTradeData.orderIds = [...merged.keys()];
-              nTradeData.quantities = [...merged.values()].map((v) => v.quantity);
-              nTradeData.tpPrices = [...merged.values()].map((v) => v.tpPrices);
             }
           } else {
             logger.info('N-trades skipped - validation returned no valid TP orders', {
