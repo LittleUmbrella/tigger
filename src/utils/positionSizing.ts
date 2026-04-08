@@ -260,17 +260,30 @@ export const roundQuantity = (
 };
 
 /**
- * Distribute quantity evenly across take profits, rounding up the last TP (max TP) to ensure whole trade quantity is accounted for
- * 
+ * When splitting total quantity across multiple take-profit legs, the last slice can be
+ * rounded up (legacy / Bybit: exchange may trim reduce-only closes) or down (cTrader: each
+ * leg is an independent order — the sum must not exceed the risk-sized total).
+ */
+export type TpSplitRoundingOptions = {
+  lastSliceRounding?: 'ceil' | 'floor';
+};
+
+/**
+ * Distribute quantity evenly across take profits. First n−1 slices use floor; the last slice
+ * uses `lastSliceRounding` (default `ceil` for Bybit-style “don’t lose dust”; use `floor` for
+ * cTrader so the sum of legs never exceeds `totalQty`).
+ *
  * @param totalQty - Total quantity to distribute
  * @param numTPs - Number of take profit levels
  * @param decimalPrecision - Decimal precision for quantity rounding
- * @returns Array of quantities, one per TP (last TP rounded up)
+ * @param options - Optional rounding mode for the final slice
+ * @returns Array of quantities, one per TP
  */
 export const distributeQuantityAcrossTPs = (
   totalQty: number,
   numTPs: number,
-  decimalPrecision: number
+  decimalPrecision: number,
+  options?: TpSplitRoundingOptions
 ): number[] => {
   if (numTPs === 0) return [];
   if (numTPs === 1) return [roundQuantity(totalQty, decimalPrecision, false)];
@@ -288,8 +301,8 @@ export const distributeQuantityAcrossTPs = (
   const allocatedQty = roundedQuantities.reduce((sum, qty) => sum + qty, 0);
   const remainingQty = totalQty - allocatedQty;
   
-  // Round UP the last TP to ensure whole trade quantity is accounted for
-  roundedQuantities.push(roundQuantity(remainingQty, decimalPrecision, true));
+  const lastUp = (options?.lastSliceRounding ?? 'ceil') === 'ceil';
+  roundedQuantities.push(roundQuantity(remainingQty, decimalPrecision, lastUp));
   
   return roundedQuantities;
 };
@@ -317,6 +330,7 @@ export const distributeQuantityAcrossTPs = (
  * @param minOrderQty - Minimum order quantity from exchange (0 or undefined means no minimum)
  * @param maxOrderQty - Maximum order quantity from exchange (undefined means no maximum)
  * @param decimalPrecision - Decimal precision for quantity (used if qtyStep is not provided)
+ * @param options - Optional `lastSliceRounding: 'floor'` for cTrader so total filled volume never exceeds `positionSize`
  * @returns Array of valid TP orders with { index: number (1-based), price: number, quantity: number }
  */
 export const validateAndRedistributeTPQuantities = (
@@ -326,7 +340,8 @@ export const validateAndRedistributeTPQuantities = (
   qtyStep: number | undefined,
   minOrderQty: number | undefined,
   maxOrderQty: number | undefined,
-  decimalPrecision: number
+  decimalPrecision: number,
+  options?: TpSplitRoundingOptions
 ): Array<{ index: number; price: number; quantity: number }> => {
   if (tpQuantities.length !== tpPrices.length) {
     throw new Error(`TP quantities (${tpQuantities.length}) and prices (${tpPrices.length}) must have the same length`);
@@ -424,8 +439,10 @@ export const validateAndRedistributeTPQuantities = (
     // Bybit will adjust it down to available position when executing due to reduceOnly: true
     let roundedRemainingQty = remainingQty;
     if (effectiveQtyStep > 0 && remainingQty > 0) {
-      // Round UP to next qtyStep to ensure we capture all remaining quantity
-      roundedRemainingQty = Math.ceil(remainingQty / effectiveQtyStep) * effectiveQtyStep;
+      const roundUp = (options?.lastSliceRounding ?? 'ceil') === 'ceil';
+      roundedRemainingQty = roundUp
+        ? Math.ceil(remainingQty / effectiveQtyStep) * effectiveQtyStep
+        : Math.floor(remainingQty / effectiveQtyStep) * effectiveQtyStep;
     }
     
     // Ensure last TP quantity is at least minQty if specified
@@ -582,6 +599,25 @@ export const validateAndRedistributeTPQuantities = (
           lastTP.quantity = newLastQty;
         }
       }
+    }
+  }
+
+  // cTrader (independent legs): trim if minQty / redistribution pushed sum above risk-sized total
+  if (options?.lastSliceRounding === 'floor' && validTPOrders.length > 0) {
+    const capStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+    let sumQty = validTPOrders.reduce((s, o) => s + o.quantity, 0);
+    let guard = 100000;
+    while (sumQty > positionSize + 1e-12 && guard-- > 0) {
+      let reduced = false;
+      for (let i = validTPOrders.length - 1; i >= 0; i--) {
+        if (validTPOrders[i].quantity + 1e-12 >= capStep) {
+          validTPOrders[i].quantity -= capStep;
+          sumQty -= capStep;
+          reduced = true;
+          break;
+        }
+      }
+      if (!reduced) break;
     }
   }
 

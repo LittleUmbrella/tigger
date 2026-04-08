@@ -26,7 +26,9 @@ import { fileURLToPath } from 'url';
 import { Command } from 'commander';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import { AccountConfig } from '../types/config.js';
-import { roundPrice, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
+import { roundPrice, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities, type TpSplitRoundingOptions } from '../utils/positionSizing.js';
+
+const CTRADER_TP_SPLIT_OPTIONS: TpSplitRoundingOptions = { lastSliceRounding: 'floor' };
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -171,7 +173,8 @@ const main = async () => {
     const tpQuantities = distributeQuantityAcrossTPs(
       positionVolume,
       roundedTPPrices.length,
-      quantityPrecision
+      quantityPrecision,
+      CTRADER_TP_SPLIT_OPTIONS
     );
     const validTPOrders = validateAndRedistributeTPQuantities(
       tpQuantities,
@@ -180,7 +183,8 @@ const main = async () => {
       volumeStep,
       minOrderVolume,
       maxOrderVolume,
-      quantityPrecision
+      quantityPrecision,
+      CTRADER_TP_SPLIT_OPTIONS
     );
 
     if (validTPOrders.length === 0) {

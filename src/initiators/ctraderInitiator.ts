@@ -2,7 +2,7 @@ import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { AccountConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
-import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
+import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities, type TpSplitRoundingOptions } from '../utils/positionSizing.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
@@ -17,6 +17,9 @@ import {
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
+
+/** cTrader: one market/limit order per TP; leg volumes must not exceed risk-sized total (Bybit uses reduce-only trims). */
+const CTRADER_TP_SPLIT_OPTIONS: TpSplitRoundingOptions = { lastSliceRounding: 'floor' };
 
 /**
  * Serialize error for logging - handles Error instances, objects, and primitives
@@ -1085,7 +1088,7 @@ const executeTradeForAccount = async (
     let nTradeData: { tradeIds: number[]; orderIds: string[]; quantities: number[]; tpPrices: number[][] } | undefined;
     if (isSimulation) {
       if (roundedTPPrices && roundedTPPrices.length > 1 && roundedStopLoss && roundedStopLoss > 0) {
-        const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision);
+        const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision, CTRADER_TP_SPLIT_OPTIONS);
         const validTPOrders = validateAndRedistributeTPQuantities(
           tpQuantities,
           roundedTPPrices,
@@ -1093,7 +1096,8 @@ const executeTradeForAccount = async (
           volumeStep,
           minOrderVolume,
           maxOrderVolume,
-          decimalPrecision
+          decimalPrecision,
+          CTRADER_TP_SPLIT_OPTIONS
         );
         if (validTPOrders.length > 0) {
           const orderIds = validTPOrders.map((_, i) =>
@@ -1150,7 +1154,7 @@ const executeTradeForAccount = async (
           roundedStopLoss &&
           roundedStopLoss > 0
         ) {
-          const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision);
+          const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision, CTRADER_TP_SPLIT_OPTIONS);
           const validTPOrders = validateAndRedistributeTPQuantities(
             tpQuantities,
             roundedTPPrices,
@@ -1158,7 +1162,8 @@ const executeTradeForAccount = async (
             volumeStep,
             minOrderVolume,
             maxOrderVolume,
-            decimalPrecision
+            decimalPrecision,
+            CTRADER_TP_SPLIT_OPTIONS
           );
           if (validTPOrders.length > 0) {
             const label = `tgr-${channel}-${message.message_id}`.slice(0, 100);
@@ -2001,7 +2006,8 @@ const executeTradeForAccount = async (
           const tpQuantities = distributeQuantityAcrossTPs(
             totalQtyForTPs,
             validTPPrices.length,
-            decimalPrecision
+            decimalPrecision,
+            CTRADER_TP_SPLIT_OPTIONS
           );
 
           // Validate and redistribute TP quantities (handles volumeStep rounding, minOrderVolume, maxOrderVolume, and redistribution)
@@ -2012,7 +2018,8 @@ const executeTradeForAccount = async (
             volumeStep,
             minOrderVolume,
             maxOrderVolume,
-            decimalPrecision
+            decimalPrecision,
+            CTRADER_TP_SPLIT_OPTIONS
           );
           
           if (validTPOrders.length === 0) {
