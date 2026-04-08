@@ -163,6 +163,17 @@ TP : 4800.00
     expect(order!.takeProfits).toEqual([4800]);
   });
 
+  it('parses XAUUSD : BUY (colon before side) with dash entry, emoji SL, Tp labels', () => {
+    const msg =
+      '🛡XAUUSD : BUY 4750-4740 TP1: 4765 TP2: 4770 TP3: 4775 💣SL 4730 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.stopLoss).toBe(4730);
+    expect(order!.takeProfits).toEqual([4765, 4770, 4775]);
+  });
+
   it('parses Format 9 as limit: emoji, XAUUSD | SELL SIGNAL, Entry range, TP arrows', () => {
     const msg =
       '📢 XAUUSD | SELL SIGNAL 🟢 Entry: 4705-4700 💣 SL: 4715 TP1 ➝ 4695 TP2 ➝ 4690 TP3 ➝ 4685 Tp 4 — 4680 Use proper money management. Consistency is 🔑';

@@ -152,6 +152,12 @@ const resolveStopLossFromDgfContent = (normalizedContent: string): number | unde
   return stopLoss;
 };
 
+/** Skip leading emoji / junk so `^`-anchored patterns and symbol-first lines match (e.g. 🛡XAUUSD …). */
+const stripToFirstDgfSymbol = (s: string): string => {
+  const m = /\b(gold|XAU|XAUT|XAUUSD)\b/i.exec(s);
+  return m?.index !== undefined ? s.slice(m.index) : s;
+};
+
 /**
  * Parser for DGF-style cTrader signals (channel dgfvip): same formats as ctrader_dgf — gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
@@ -163,10 +169,12 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
   try {
     const normalizedContent = content.trim();
     const lines = normalizedContent.split(/\r?\n/);
-    const firstLine = lines[0] ?? '';
+    const rawFirstLine = lines[0] ?? '';
+    const firstLineForDgf = stripToFirstDgfSymbol(rawFirstLine);
+    const contentFromAsset = stripToFirstDgfSymbol(normalizedContent);
 
     /** Format 8: limit order from explicit Entry line; header uses long|short and optional leading $. */
-    const format8Header = firstLine.match(
+    const format8Header = firstLineForDgf.match(
       /^\s*\$?\s*(gold|XAU|XAUT|XAUUSD)\s+(long|short)\s*\|/i,
     );
     if (format8Header) {
@@ -231,7 +239,7 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
      * Format 9: pipe + BUY/SELL SIGNAL + Entry line (limit). Optional emoji on first line.
      * Entry: 4705-4700 → limit at second bound (same as Format 3 dash convention: price after last `-`).
      */
-    const format9Header = firstLine.match(
+    const format9Header = firstLineForDgf.match(
       /(gold|XAU|XAUT|XAUUSD)\s*\|\s*(buy|sell)\s+signal\b/i,
     );
     if (format9Header) {
@@ -293,17 +301,17 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       return parsedOrder;
     }
 
-    const hashNowPair = firstLine.match(
+    const hashNowPair = rawFirstLine.match(
       /^\s*(buy|sell)\s+now\s+#?([A-Za-z0-9]+)\s+@\s*([\d.]+)/i,
     );
 
-    const sideFirst = firstLine.match(
+    const sideFirst = rawFirstLine.match(
       /^\s*(buy|sell)\s+(gold|XAU|XAUT|XAUUSD)\s+([\d.]+)/i,
     );
 
-    /** XAUUSD SELL 4782, XAUUSD | BUY 4713-4718, XAUUSD BUY NOW 4650-4646, etc. — symbol before buy/sell (optional |/NOW; leading emoji ok). */
-    const symbolSideEntry = firstLine.match(
-      /(gold|XAU|XAUT|XAUUSD)(?:\s+\|\s+|\s+)(buy|sell)\s+(?:now\s+)?([\d.]+)(?:\/([\d.]+)|-([\d.]+))?/i,
+    /** XAUUSD SELL 4782, XAUUSD : BUY …, XAUUSD | BUY 4713-4718, XAUUSD BUY NOW 4650-4646, etc. — symbol before buy/sell (optional | or : ; optional NOW; leading emoji ok). */
+    const symbolSideEntry = firstLineForDgf.match(
+      /(gold|XAU|XAUT|XAUUSD)(?:\s+\|\s+|\s*:?\s*)(buy|sell)\s+(?:now\s+)?([\d.]+)(?:\/([\d.]+)|-([\d.]+))?/i,
     );
 
     let tradingPair: string;
@@ -329,7 +337,7 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       const secondEntry = symbolSideEntry[4] ?? symbolSideEntry[5];
       if (secondEntry !== undefined && !validatePositivePrice(secondEntry)) return null;
     } else {
-      const tradingPairMatch = normalizedContent.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
+      const tradingPairMatch = contentFromAsset.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
       if (!tradingPairMatch) return null;
 
       tradingPair = normalizeAssetAliasToCTraderPair(tradingPairMatch[1]);
@@ -339,19 +347,19 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       if (!buyMatch && !sellMatch) return null;
       signalType = buyMatch ? 'long' : 'short';
 
-      const entryAtFirst = firstLine.match(/@\s*([\d.]+)/i);
+      const entryAtFirst = firstLineForDgf.match(/@\s*([\d.]+)/i);
       if (entryAtFirst) {
         if (!validatePositivePrice(entryAtFirst[1])) return null;
       } else {
-        const dashEntry = firstLine.match(/-\s*([\d.]+)/);
+        const dashEntry = firstLineForDgf.match(/-\s*([\d.]+)/);
         if (dashEntry) {
           if (!validatePositivePrice(dashEntry[1])) return null;
         } else {
-          const plusRange = firstLine.match(/([\d.]+)\s*\+\s*([\d.]+)/);
+          const plusRange = firstLineForDgf.match(/([\d.]+)\s*\+\s*([\d.]+)/);
           if (plusRange) {
             if (!validatePositivePrice(plusRange[2])) return null;
           } else {
-            const nowSingle = firstLine.match(/\bnow\s+([\d.]+)/i);
+            const nowSingle = firstLineForDgf.match(/\bnow\s+([\d.]+)/i);
             if (nowSingle && !validatePositivePrice(nowSingle[1])) return null;
           }
         }
