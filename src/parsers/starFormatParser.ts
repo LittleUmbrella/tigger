@@ -81,7 +81,7 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   const entryPriceStrategy = options?.entryPriceStrategy || 'worst';
   let entryPrice: number | undefined;
   
-  const entryPriceRangeMatch = content.match(/👉\s*Entry\s*=\s*([\d.]+)\s*-\s*([\d.]+)/i);
+  const entryPriceRangeMatch = content.match(/👉\s*Entry\s*=\s*\$?([\d.]+)\s*-\s*\$?([\d.]+)/i);
   if (entryPriceRangeMatch) {
     const price1 = parseFloat(entryPriceRangeMatch[1]);
     const price2 = parseFloat(entryPriceRangeMatch[2]);
@@ -89,8 +89,8 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
       entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
     }
   } else {
-    // Try without emoji: "Entry = 27.65 - 29.89"
-    const entryPriceRangeMatch2 = content.match(/Entry\s*=\s*([\d.]+)\s*-\s*([\d.]+)/i);
+    // Try without emoji: "Entry = 27.65 - 29.89" (optional $ on each side)
+    const entryPriceRangeMatch2 = content.match(/Entry\s*=\s*\$?([\d.]+)\s*-\s*\$?([\d.]+)/i);
     if (entryPriceRangeMatch2) {
       const price1 = parseFloat(entryPriceRangeMatch2[1]);
       const price2 = parseFloat(entryPriceRangeMatch2[2]);
@@ -104,7 +104,7 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
         entryPrice = parseFloat(entryBreakoutMatch[1]);
       } else {
         // Try single entry price: "Entry = 27.65"
-        const entryPriceSingleMatch = content.match(/Entry\s*=\s*([\d.]+)/i);
+        const entryPriceSingleMatch = content.match(/Entry\s*=\s*\$?([\d.]+)/i);
         if (entryPriceSingleMatch) {
           entryPrice = parseFloat(entryPriceSingleMatch[1]);
         } else {
@@ -117,16 +117,17 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   // Stop loss - extract from multiple formats:
   // Classic: "❌STOP LOSS - 31.89"
   // Breakout: "🛑 SL › $0.075216" (with optional trailing percentage)
-  let stopLossMatch = content.match(/❌STOP\s*LOSS\s*-\s*([\d.]+)/i);
+  // Optional space after ❌; optional $ before price (e.g. "❌ Stop Loss - $355.30")
+  let stopLossMatch = content.match(/❌\s*STOP\s*LOSS\s*-\s*\$?([\d.]+)/i);
   if (!stopLossMatch) {
-    stopLossMatch = content.match(/STOP\s*LOSS\s*-\s*([\d.]+)/i);
+    stopLossMatch = content.match(/STOP\s*LOSS\s*-\s*\$?([\d.]+)/i);
   }
   if (!stopLossMatch) {
     // Breakout format: "🛑 SL › $0.075216"
     stopLossMatch = content.match(/🛑\s*SL\s*›\s*\$?([\d.]+)/i);
   }
   if (!stopLossMatch) {
-    stopLossMatch = content.match(/(?:Stop\s*Loss|SL|stop\s*loss)[:\s-]+([\d.]+)/i);
+    stopLossMatch = content.match(/(?:Stop\s*Loss|SL|stop\s*loss)[:\s-]+\$?([\d.]+)/i);
   }
   
   if (!stopLossMatch) return null;
@@ -151,16 +152,17 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   }
 
   if (takeProfits.length === 0) {
-    // Fall back to classic TARGET format
-    let takeProfitMatch = content.match(/TARGET\s*-\s*-\s*([\d.\s\-+]+)/i);
+    // Fall back to classic TARGET format ($ allowed in target list, e.g. "$296 - $272")
+    const targetTail = '[\\d.\\s\\-+\\$]+';
+    let takeProfitMatch = content.match(new RegExp(`TARGET\\s*-\\s*-\\s*(${targetTail})`, 'i'));
     if (!takeProfitMatch) {
-      takeProfitMatch = content.match(/TARGET\s*-\s*([\d.\s\-+]+)/i);
+      takeProfitMatch = content.match(new RegExp(`TARGET\\s*-\\s*(${targetTail})`, 'i'));
     }
     if (!takeProfitMatch) {
-      takeProfitMatch = content.match(/Target[:\s-]+([\d.\s\-+]+)/i);
+      takeProfitMatch = content.match(new RegExp(`Target[:\\s-]+(${targetTail})`, 'i'));
     }
     if (!takeProfitMatch) {
-      takeProfitMatch = content.match(/TARGET[:\s-]+([\d.\s\-+]+)/i);
+      takeProfitMatch = content.match(new RegExp(`TARGET[:\\s-]+(${targetTail})`, 'i'));
     }
     
     if (takeProfitMatch) {
