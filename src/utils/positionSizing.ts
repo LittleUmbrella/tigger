@@ -443,6 +443,9 @@ export const validateAndRedistributeTPQuantities = (
       roundedRemainingQty = roundUp
         ? Math.ceil(remainingQty / effectiveQtyStep) * effectiveQtyStep
         : Math.floor(remainingQty / effectiveQtyStep) * effectiveQtyStep;
+      if (roundedRemainingQty === 0 && remainingQty > 0) {
+        roundedRemainingQty = effectiveQtyStep;
+      }
     }
     
     // Ensure last TP quantity is at least minQty if specified
