@@ -15,6 +15,19 @@ describe('starFormatParser', () => {
     expect(order!.leverage).toBe(5);
   });
 
+  it('parses Cryptosyntix-style message with comma thousands in prices (message 13686)', () => {
+    const content =
+      '⭐ #ETH/USDT 🛑 SHORT 📊 EXCHANGE - BYBIT/BINGX/MEXC 🧑‍🎤 Leverage: 5X 🔥 👉 Entry = $2,201.43 - $2,253.58 TARGET - $2,097.12 - $1,992.81 - $1,836.35 ❌ Stop Loss - $2,357.89 www.cryptosyntix.com';
+    const order = starFormatParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('ETHUSDT');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBe(2201.43);
+    expect(order!.stopLoss).toBe(2357.89);
+    expect(order!.takeProfits).toEqual([2097.12, 1992.81, 1836.35]);
+    expect(order!.leverage).toBe(5);
+  });
+
   it('still parses classic star format without dollar signs', () => {
     const content = `🌟 #RIVER/USDT 
 

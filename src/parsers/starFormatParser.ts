@@ -4,6 +4,16 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { calculateEntryPrice } from '../utils/entryPriceStrategy.js';
 import { ParserOptions } from './parserRegistry.js';
 
+/** Decimal with optional US thousands separators (e.g. 2,201.43). */
+const RE_USD_GROUP = '(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d+)?';
+
+const parseUsdPrice = (raw: string): number | null => {
+  const cleaned = raw.trim().replace(/^\$/, '').replace(/\+$/, '').replace(/,/g, '');
+  if (cleaned === '' || cleaned.includes(' ')) return null;
+  const n = parseFloat(cleaned);
+  return isNaN(n) ? null : n;
+};
+
 /**
  * Parser for star format messages like:
  * 
@@ -81,32 +91,38 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   const entryPriceStrategy = options?.entryPriceStrategy || 'worst';
   let entryPrice: number | undefined;
   
-  const entryPriceRangeMatch = content.match(/👉\s*Entry\s*=\s*\$?([\d.]+)\s*-\s*\$?([\d.]+)/i);
+  const entryPriceRangeMatch = content.match(
+    new RegExp(`👉\\s*Entry\\s*=\\s*\\$?(${RE_USD_GROUP})\\s*-\\s*\\$?(${RE_USD_GROUP})`, 'i'),
+  );
   if (entryPriceRangeMatch) {
-    const price1 = parseFloat(entryPriceRangeMatch[1]);
-    const price2 = parseFloat(entryPriceRangeMatch[2]);
-    if (!isNaN(price1) && !isNaN(price2)) {
+    const price1 = parseUsdPrice(entryPriceRangeMatch[1]);
+    const price2 = parseUsdPrice(entryPriceRangeMatch[2]);
+    if (price1 !== null && price2 !== null) {
       entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
     }
   } else {
     // Try without emoji: "Entry = 27.65 - 29.89" (optional $ on each side)
-    const entryPriceRangeMatch2 = content.match(/Entry\s*=\s*\$?([\d.]+)\s*-\s*\$?([\d.]+)/i);
+    const entryPriceRangeMatch2 = content.match(
+      new RegExp(`Entry\\s*=\\s*\\$?(${RE_USD_GROUP})\\s*-\\s*\\$?(${RE_USD_GROUP})`, 'i'),
+    );
     if (entryPriceRangeMatch2) {
-      const price1 = parseFloat(entryPriceRangeMatch2[1]);
-      const price2 = parseFloat(entryPriceRangeMatch2[2]);
-      if (!isNaN(price1) && !isNaN(price2)) {
+      const price1 = parseUsdPrice(entryPriceRangeMatch2[1]);
+      const price2 = parseUsdPrice(entryPriceRangeMatch2[2]);
+      if (price1 !== null && price2 !== null) {
         entryPrice = calculateEntryPrice(price1, price2, signalType, entryPriceStrategy);
       }
     } else {
       // Try breakout format: "💰 Entry › $0.078100" or "Entry › $0.078100"
-      const entryBreakoutMatch = content.match(/Entry\s*›\s*\$?([\d.]+)/i);
+      const entryBreakoutMatch = content.match(new RegExp(`Entry\\s*›\\s*\\$?(${RE_USD_GROUP})`, 'i'));
       if (entryBreakoutMatch) {
-        entryPrice = parseFloat(entryBreakoutMatch[1]);
+        entryPrice = parseUsdPrice(entryBreakoutMatch[1]) ?? undefined;
       } else {
-        // Try single entry price: "Entry = 27.65"
-        const entryPriceSingleMatch = content.match(/Entry\s*=\s*\$?([\d.]+)/i);
+        // Try single entry price: "Entry = 27.65" (avoid matching the low end of a range: require no second dash-price)
+        const entryPriceSingleMatch = content.match(
+          new RegExp(`Entry\\s*=\\s*\\$?(${RE_USD_GROUP})(?!\\s*-\\s*\\$?${RE_USD_GROUP})`, 'i'),
+        );
         if (entryPriceSingleMatch) {
-          entryPrice = parseFloat(entryPriceSingleMatch[1]);
+          entryPrice = parseUsdPrice(entryPriceSingleMatch[1]) ?? undefined;
         } else {
           entryPrice = undefined;
         }
@@ -118,26 +134,25 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   // Classic: "❌STOP LOSS - 31.89"
   // Breakout: "🛑 SL › $0.075216" (with optional trailing percentage)
   // Optional space after ❌; optional $ before price (e.g. "❌ Stop Loss - $355.30")
-  let stopLossMatch = content.match(/❌\s*STOP\s*LOSS\s*-\s*\$?([\d.]+)/i);
+  let stopLossMatch = content.match(
+    new RegExp(`❌\\s*STOP\\s*LOSS\\s*-\\s*\\$?(${RE_USD_GROUP})`, 'i'),
+  );
   if (!stopLossMatch) {
-    stopLossMatch = content.match(/STOP\s*LOSS\s*-\s*\$?([\d.]+)/i);
+    stopLossMatch = content.match(new RegExp(`STOP\\s*LOSS\\s*-\\s*\\$?(${RE_USD_GROUP})`, 'i'));
   }
   if (!stopLossMatch) {
     // Breakout format: "🛑 SL › $0.075216"
-    stopLossMatch = content.match(/🛑\s*SL\s*›\s*\$?([\d.]+)/i);
+    stopLossMatch = content.match(new RegExp(`🛑\\s*SL\\s*›\\s*\\$?(${RE_USD_GROUP})`, 'i'));
   }
   if (!stopLossMatch) {
-    stopLossMatch = content.match(/(?:Stop\s*Loss|SL|stop\s*loss)[:\s-]+\$?([\d.]+)/i);
+    stopLossMatch = content.match(new RegExp(`(?:Stop\\s*Loss|SL|stop\\s*loss)[:\\s-]+\\$?(${RE_USD_GROUP})`, 'i'));
   }
-  
+
   if (!stopLossMatch) return null;
-  
-  // Validate stop loss - must be a valid number (no spaces in the middle)
-  const stopLossStr = stopLossMatch[1];
-  if (stopLossStr.includes(' ') || isNaN(parseFloat(stopLossStr))) {
-    return null; // Malformed stop loss
-  }
-  const stopLoss = parseFloat(stopLossStr);
+
+  const stopLossParsed = parseUsdPrice(stopLossMatch[1]);
+  if (stopLossParsed === null) return null;
+  const stopLoss = stopLossParsed;
 
   // Take profits - extract from multiple formats:
   // Classic: "TARGET-  26.45 - 25.67 - 24.79 - 22.80 - 20.78+"
@@ -145,15 +160,17 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
   const takeProfits: number[] = [];
   
   // Try breakout format first: "🎯 TP1 › $0.080023" (possibly with trailing +10.4%)
-  const breakoutTpMatches = content.matchAll(/🎯\s*TP\d+\s*›\s*\$?([\d.]+)/gi);
+  const breakoutTpMatches = content.matchAll(
+    new RegExp(`🎯\\s*TP\\d+\\s*›\\s*\\$?(${RE_USD_GROUP})`, 'gi'),
+  );
   for (const m of breakoutTpMatches) {
-    const val = parseFloat(m[1]);
-    if (!isNaN(val) && val > 0) takeProfits.push(val);
+    const val = parseUsdPrice(m[1]);
+    if (val !== null && val > 0) takeProfits.push(val);
   }
 
   if (takeProfits.length === 0) {
     // Fall back to classic TARGET format ($ allowed in target list, e.g. "$296 - $272")
-    const targetTail = '[\\d.\\s\\-+\\$]+';
+    const targetTail = '[\\d,.\\s\\-+\\$]+';
     let takeProfitMatch = content.match(new RegExp(`TARGET\\s*-\\s*-\\s*(${targetTail})`, 'i'));
     if (!takeProfitMatch) {
       takeProfitMatch = content.match(new RegExp(`TARGET\\s*-\\s*(${targetTail})`, 'i'));
@@ -167,11 +184,12 @@ export const starFormatParser = (content: string, options?: ParserOptions): Pars
     
     if (takeProfitMatch) {
       const targetsString = takeProfitMatch[1];
-      const targetNumbers = targetsString.match(/[\d.]+/g);
-      if (targetNumbers) {
-        const validTargets = targetNumbers
-          .map(t => parseFloat(t))
-          .filter(t => !isNaN(t) && t > 0);
+      const targetTokenRe = new RegExp(`\\$?${RE_USD_GROUP}\\+?`, 'g');
+      const targetTokens = targetsString.match(targetTokenRe);
+      if (targetTokens) {
+        const validTargets = targetTokens
+          .map(t => parseUsdPrice(t))
+          .filter((t): t is number => t !== null && t > 0);
         takeProfits.push(...validTargets);
       }
     }
