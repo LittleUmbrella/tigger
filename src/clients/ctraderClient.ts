@@ -57,6 +57,50 @@ export const getCtraderOrderExecutionPrice = (order: any): number | undefined =>
 const CTRADER_PRICE_SCALE = 100000;
 
 /**
+ * Convert lots → cTrader API volume (int64 "cents"), aligning to stepVolume.
+ * Used by the client internally (scripts that pass `volume` in lots) and
+ * exported for the initiator's pre-computation path.
+ *
+ * Resolves `stepVolume` / `volumeStep` from raw symbolInfo (proto decoders
+ * may use either name). Never returns 0 when volumeLots > 0.
+ */
+export function ctraderLotsToApiVolume(volumeLots: number, symbolInfo: Record<string, unknown>): number {
+  const rawLot = protobufLongToNumber(symbolInfo.lotSize);
+  const lotSize = rawLot != null && rawLot > 0 ? rawLot : 100;
+
+  const rawStep =
+    protobufLongToNumber(symbolInfo.stepVolume) ?? protobufLongToNumber(symbolInfo.volumeStep);
+  const stepVolume = rawStep != null && rawStep > 0 ? rawStep : lotSize;
+
+  let vol = Math.floor((volumeLots * lotSize) / stepVolume) * stepVolume;
+
+  if (volumeLots > 0 && vol === 0) {
+    const ceilAligned = Math.ceil((volumeLots * lotSize) / stepVolume) * stepVolume;
+    const minVol = protobufLongToNumber(symbolInfo.minVolume) ?? 0;
+    vol = Math.max(ceilAligned, minVol > 0 ? minVol : stepVolume);
+    logger.warn('ctraderLotsToApiVolume: floor produced 0 — rounded up to minimum', {
+      volumeLots,
+      lotSize,
+      stepVolume,
+      minVolume: minVol,
+      resultApiUnits: vol,
+      exchange: 'ctrader'
+    });
+  }
+
+  return vol;
+}
+
+/**
+ * Convert a pre-validated lot quantity to API units using a known lotSize.
+ * Exported for the initiator, which already resolved lotSize and step-aligned qty.
+ * Simple Math.round avoids floating-point drift (e.g. 0.01 * 10000 = 99.999…).
+ */
+export function ctraderLotsToApiVolumeSimple(volumeLots: number, lotSize: number): number {
+  return Math.round(volumeLots * lotSize);
+}
+
+/**
  * cTrader OpenAPI client configuration
  */
 export interface CTraderClientConfig {
@@ -687,6 +731,8 @@ export class CTraderClient {
     relativeTakeProfit?: number;
     /** Optional. User label (max 100 chars) - groups positions for management */
     label?: string;
+    /** Pre-computed API volume (int64 cents). When provided, `volume` is ignored and no conversion is performed. */
+    volumeApiUnits?: number;
   }): Promise<string> {
     await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
@@ -695,13 +741,7 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
-        ? symbolInfo.lotSize.low
-        : symbolInfo.lotSize ?? 100;
-      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
-        ? symbolInfo.stepVolume.low
-        : symbolInfo.stepVolume ?? lotSize;
-      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -765,6 +805,8 @@ export class CTraderClient {
     relativeStopLoss?: number;
     relativeTakeProfit?: number;
     label?: string;
+    /** Pre-computed API volume (int64 cents). When provided, `volume` is ignored and no conversion is performed. */
+    volumeApiUnits?: number;
   }): Promise<string> {
     await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
@@ -773,13 +815,7 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
-        ? symbolInfo.lotSize.low
-        : symbolInfo.lotSize ?? 100;
-      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
-        ? symbolInfo.stepVolume.low
-        : symbolInfo.stepVolume ?? lotSize;
-      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -852,6 +888,8 @@ export class CTraderClient {
     takeProfit?: number;
     /** Optional. User label (max 100 chars) - groups positions for management */
     label?: string;
+    /** Pre-computed API volume (int64 cents). When provided, `volume` is ignored and no conversion is performed. */
+    volumeApiUnits?: number;
   }): Promise<string> {
     await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
@@ -860,24 +898,15 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      // cTrader volume is in 0.01 of a unit. lotSize from symbolInfo is in cents; volume = qty_lots * lotSize
-      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
-        ? symbolInfo.lotSize.low
-        : symbolInfo.lotSize ?? 100;
-      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
-        ? symbolInfo.stepVolume.low
-        : symbolInfo.stepVolume ?? lotSize;
-      // Round down to multiple of stepVolume (e.g. 8.33 lots with step 1.0 → 8 lots)
-      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
       logger.info('Placing limit order with volume conversion', {
         symbol: params.symbol,
         qtyLots: params.volume,
-        lotSize,
-        stepVolume,
         volumeInApiUnits,
+        preComputed: params.volumeApiUnits != null,
         accountId: this.config.accountId,
         exchange: 'ctrader'
       });
@@ -947,6 +976,8 @@ export class CTraderClient {
     stopPrice: number;
     /** Link order to position (closing/reduce behaviour when side is opposite) */
     positionId?: string;
+    /** Pre-computed API volume (int64 cents). When provided, `volume` is ignored and no conversion is performed. */
+    volumeApiUnits?: number;
   }): Promise<string> {
     await this.ensureConnected();
     if (!this.authenticated || !this.connection) {
@@ -955,13 +986,7 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
-        ? symbolInfo.lotSize.low
-        : symbolInfo.lotSize ?? 100;
-      const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
-        ? symbolInfo.stepVolume.low
-        : symbolInfo.stepVolume ?? lotSize;
-      const volumeInApiUnits = Math.floor((params.volume * lotSize) / stepVolume) * stepVolume;
+      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -1613,13 +1638,7 @@ export class CTraderClient {
 
       if (volumeLots != null && symbol != null) {
         const symbolInfo = await this.getSymbolInfo(symbol);
-        const lotSize = typeof symbolInfo.lotSize === 'object' && symbolInfo.lotSize?.low !== undefined
-          ? symbolInfo.lotSize.low
-          : symbolInfo.lotSize ?? 100;
-        const stepVolume = typeof symbolInfo.stepVolume === 'object' && symbolInfo.stepVolume?.low !== undefined
-          ? symbolInfo.stepVolume.low
-          : symbolInfo.stepVolume ?? lotSize;
-        volumeInApiUnits = Math.max(1, Math.floor((volumeLots * lotSize) / stepVolume) * stepVolume);
+        volumeInApiUnits = ctraderLotsToApiVolume(volumeLots, symbolInfo);
       } else {
         const positions = await this.getOpenPositions();
         const position = positions.find((p: any) => {

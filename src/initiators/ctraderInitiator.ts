@@ -15,7 +15,7 @@ import {
   hasNoRoomToBoundaryTpForMarketRange
 } from '../utils/ctraderMarketRange.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
-import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
+import { CTraderClient, CTraderClientConfig, ctraderLotsToApiVolumeSimple } from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
 
 /** cTrader: one market/limit order per TP; leg volumes must not exceed risk-sized total (Bybit uses reduce-only trims). */
@@ -543,7 +543,7 @@ const executeTradeForAccount = async (
         // cTrader min/max/step are in API units (cents); convert to lots for qty comparison
         const rawMin = protobufLongToNumber(symbolInfo.minVolume);
         const rawMax = protobufLongToNumber(symbolInfo.maxVolume);
-        const rawStep = protobufLongToNumber(symbolInfo.volumeStep) ?? protobufLongToNumber(symbolInfo.stepVolume);
+        const rawStep = protobufLongToNumber(symbolInfo.stepVolume) ?? protobufLongToNumber(symbolInfo.volumeStep);
         minOrderVolume = rawMin != null && rawMin >= 0 ? rawMin / lotSize : undefined;
         maxOrderVolume = rawMax != null && rawMax > 0 ? rawMax / lotSize : undefined;
         volumeStep = rawStep != null && rawStep > 0 ? rawStep / lotSize : undefined;
@@ -710,6 +710,12 @@ const executeTradeForAccount = async (
       throw new Error(`Invalid quantity calculated: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice}, volumeStep: ${effectiveVolumeStep})`);
     }
 
+    // Pre-compute API volume once — client methods accept this directly, avoiding a
+    // second conversion that could drift from the one we just performed.
+    const qtyApiUnits = lotSize != null && lotSize > 0
+      ? ctraderLotsToApiVolumeSimple(qty, lotSize)
+      : undefined;
+
     // Format quantity string with proper precision (remove trailing zeros, ensure correct decimal places)
     const formatQuantity = (quantity: number, precision: number): string => {
       // Validate quantity is finite before formatting (prevents "Infinity" string)
@@ -741,6 +747,7 @@ const executeTradeForAccount = async (
       tradeSide,
       qty,
       qtyString,
+      qtyApiUnits,
       entryPrice: roundedEntryPrice,
       originalEntryPrice: finalEntryPrice,
       stopLoss: order.stopLoss,
@@ -1179,7 +1186,8 @@ const executeTradeForAccount = async (
                   price: limitPrice,
                   stopLoss: roundedStopLoss,
                   takeProfit: tp.price,
-                  label
+                  label,
+                  ...(lotSize != null && lotSize > 0 && { volumeApiUnits: ctraderLotsToApiVolumeSimple(tp.quantity, lotSize) })
                 });
                 ids.push(sid);
               }
@@ -1330,6 +1338,7 @@ const executeTradeForAccount = async (
                     `Cannot place cTrader market order: TP ${tp.price} invalid relative to current price ${cp}`
                   );
                 }
+                const tpApiUnits = lotSize != null && lotSize > 0 ? ctraderLotsToApiVolumeSimple(tp.quantity, lotSize) : undefined;
                 const sid =
                   useMarketRangeForEntry && marketRangeParams
                     ? await ctraderClient.placeMarketRangeOrder({
@@ -1340,7 +1349,8 @@ const executeTradeForAccount = async (
                         slippageInPoints: marketRangeParams.slippageInPoints,
                         ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
                         ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
-                        label
+                        label,
+                        ...(tpApiUnits != null && { volumeApiUnits: tpApiUnits })
                       })
                     : await ctraderClient.placeMarketOrder({
                         symbol,
@@ -1348,7 +1358,8 @@ const executeTradeForAccount = async (
                         tradeSide,
                         ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
                         ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
-                        label
+                        label,
+                        ...(tpApiUnits != null && { volumeApiUnits: tpApiUnits })
                       });
                 ids.push(sid);
               }
@@ -1422,7 +1433,8 @@ const executeTradeForAccount = async (
             symbol,
             volume: qty,
             tradeSide,
-            price: marketLimitPrice
+            price: marketLimitPrice,
+            ...(qtyApiUnits != null && { volumeApiUnits: qtyApiUnits })
           });
         } else if (isMarketOrder && !useLimitAtTouch) {
           // Actual market order: must use relative SL/TP (absolute rejected by cTrader)
@@ -1564,14 +1576,16 @@ const executeTradeForAccount = async (
                   baseSlippagePrice: cp,
                   slippageInPoints: marketRangeParamsSingle.slippageInPoints,
                   ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
-                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
+                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
+                  ...(qtyApiUnits != null && { volumeApiUnits: qtyApiUnits })
                 })
               : await ctraderClient.placeMarketOrder({
                   symbol,
                   volume: qty,
                   tradeSide,
                   ...(relativeSl != null && relativeSl > 0 && { relativeStopLoss: relativeSl }),
-                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp })
+                  ...(relativeTp != null && relativeTp > 0 && { relativeTakeProfit: relativeTp }),
+                  ...(qtyApiUnits != null && { volumeApiUnits: qtyApiUnits })
                 });
         } else {
           // Limit order at entry price
@@ -1588,7 +1602,8 @@ const executeTradeForAccount = async (
             symbol,
             volume: qty,
             tradeSide,
-            price: roundedEntryPrice
+            price: roundedEntryPrice,
+            ...(qtyApiUnits != null && { volumeApiUnits: qtyApiUnits })
           });
         }
         }
@@ -2124,7 +2139,8 @@ const executeTradeForAccount = async (
                   volume: volumeLots,
                   tradeSide: tpSide,
                   price: tpOrder.price,
-                  positionId: positionIdStr // Link to position (reduce-only-like guard - order modifies this position, not a new one)
+                  positionId: positionIdStr, // Link to position (reduce-only-like guard - order modifies this position, not a new one)
+                  ...(lotSize != null && lotSize > 0 && { volumeApiUnits: ctraderLotsToApiVolumeSimple(volumeLots, lotSize) })
                 });
                 
                 tpOrderIds.push({

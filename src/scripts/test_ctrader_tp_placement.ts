@@ -145,7 +145,7 @@ const main = async () => {
   const stepVolume = protobufLongToNumber(symbolInfo.stepVolume) ?? lotSize;
   const pricePrecision = symbolInfo.digits ?? 5;
   const quantityPrecision = symbolInfo.volumePrecision ?? 2;
-  const volumeStep = protobufLongToNumber(symbolInfo.volumeStep) ?? protobufLongToNumber(symbolInfo.stepVolume) ?? lotSize;
+  const volumeStep = protobufLongToNumber(symbolInfo.stepVolume) ?? protobufLongToNumber(symbolInfo.volumeStep) ?? lotSize;
   const minOrderVolume = protobufLongToNumber(symbolInfo.minVolume) ?? 0;
   const maxOrderVolume = protobufLongToNumber(symbolInfo.maxVolume);
 
