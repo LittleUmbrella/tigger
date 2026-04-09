@@ -164,32 +164,44 @@ export async function validateTradeAgainstPropFirms(
     let rule: PropFirmRule | null = null;
     
     if (typeof propFirmConfig === 'string') {
-      // Predefined prop firm: use rule's default initialBalance (challenge start), NOT exchange balance
       rule = getPropFirmRule(propFirmConfig);
     } else {
-      // Custom prop firm configuration: use config.initialBalance or challenge default
-      rule = createCustomPropFirmRule(
-        propFirmConfig.name,
-        propFirmConfig.displayName || propFirmConfig.name,
-        {
-          initialBalance: propFirmConfig.initialBalance ?? resolveChallengeInitialBalance(propFirmConfig),
-          profitTarget: propFirmConfig.profitTarget,
-          maxDrawdown: propFirmConfig.maxDrawdown,
-          dailyDrawdown: propFirmConfig.dailyDrawdown,
-          minTradingDays: propFirmConfig.minTradingDays,
-          minTradesPerDay: propFirmConfig.minTradesPerDay,
-          maxRiskPerTrade: propFirmConfig.maxRiskPerTrade,
-          stopLossRequired: propFirmConfig.stopLossRequired,
-          stopLossTimeLimit: propFirmConfig.stopLossTimeLimit,
-          maxProfitPerDay: propFirmConfig.maxProfitPerDay,
-          maxProfitPerTrade: propFirmConfig.maxProfitPerTrade,
-          minTradeDuration: propFirmConfig.minTradeDuration,
-          maxShortTradesPercentage: propFirmConfig.maxShortTradesPercentage,
-          reverseTradingAllowed: propFirmConfig.reverseTradingAllowed,
-          reverseTradingTimeLimit: propFirmConfig.reverseTradingTimeLimit,
-          customRules: propFirmConfig.customRules,
-        }
-      );
+      // Start from the named preset (if it exists) so constraints like maxDrawdown,
+      // dailyDrawdown, maxRiskPerTrade etc. are inherited even when the config only
+      // overrides initialBalance.  Only explicitly-provided fields win over the preset.
+      const baseRule = getPropFirmRule(propFirmConfig.name);
+
+      const overrides: Partial<PropFirmRule> = {};
+      if (propFirmConfig.initialBalance !== undefined) overrides.initialBalance = propFirmConfig.initialBalance;
+      if (propFirmConfig.displayName !== undefined)    overrides.displayName = propFirmConfig.displayName;
+      if (propFirmConfig.profitTarget !== undefined)    overrides.profitTarget = propFirmConfig.profitTarget;
+      if (propFirmConfig.maxDrawdown !== undefined)     overrides.maxDrawdown = propFirmConfig.maxDrawdown;
+      if (propFirmConfig.dailyDrawdown !== undefined)   overrides.dailyDrawdown = propFirmConfig.dailyDrawdown;
+      if (propFirmConfig.minTradingDays !== undefined)   overrides.minTradingDays = propFirmConfig.minTradingDays;
+      if (propFirmConfig.minTradesPerDay !== undefined)  overrides.minTradesPerDay = propFirmConfig.minTradesPerDay;
+      if (propFirmConfig.maxRiskPerTrade !== undefined)  overrides.maxRiskPerTrade = propFirmConfig.maxRiskPerTrade;
+      if (propFirmConfig.stopLossRequired !== undefined) overrides.stopLossRequired = propFirmConfig.stopLossRequired;
+      if (propFirmConfig.stopLossTimeLimit !== undefined) overrides.stopLossTimeLimit = propFirmConfig.stopLossTimeLimit;
+      if (propFirmConfig.maxProfitPerDay !== undefined)  overrides.maxProfitPerDay = propFirmConfig.maxProfitPerDay;
+      if (propFirmConfig.maxProfitPerTrade !== undefined) overrides.maxProfitPerTrade = propFirmConfig.maxProfitPerTrade;
+      if (propFirmConfig.minTradeDuration !== undefined) overrides.minTradeDuration = propFirmConfig.minTradeDuration;
+      if (propFirmConfig.maxShortTradesPercentage !== undefined) overrides.maxShortTradesPercentage = propFirmConfig.maxShortTradesPercentage;
+      if (propFirmConfig.reverseTradingAllowed !== undefined) overrides.reverseTradingAllowed = propFirmConfig.reverseTradingAllowed;
+      if (propFirmConfig.reverseTradingTimeLimit !== undefined) overrides.reverseTradingTimeLimit = propFirmConfig.reverseTradingTimeLimit;
+      if (propFirmConfig.customRules !== undefined)     overrides.customRules = propFirmConfig.customRules;
+
+      if (baseRule) {
+        rule = { ...baseRule, ...overrides };
+      } else {
+        rule = createCustomPropFirmRule(
+          propFirmConfig.name,
+          propFirmConfig.displayName || propFirmConfig.name,
+          {
+            initialBalance: propFirmConfig.initialBalance ?? resolveChallengeInitialBalance(propFirmConfig),
+            ...overrides,
+          }
+        );
+      }
     }
     
     if (!rule) {

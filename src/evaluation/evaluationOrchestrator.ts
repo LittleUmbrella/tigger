@@ -376,29 +376,41 @@ export async function runEvaluation(
         initialBalance: config.initialBalance || 10000
       });
     } else {
-      // Custom prop firm configuration
-      rule = createCustomPropFirmRule(
-        propFirmConfig.name,
-        propFirmConfig.displayName || propFirmConfig.name,
-        {
-          initialBalance: propFirmConfig.initialBalance || config.initialBalance || 10000,
-          profitTarget: propFirmConfig.profitTarget,
-          maxDrawdown: propFirmConfig.maxDrawdown,
-          dailyDrawdown: propFirmConfig.dailyDrawdown,
-          minTradingDays: propFirmConfig.minTradingDays,
-          minTradesPerDay: propFirmConfig.minTradesPerDay,
-          maxRiskPerTrade: propFirmConfig.maxRiskPerTrade,
-          stopLossRequired: propFirmConfig.stopLossRequired,
-          stopLossTimeLimit: propFirmConfig.stopLossTimeLimit,
-          maxProfitPerDay: propFirmConfig.maxProfitPerDay,
-          maxProfitPerTrade: propFirmConfig.maxProfitPerTrade,
-          minTradeDuration: propFirmConfig.minTradeDuration,
-          maxShortTradesPercentage: propFirmConfig.maxShortTradesPercentage,
-          reverseTradingAllowed: propFirmConfig.reverseTradingAllowed,
-          reverseTradingTimeLimit: propFirmConfig.reverseTradingTimeLimit,
-          customRules: propFirmConfig.customRules,
-        }
-      );
+      // Start from named preset if available, then apply explicit overrides
+      const baseRule = getPropFirmRule(propFirmConfig.name);
+
+      const overrides: Partial<PropFirmRule> = {};
+      if (propFirmConfig.initialBalance !== undefined) overrides.initialBalance = propFirmConfig.initialBalance;
+      else if (config.initialBalance) overrides.initialBalance = config.initialBalance;
+      if (propFirmConfig.displayName !== undefined)    overrides.displayName = propFirmConfig.displayName;
+      if (propFirmConfig.profitTarget !== undefined)    overrides.profitTarget = propFirmConfig.profitTarget;
+      if (propFirmConfig.maxDrawdown !== undefined)     overrides.maxDrawdown = propFirmConfig.maxDrawdown;
+      if (propFirmConfig.dailyDrawdown !== undefined)   overrides.dailyDrawdown = propFirmConfig.dailyDrawdown;
+      if (propFirmConfig.minTradingDays !== undefined)   overrides.minTradingDays = propFirmConfig.minTradingDays;
+      if (propFirmConfig.minTradesPerDay !== undefined)  overrides.minTradesPerDay = propFirmConfig.minTradesPerDay;
+      if (propFirmConfig.maxRiskPerTrade !== undefined)  overrides.maxRiskPerTrade = propFirmConfig.maxRiskPerTrade;
+      if (propFirmConfig.stopLossRequired !== undefined) overrides.stopLossRequired = propFirmConfig.stopLossRequired;
+      if (propFirmConfig.stopLossTimeLimit !== undefined) overrides.stopLossTimeLimit = propFirmConfig.stopLossTimeLimit;
+      if (propFirmConfig.maxProfitPerDay !== undefined)  overrides.maxProfitPerDay = propFirmConfig.maxProfitPerDay;
+      if (propFirmConfig.maxProfitPerTrade !== undefined) overrides.maxProfitPerTrade = propFirmConfig.maxProfitPerTrade;
+      if (propFirmConfig.minTradeDuration !== undefined) overrides.minTradeDuration = propFirmConfig.minTradeDuration;
+      if (propFirmConfig.maxShortTradesPercentage !== undefined) overrides.maxShortTradesPercentage = propFirmConfig.maxShortTradesPercentage;
+      if (propFirmConfig.reverseTradingAllowed !== undefined) overrides.reverseTradingAllowed = propFirmConfig.reverseTradingAllowed;
+      if (propFirmConfig.reverseTradingTimeLimit !== undefined) overrides.reverseTradingTimeLimit = propFirmConfig.reverseTradingTimeLimit;
+      if (propFirmConfig.customRules !== undefined)     overrides.customRules = propFirmConfig.customRules;
+
+      if (baseRule) {
+        rule = { ...baseRule, ...overrides };
+      } else {
+        rule = createCustomPropFirmRule(
+          propFirmConfig.name,
+          propFirmConfig.displayName || propFirmConfig.name,
+          {
+            initialBalance: propFirmConfig.initialBalance || config.initialBalance || 10000,
+            ...overrides,
+          }
+        );
+      }
     }
 
     if (!rule) {
