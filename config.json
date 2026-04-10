@@ -313,7 +313,7 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -334,7 +334,7 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -354,7 +354,7 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -374,7 +374,7 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -394,7 +394,7 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -414,7 +414,7 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": false
     },
     {
@@ -434,7 +434,7 @@
       "tradeObfuscation": {
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     },
     {
@@ -454,7 +454,7 @@
         "tp": { "minPercent": -0.02, "maxPercent": 0.02 }
       },
       "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 1,
+      "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
     }
   ],
