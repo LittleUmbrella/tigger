@@ -829,7 +829,9 @@ const executeTradeForAccount = async (
       try {
         openPositions = await requiredCTraderClient.getOpenPositions();
         
-        // Calculate worst-case loss for open positions
+        // Worst-case $ loss at SL: same convention as order sizing — `tradeData.volume` is cTrader API
+        // units (× lotSize "cents"); with contractSize = lotSize/100, loss = volumeApi * perUnit / 100.
+        // Using raw `perUnitLoss * volume` overstated risk by ~100× vs account currency (e.g. XAUUSD).
         for (const position of openPositions) {
           const volume = Math.abs(position.volume || position.quantity || 0);
           if (!isFinite(volume) || volume <= 0) continue;
@@ -855,7 +857,7 @@ const executeTradeForAccount = async (
               ? Math.max(0, avgPrice - stopLoss)
               : Math.max(0, stopLoss - avgPrice);
 
-          openWorstCaseLoss += perUnitLoss * volume;
+          openWorstCaseLoss += (perUnitLoss * volume) / 100;
         }
       } catch (error) {
         logger.warn('Exception while fetching open positions for prop firm validation', {
@@ -877,6 +879,11 @@ const executeTradeForAccount = async (
         openWorstCaseLoss = 0;
       }
 
+      // Prop validation expects quantity in **base units** (same as calculateQuantity output), not lots.
+      // potentialLoss = |entry - SL| × baseQty matches 1% risk sizing; lots alone would be ~100× too small on metals.
+      const baseQuantityForPropRisk =
+        lotSize != null && lotSize > 0 ? qty * contractSize : qty;
+
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
@@ -884,7 +891,7 @@ const executeTradeForAccount = async (
         initialBalance,
         roundedEntryPrice,
         roundedStopLoss || 0,
-        qty,
+        baseQuantityForPropRisk,
         effectiveLeverage,
         openWorstCaseLoss,
         dayStartBalance,

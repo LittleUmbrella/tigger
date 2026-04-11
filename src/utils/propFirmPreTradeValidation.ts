@@ -40,73 +40,62 @@ function calculatePotentialLoss(
 }
 
 /**
- * Build account state from existing trades for a channel
+ * Load completed channel trades once (used to project peak / daily PnL per challenge initial balance).
  */
-async function buildAccountState(
+async function loadCompletedTradesForChannel(
   db: DatabaseManager,
-  channel: string,
-  initialBalance: number
-): Promise<{
-  currentBalance: number;
-  peakBalance: number;
-  dailyPnL: Map<string, number>;
-  trades: Trade[];
-  openTrades: Trade[];
-}> {
-  // Get all trades for this channel
+  channel: string
+): Promise<Trade[]> {
   const allTrades = await db.getActiveTrades();
   const closedTrades = await db.getClosedTrades();
-  
   const channelTrades = [...allTrades, ...closedTrades].filter(t => t.channel === channel);
-  
-  // Separate closed and open trades
-  const completedTrades = channelTrades.filter(t => 
-    t.status === 'closed' || t.status === 'stopped' || t.status === 'completed'
+  return channelTrades.filter(
+    t => t.status === 'closed' || t.status === 'stopped' || t.status === 'completed'
   );
-  const openTrades = channelTrades.filter(t => 
-    t.status === 'active' || t.status === 'filled'
-  );
-  
-  // Calculate current balance from completed trades
-  let currentBalance = initialBalance;
-  let runningBalance = initialBalance;
-  let peakBalance = initialBalance;
+}
+
+/**
+ * Daily realized PnL by UTC date — independent of challenge starting balance.
+ */
+function buildDailyPnLMap(completedTrades: Trade[]): Map<string, number> {
   const dailyPnL = new Map<string, number>();
-  
-  // Sort trades chronologically by exit time (or created_at if no exit)
-  const sortedTrades = [...completedTrades].sort((a, b) => {
-    const timeA = a.exit_filled_at ? dayjs(a.exit_filled_at).valueOf() : dayjs(a.created_at).valueOf();
-    const timeB = b.exit_filled_at ? dayjs(b.exit_filled_at).valueOf() : dayjs(b.created_at).valueOf();
-    return timeA - timeB;
-  });
-  
-  // Process trades chronologically to track peak balance correctly
-  for (const trade of sortedTrades) {
+  for (const trade of completedTrades) {
     if (trade.pnl !== undefined && trade.exit_filled_at) {
-      runningBalance += trade.pnl;
-      
-      // Update peak balance if we've reached a new high
-      if (runningBalance > peakBalance) {
-        peakBalance = runningBalance;
-      }
-      
-      // Track daily P&L
       const tradeDate = toUtcDateString(trade.exit_filled_at);
       const currentDailyPnL = dailyPnL.get(tradeDate) || 0;
       dailyPnL.set(tradeDate, currentDailyPnL + trade.pnl);
     }
   }
-  
-  // Set current balance to the running balance after processing all trades
-  currentBalance = runningBalance;
-  
-  return {
-    currentBalance,
-    peakBalance,
-    dailyPnL,
-    trades: completedTrades,
-    openTrades
-  };
+  return dailyPnL;
+}
+
+/**
+ * Peak equity and DB-derived balance for a given challenge initial balance.
+ * Must use the same `challengeInitialBalance` as `rule.initialBalance` for max drawdown %.
+ */
+function projectRunningBalanceAndPeak(
+  completedTrades: Trade[],
+  challengeInitialBalance: number
+): { currentBalance: number; peakBalance: number } {
+  let runningBalance = challengeInitialBalance;
+  let peakBalance = challengeInitialBalance;
+
+  const sortedTrades = [...completedTrades].sort((a, b) => {
+    const timeA = a.exit_filled_at ? dayjs(a.exit_filled_at).valueOf() : dayjs(a.created_at).valueOf();
+    const timeB = b.exit_filled_at ? dayjs(b.exit_filled_at).valueOf() : dayjs(b.created_at).valueOf();
+    return timeA - timeB;
+  });
+
+  for (const trade of sortedTrades) {
+    if (trade.pnl !== undefined && trade.exit_filled_at) {
+      runningBalance += trade.pnl;
+      if (runningBalance > peakBalance) {
+        peakBalance = runningBalance;
+      }
+    }
+  }
+
+  return { currentBalance: runningBalance, peakBalance };
 }
 
 /**
@@ -128,6 +117,8 @@ function resolveChallengeInitialBalance(
  *
  * @param currentBalanceFromExchange - When provided (live trading), use as source of truth for current balance.
  *   Prop firm drawdown % is always calculated against the challenge initial balance (e.g. $10k), not current balance.
+ * @param quantity - Size in **base units** for P&L: Bybit linear = coin qty; cTrader = units per
+ *   `calculatePotentialLoss` (e.g. oz for gold) = **lots × (lotSize/100)**, not raw API lots.
  */
 export async function validateTradeAgainstPropFirms(
   db: DatabaseManager,
@@ -147,17 +138,9 @@ export async function validateTradeAgainstPropFirms(
   // Calculate potential loss
   const potentialLoss = calculatePotentialLoss(entryPrice, stopLoss, quantity);
   const totalWorstCaseLoss = potentialLoss + additionalWorstCaseLoss;
-  
-  // Challenge initial balance for drawdown % (e.g. $10k for Hyrotrader) - NOT current exchange balance
-  const challengeInitialBalance = propFirmConfigs.length > 0
-    ? resolveChallengeInitialBalance(propFirmConfigs[0])
-    : initialBalance;
-  
-  // Build account state from trades (peak balance, daily PnL). Use challenge initial for consistency.
-  const accountState = await buildAccountState(db, channel, challengeInitialBalance);
-  
-  // For live trading: exchange balance is source of truth. Otherwise use DB-derived balance.
-  const currentBalance = currentBalanceFromExchange ?? accountState.currentBalance;
+
+  const completedTrades = await loadCompletedTradesForChannel(db, channel);
+  const dailyPnLAll = buildDailyPnLMap(completedTrades);
   
   // Validate against each prop firm
   for (const propFirmConfig of propFirmConfigs) {
@@ -211,6 +194,10 @@ export async function validateTradeAgainstPropFirms(
       });
       continue;
     }
+
+    const { currentBalance: dbBalanceForRule, peakBalance: peakFromTrades } =
+      projectRunningBalanceAndPeak(completedTrades, rule.initialBalance);
+    const currentBalance = currentBalanceFromExchange ?? dbBalanceForRule;
     
     const violations: string[] = [];
     
@@ -231,7 +218,7 @@ export async function validateTradeAgainstPropFirms(
     
     // Simulate the trade as a total loss and check drawdown rules
     const simulatedBalance = currentBalance - totalWorstCaseLoss;
-    const simulatedPeakBalance = Math.max(accountState.peakBalance, currentBalance);
+    const simulatedPeakBalance = Math.max(peakFromTrades, currentBalance);
     
     // Check maxDrawdown rule (drawdown % is vs challenge initial balance, e.g. $10k)
     if (rule.maxDrawdown !== undefined) {
@@ -240,7 +227,7 @@ export async function validateTradeAgainstPropFirms(
       
       if (drawdownPercentage > rule.maxDrawdown) {
         violations.push(
-          `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+          `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (peak equity: ${simulatedPeakBalance.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
         );
       }
     }
@@ -249,14 +236,14 @@ export async function validateTradeAgainstPropFirms(
     if (rule.dailyDrawdown !== undefined) {
       const today = getUtcTodayString();
       
-      const currentDailyPnL = accountState.dailyPnL.get(today) || 0;
+      const currentDailyPnL = dailyPnLAll.get(today) || 0;
       const simulatedDailyPnL = currentDailyPnL - totalWorstCaseLoss;
 
       const dailyDrawdownLimit = rule.dailyDrawdownMode === 'swing'
         ? (rule.dailyDrawdown / 100) * (dayStartBalance ?? rule.initialBalance)
         : (rule.dailyDrawdown / 100) * (
-            accountState.dailyPnL.has(today)
-              ? currentBalance - (accountState.dailyPnL.get(today) || 0)
+            dailyPnLAll.has(today)
+              ? currentBalance - (dailyPnLAll.get(today) || 0)
               : currentBalance
           );
       
