@@ -8,6 +8,8 @@ import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuant
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
+import { analyzeWorstCaseLossWithPendingOrders } from '../utils/bybitWorstCaseLoss.js';
+import { fetchMergedLinearActiveOrders, fetchMergedOpenLinearPositions } from '../utils/bybitMergedLinearApi.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
@@ -132,53 +134,6 @@ const getUtcDayStartBalance = async (
 
   // Fail closed: can't infer day-start baseline accurately.
   throw new Error('Cannot infer UTC day-start balance: transactions exist since UTC midnight, but no valid cashBalance found in earliest transaction or pre-midnight window');
-};
-
-/**
- * Compute worst-case loss (in USDT) for currently open positions, assuming each hits its stop-loss.
- * If stop-loss is missing for any open position, returns Infinity.
- */
-const calculateWorstCaseLossForOpenPositions = (positions: any[]): {
-  worstCaseLoss: number;
-  missingStopLossSymbols: string[];
-} => {
-  let worstCaseLoss = 0;
-  const missingStopLossSymbols: string[] = [];
-
-  for (const position of positions) {
-    const size = parseFloat(getBybitField<string>(position, 'size') || '0');
-    if (!isFinite(size) || size <= 0) continue;
-
-    const symbol = getBybitField<string>(position, 'symbol') || 'UNKNOWN';
-    const side = (getBybitField<string>(position, 'side') || '').toLowerCase(); // 'buy' | 'sell'
-
-    const avgPrice = parseFloat(getBybitField<string>(position, 'avgPrice') || getBybitField<string>(position, 'avgEntryPrice') || '0');
-    const stopLoss = parseFloat(getBybitField<string>(position, 'stopLoss') || '0');
-
-    if (!isFinite(avgPrice) || avgPrice <= 0) {
-      // If we can't determine entry/avg price, fail closed
-      return { worstCaseLoss: Infinity, missingStopLossSymbols: [symbol] };
-    }
-
-    if (!isFinite(stopLoss) || stopLoss <= 0) {
-      missingStopLossSymbols.push(symbol);
-      continue;
-    }
-
-    // Only count downside (if SL is beyond entry in profit direction, treat loss as 0)
-    const perUnitLoss =
-      side === 'buy'
-        ? Math.max(0, avgPrice - stopLoss)
-        : Math.max(0, stopLoss - avgPrice);
-
-    worstCaseLoss += perUnitLoss * size;
-  }
-
-  if (missingStopLossSymbols.length > 0) {
-    return { worstCaseLoss: Infinity, missingStopLossSymbols };
-  }
-
-  return { worstCaseLoss, missingStopLossSymbols };
 };
 
 /**
@@ -826,90 +781,40 @@ const executeTradeForAccount = async (
       const initialBalance = balance;
       const dayStartBalance = await getUtcDayStartBalance(requiredBybitClient, accountName || 'default', balance);
 
-      // Include worst-case loss for ALL currently open exchange positions (per-account),
-      // so we don't open a new trade that would cause a violation if everything hit SL.
-      // Try fetching positions - some accounts (unified/demo) may require additional parameters
-      let positionsResponse: any;
-      let openPositions: any[] = [];
+      // Worst-case loss: open positions + non-reduce-only orders that add to a position (blended
+      // avg entry, same position SL), and orphan opening orders on other symbols (SL on order row).
       let openWorstCaseLoss = 0;
       let missingStopLossSymbols: string[] = [];
-      
+
       try {
-        // First try without additional parameters (works for most accounts)
-        positionsResponse = await requiredBybitClient.getPositionInfo({ category: 'linear' });
-        
-        if (positionsResponse.retCode === 0) {
-          openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
-            const size = parseFloat(getBybitField<string>(p, 'size') || '0');
-            return isFinite(size) && size > 0;
-          });
-          
-          const worstCaseResult = calculateWorstCaseLossForOpenPositions(openPositions);
-          openWorstCaseLoss = worstCaseResult.worstCaseLoss;
-          missingStopLossSymbols = worstCaseResult.missingStopLossSymbols;
-        } else if (positionsResponse.retCode === 10001) {
-          // retCode 10001 = invalid parameters - try with settleCoin for unified accounts
-          logger.debug('Initial position fetch failed with retCode 10001, retrying with settleCoin', {
+        const openPositions = await fetchMergedOpenLinearPositions(requiredBybitClient);
+        const activeOrders = await fetchMergedLinearActiveOrders(requiredBybitClient);
+        const analysis = analyzeWorstCaseLossWithPendingOrders(openPositions, activeOrders);
+        openWorstCaseLoss = analysis.withPendingAddsWorstCaseQuote;
+        missingStopLossSymbols = analysis.missingStopLossSymbols;
+
+        if (!Number.isFinite(openWorstCaseLoss)) {
+          logger.warn('Prop firm validation: worst-case exposure unbounded or incomplete', {
             channel,
+            messageId: message.message_id,
             accountName: accountName || 'default',
-            retCode: positionsResponse.retCode,
-            retMsg: positionsResponse.retMsg
+            missingStopLossSymbols,
+            unboundedReasons: analysis.unboundedReasons,
+            orphanOpeningOrders: analysis.orphanOpeningOrders.map((o) => ({
+              symbol: o.symbol,
+              orderId: o.orderId,
+              missingStopLoss: o.missingStopLoss,
+            })),
           });
-          
-          positionsResponse = await requiredBybitClient.getPositionInfo({ 
-            category: 'linear',
-            settleCoin: 'USDT'
-          });
-          
-          if (positionsResponse.retCode === 0) {
-            openPositions = (positionsResponse.result?.list || []).filter((p: any) => {
-              const size = parseFloat(getBybitField<string>(p, 'size') || '0');
-              return isFinite(size) && size > 0;
-            });
-            
-            const worstCaseResult = calculateWorstCaseLossForOpenPositions(openPositions);
-            openWorstCaseLoss = worstCaseResult.worstCaseLoss;
-            missingStopLossSymbols = worstCaseResult.missingStopLossSymbols;
-          } else {
-            // Both attempts failed - log warning and continue without open positions
-            logger.warn('Failed to fetch open positions for prop firm validation after retry', {
-              channel,
-              accountName: accountName || 'default',
-              retCode: positionsResponse.retCode,
-              retMsg: positionsResponse.retMsg,
-              note: 'Prop firm validation will proceed without including existing open positions'
-            });
-            openWorstCaseLoss = 0;
-          }
-        } else {
-          // Other error codes - log and continue without open positions
-          logger.warn('Failed to fetch open positions for prop firm validation', {
-            channel,
-            accountName: accountName || 'default',
-            retCode: positionsResponse.retCode,
-            retMsg: positionsResponse.retMsg,
-            note: 'Prop firm validation will proceed without including existing open positions'
-          });
-          openWorstCaseLoss = 0;
         }
       } catch (error) {
-        // Catch any exceptions during position fetching
-        logger.warn('Exception while fetching open positions for prop firm validation', {
+        logger.warn('Exception while fetching positions/orders for prop firm worst-case', {
           channel,
           accountName: accountName || 'default',
           error: serializeErrorForLog(error),
-          note: 'Prop firm validation will proceed without including existing open positions'
+          note: 'Prop firm validation will proceed without including existing exposure',
         });
         openWorstCaseLoss = 0;
-      }
-
-      if (!isFinite(openWorstCaseLoss)) {
-        logger.warn('Prop firm validation: could not compute worst-case open-position risk (missing stop-loss)', {
-          channel,
-          messageId: message.message_id,
-          accountName: accountName || 'default',
-          missingStopLossSymbols,
-        });
       }
 
       const validationResults = await validateTradeAgainstPropFirms(

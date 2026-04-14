@@ -19,6 +19,7 @@
     "replay-messages": "tsx src/scripts/replay_messages.ts",
     "reprocess-message": "tsx src/scripts/reprocess_message.ts",
     "test-bybit-credentials": "tsx src/scripts/test_bybit_credentials.ts",
+    "bybit-risk-exposure": "tsx src/scripts/bybit_risk_exposure.ts",
     "test-ctrader-balance": "tsx src/scripts/test_ctrader_balance.ts",
     "test-ctrader-positions": "tsx src/scripts/test_ctrader_positions.ts",
     "ctrader-order-link-research": "tsx src/scripts/ctrader_order_position_link_research.ts",
