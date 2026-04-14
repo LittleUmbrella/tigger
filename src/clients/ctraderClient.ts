@@ -101,6 +101,21 @@ export function ctraderLotsToApiVolumeSimple(volumeLots: number, lotSize: number
 }
 
 /**
+ * Use caller-supplied API units only when > 0. Treat `0` as missing so we recompute from lots
+ * (`??` would incorrectly keep 0 and send zero volume to the broker).
+ */
+export function resolveCtraderVolumeApiUnits(
+  volumeLots: number,
+  volumeApiUnits: number | undefined,
+  symbolInfo: Record<string, unknown>
+): number {
+  if (volumeApiUnits != null && volumeApiUnits > 0) {
+    return volumeApiUnits;
+  }
+  return ctraderLotsToApiVolume(volumeLots, symbolInfo);
+}
+
+/**
  * cTrader OpenAPI client configuration
  */
 export interface CTraderClientConfig {
@@ -741,7 +756,11 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
+      const volumeInApiUnits = resolveCtraderVolumeApiUnits(
+        params.volume,
+        params.volumeApiUnits,
+        symbolInfo
+      );
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -815,7 +834,11 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
+      const volumeInApiUnits = resolveCtraderVolumeApiUnits(
+        params.volume,
+        params.volumeApiUnits,
+        symbolInfo
+      );
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -898,7 +921,11 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
+      const volumeInApiUnits = resolveCtraderVolumeApiUnits(
+        params.volume,
+        params.volumeApiUnits,
+        symbolInfo
+      );
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;
@@ -986,7 +1013,11 @@ export class CTraderClient {
 
     try {
       const symbolInfo = await this.getSymbolInfo(params.symbol);
-      const volumeInApiUnits = params.volumeApiUnits ?? ctraderLotsToApiVolume(params.volume, symbolInfo);
+      const volumeInApiUnits = resolveCtraderVolumeApiUnits(
+        params.volume,
+        params.volumeApiUnits,
+        symbolInfo
+      );
       const symbolId = typeof symbolInfo.symbolId === 'object' && symbolInfo.symbolId?.low !== undefined
         ? symbolInfo.symbolId.low
         : symbolInfo.symbolId;

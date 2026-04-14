@@ -35,4 +35,45 @@ describe('validateAndRedistributeTPQuantities + floor', () => {
     const sum = valid.reduce((s, o) => s + o.quantity, 0);
     expect(sum).toBeLessThanOrEqual(totalQty + 1e-9);
   });
+
+  it('cTrader trim never zeroes a leg (regression: broker Order volume = 0.00)', () => {
+    const totalQty = 0.02;
+    const tpPrices = [1.0, 1.1, 1.2];
+    const tpQuantities = distributeQuantityAcrossTPs(totalQty, 3, 2, { lastSliceRounding: 'floor' });
+    const valid = validateAndRedistributeTPQuantities(
+      tpQuantities,
+      tpPrices,
+      totalQty,
+      0.01,
+      0.01,
+      undefined,
+      2,
+      { lastSliceRounding: 'floor' }
+    );
+    for (const tp of valid) {
+      expect(tp.quantity).toBeGreaterThanOrEqual(0.01);
+    }
+    expect(valid.length).toBeGreaterThan(0);
+    const sum = valid.reduce((s, o) => s + o.quantity, 0);
+    expect(sum).toBeLessThanOrEqual(totalQty + 1e-9);
+  });
+
+  it('when min-lot legs overshoot risk total, drops a TP level instead of a zero-volume leg', () => {
+    const tpPrices = [1.0, 1.1, 1.2];
+    const tpQuantities = [0.01, 0.01, 0.01];
+    const valid = validateAndRedistributeTPQuantities(
+      tpQuantities,
+      tpPrices,
+      0.02,
+      0.01,
+      0.01,
+      undefined,
+      2,
+      { lastSliceRounding: 'floor' }
+    );
+    for (const tp of valid) {
+      expect(tp.quantity).toBeGreaterThan(0);
+    }
+    expect(valid.reduce((s, o) => s + o.quantity, 0)).toBeLessThanOrEqual(0.02 + 1e-9);
+  });
 });

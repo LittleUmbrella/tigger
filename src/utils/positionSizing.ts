@@ -605,22 +605,58 @@ export const validateAndRedistributeTPQuantities = (
     }
   }
 
-  // cTrader (independent legs): trim if minQty / redistribution pushed sum above risk-sized total
+  // cTrader (independent legs): trim if minQty / redistribution pushed sum above risk-sized total.
+  // Never subtract a full capStep from a leg at exactly min lot — that produced volume 0 and broker errors.
   if (options?.lastSliceRounding === 'floor' && validTPOrders.length > 0) {
     const capStep = qtyStep !== undefined && qtyStep > 0 ? qtyStep : Math.pow(10, -decimalPrecision);
+    const minLeg = Math.max(minQty > 0 ? minQty : 0, capStep > 0 ? capStep : Number.EPSILON);
     let sumQty = validTPOrders.reduce((s, o) => s + o.quantity, 0);
     let guard = 100000;
     while (sumQty > positionSize + 1e-12 && guard-- > 0) {
       let reduced = false;
       for (let i = validTPOrders.length - 1; i >= 0; i--) {
-        if (validTPOrders[i].quantity + 1e-12 >= capStep) {
-          validTPOrders[i].quantity -= capStep;
-          sumQty -= capStep;
+        const q = validTPOrders[i].quantity;
+        if (q > minLeg + 1e-12) {
+          const dec = Math.min(capStep, q - minLeg);
+          validTPOrders[i].quantity = q - dec;
+          sumQty -= dec;
           reduced = true;
           break;
         }
       }
-      if (!reduced) break;
+      if (!reduced) {
+        break;
+      }
+    }
+
+    sumQty = validTPOrders.reduce((s, o) => s + o.quantity, 0);
+    // All legs stuck at minLot but sum still exceeds risk-sized total → drop last TP level and re-split.
+    if (sumQty > positionSize + 1e-12 && validTPOrders.length > 1) {
+      const newPrices = validTPOrders.slice(0, -1).map((o) => o.price);
+      const newTq = distributeQuantityAcrossTPs(
+        positionSize,
+        newPrices.length,
+        decimalPrecision,
+        options
+      );
+      return validateAndRedistributeTPQuantities(
+        newTq,
+        newPrices,
+        positionSize,
+        qtyStep,
+        minOrderQty,
+        maxOrderQty,
+        decimalPrecision,
+        options
+      );
+    }
+
+    if (sumQty > positionSize + 1e-12 && validTPOrders.length === 1) {
+      let q = Math.floor(positionSize / capStep) * capStep;
+      if (q < minLeg - 1e-12) {
+        q = minLeg;
+      }
+      validTPOrders[0].quantity = q;
     }
   }
 
