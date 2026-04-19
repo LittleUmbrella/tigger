@@ -15,6 +15,7 @@ import {
   hasNoRoomToBoundaryTpForMarketRange
 } from '../utils/ctraderMarketRange.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
+import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
 import { CTraderClient, CTraderClientConfig, ctraderLotsToApiVolumeSimple } from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
 
@@ -183,7 +184,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs, useMarketRangeForEntry } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs, useMarketRangeForEntry, maxRisk } = context;
 
   /** False → real market order (relative SL/TP). True → limit at current price ("limit-at-touch"). Parsers may set order.marketExecution to force the market path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
@@ -766,6 +767,87 @@ const executeTradeForAccount = async (
       ? roundPrice(order.stopLoss, pricePrecision, tickSize)
       : order.stopLoss;
 
+    // Prop validation / maxRisk: qty in **base units** (same as calculateQuantity output).
+    const baseQuantityForRisk =
+      lotSize != null && lotSize > 0 ? qty * contractSize : qty;
+
+    const maxRiskEnabled =
+      maxRisk !== undefined && maxRisk !== null && maxRisk >= 0;
+    const propFirmEnabled = !!(context.propFirms && context.propFirms.length > 0 && !isSimulation);
+
+    let openWorstCaseLoss = 0;
+    let missingStopLossSymbols: string[] = [];
+    const needsOpenExposureFetch =
+      !isSimulation && !!ctraderClient && (maxRiskEnabled || propFirmEnabled);
+
+    if (needsOpenExposureFetch) {
+      const requiredCTraderClient = ctraderClient!;
+      try {
+        const openPositions = await requiredCTraderClient.getOpenPositions();
+
+        for (const position of openPositions) {
+          const volume = Math.abs(position.volume || position.quantity || 0);
+          if (!isFinite(volume) || volume <= 0) continue;
+
+          const symbolName = position.symbolName || position.symbol || 'UNKNOWN';
+          const tradeSide = (position.tradeSide || position.side || '').toLowerCase();
+          const avgPrice = parseFloat(position.avgPrice || position.averagePrice || '0');
+          const stopLoss = parseFloat(position.stopLoss || '0');
+
+          if (!isFinite(avgPrice) || avgPrice <= 0) {
+            missingStopLossSymbols.push(symbolName);
+            continue;
+          }
+
+          if (!isFinite(stopLoss) || stopLoss <= 0) {
+            missingStopLossSymbols.push(symbolName);
+            continue;
+          }
+
+          const perUnitLoss =
+            tradeSide === 'buy' || tradeSide === 'long'
+              ? Math.max(0, avgPrice - stopLoss)
+              : Math.max(0, stopLoss - avgPrice);
+
+          openWorstCaseLoss += (perUnitLoss * volume) / 100;
+        }
+      } catch (error) {
+        logger.warn('Exception while fetching open positions for worst-case exposure', {
+          channel,
+          accountName: accountName || 'default',
+          error: error instanceof Error ? error.message : String(error),
+          note: 'Proceeding with existing exposure treated as 0',
+        });
+        openWorstCaseLoss = 0;
+      }
+
+      if (!isFinite(openWorstCaseLoss)) {
+        logger.warn('Could not compute worst-case open-position risk (missing stop-loss)', {
+          channel,
+          messageId: message.message_id,
+          accountName: accountName || 'default',
+          missingStopLossSymbols,
+        });
+        openWorstCaseLoss = 0;
+      }
+    } else if (maxRiskEnabled && !isSimulation && !ctraderClient) {
+      throw new Error('Configured maxRisk requires a cTrader client to fetch open positions');
+    }
+
+    if (maxRiskEnabled) {
+      enforceChannelMaxPortfolioRiskConfigured({
+        maxRisk,
+        existingWorstCaseLoss: openWorstCaseLoss,
+        entryPrice: roundedEntryPrice,
+        stopLoss: roundedStopLoss || 0,
+        quantity: baseQuantityForRisk,
+        referenceBalance: balance,
+        channel,
+        messageId: message.message_id,
+        tradingPair: order.tradingPair,
+      });
+    }
+
     // Validate quantity is finite before formatting (prevents "Infinity" string)
     if (!isFinite(qty)) {
       throw new Error(`Quantity is not finite: ${qty} (positionSize: ${positionSize}, entryPrice: ${roundedEntryPrice})`);
@@ -808,90 +890,22 @@ const executeTradeForAccount = async (
     }
 
     // Prop firm pre-trade validation: check if total loss would violate rules (Gap #4)
-    if (context.propFirms && context.propFirms.length > 0 && !isSimulation) {
+    if (propFirmEnabled) {
       if (!ctraderClient) {
         throw new Error('Prop firm validation requires a cTrader client to fetch open positions');
       }
-      const requiredCTraderClient = ctraderClient;
 
-      // Use current balance from exchange as initial balance for prop firm validation
       const initialBalance = balance;
-      
-      // For cTrader, we don't have day-start balance tracking yet, so use current balance
-      // TODO: Implement getUtcDayStartBalance for cTrader if needed
       const dayStartBalance = initialBalance;
-
-      // Include worst-case loss for ALL currently open exchange positions (per-account)
-      let openPositions: any[] = [];
-      let openWorstCaseLoss = 0;
-      let missingStopLossSymbols: string[] = [];
-      
-      try {
-        openPositions = await requiredCTraderClient.getOpenPositions();
-        
-        // Worst-case $ loss at SL: same convention as order sizing — `tradeData.volume` is cTrader API
-        // units (× lotSize "cents"); with contractSize = lotSize/100, loss = volumeApi * perUnit / 100.
-        // Using raw `perUnitLoss * volume` overstated risk by ~100× vs account currency (e.g. XAUUSD).
-        for (const position of openPositions) {
-          const volume = Math.abs(position.volume || position.quantity || 0);
-          if (!isFinite(volume) || volume <= 0) continue;
-
-          const symbolName = position.symbolName || position.symbol || 'UNKNOWN';
-          const tradeSide = (position.tradeSide || position.side || '').toLowerCase();
-          const avgPrice = parseFloat(position.avgPrice || position.averagePrice || '0');
-          const stopLoss = parseFloat(position.stopLoss || '0');
-
-          if (!isFinite(avgPrice) || avgPrice <= 0) {
-            missingStopLossSymbols.push(symbolName);
-            continue;
-          }
-
-          if (!isFinite(stopLoss) || stopLoss <= 0) {
-            missingStopLossSymbols.push(symbolName);
-            continue;
-          }
-
-          // Only count downside (if SL is beyond entry in profit direction, treat loss as 0)
-          const perUnitLoss =
-            tradeSide === 'buy' || tradeSide === 'long'
-              ? Math.max(0, avgPrice - stopLoss)
-              : Math.max(0, stopLoss - avgPrice);
-
-          openWorstCaseLoss += (perUnitLoss * volume) / 100;
-        }
-      } catch (error) {
-        logger.warn('Exception while fetching open positions for prop firm validation', {
-          channel,
-          accountName: accountName || 'default',
-          error: error instanceof Error ? error.message : String(error),
-          note: 'Prop firm validation will proceed without including existing open positions'
-        });
-        openWorstCaseLoss = 0;
-      }
-
-      if (!isFinite(openWorstCaseLoss)) {
-        logger.warn('Prop firm validation: could not compute worst-case open-position risk (missing stop-loss)', {
-          channel,
-          messageId: message.message_id,
-          accountName: accountName || 'default',
-          missingStopLossSymbols,
-        });
-        openWorstCaseLoss = 0;
-      }
-
-      // Prop validation expects quantity in **base units** (same as calculateQuantity output), not lots.
-      // potentialLoss = |entry - SL| × baseQty matches 1% risk sizing; lots alone would be ~100× too small on metals.
-      const baseQuantityForPropRisk =
-        lotSize != null && lotSize > 0 ? qty * contractSize : qty;
 
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
-        context.propFirms,
+        context.propFirms!,
         initialBalance,
         roundedEntryPrice,
         roundedStopLoss || 0,
-        baseQuantityForPropRisk,
+        baseQuantityForRisk,
         effectiveLeverage,
         openWorstCaseLoss,
         dayStartBalance,

@@ -3,7 +3,7 @@
  * Aligns with prop firm `additionalWorstCaseLoss` + `calculatePotentialLoss` shape:
  * loss = (adverse price move per unit) × quantity, with SL on the position (Bybit `setTradingStop`).
  *
- * @see calculatePotentialLoss in propFirmPreTradeValidation.ts (pre-trade single-leg)
+ * @see calculatePotentialLoss in risk.ts (pre-trade single-leg)
  * @see calculateWorstCaseLossForOpenPositions previously in bybitInitiator.ts (open legs only)
  */
 

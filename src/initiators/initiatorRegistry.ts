@@ -23,6 +23,11 @@ export interface InitiatorContext {
   accountFilters?: AccountFilter[]; // Channel-level account filtering rules
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
+  /**
+   * Human percent (1 = 1%): max total worst-case loss (existing open exposure + this trade) vs account balance.
+   * Same exposure math as drawdown pre-trade (`additionalWorstCaseLoss` + `calculatePotentialLoss` in `risk.ts`).
+   */
+  maxRisk?: number;
   forcePlaceTrade?: boolean; // If true, bypass existing-trade check (for manual retries when DB has stale data)
   slAdjustmentTolerancePercent?: number; // Per-channel: when price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   /** cTrader only: When true, convert market orders to limit at current price. When false, use market with relative SL/TP (default: true) */

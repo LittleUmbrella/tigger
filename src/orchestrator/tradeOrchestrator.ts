@@ -945,7 +945,8 @@ export const startTradeOrchestrator = async (
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
           channelConfig.useLimitOrderForEntry, // Pass cTrader: use limit vs market for entry
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
-          channelConfig.useMarketRangeForEntry // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
+          channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
+          channelConfig.maxRisk
         );
       }
     };
@@ -1004,7 +1005,8 @@ export const startTradeOrchestrator = async (
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
           channelConfig.useLimitOrderForEntry, // Pass cTrader: use limit vs market for entry
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
-          channelConfig.useMarketRangeForEntry // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
+          channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
+          channelConfig.maxRisk
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

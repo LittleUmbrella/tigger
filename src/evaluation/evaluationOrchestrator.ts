@@ -176,7 +176,11 @@ export async function runEvaluation(
     undefined, // accountFilters (not used in evaluation mode)
     undefined, // propFirms (evaluation validates prop firms after simulation)
     config.tradeObfuscation,
-    config.slAdjustmentTolerancePercent
+    config.slAdjustmentTolerancePercent,
+    undefined, // useLimitOrderForEntry (evaluation uses initiator defaults)
+    undefined, // maxSkippablePastTPs
+    undefined, // useMarketRangeForEntry
+    config.maxRisk
   );
 
   // Get all trades for this channel that need simulation

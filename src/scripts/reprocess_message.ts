@@ -210,7 +210,8 @@ program
         channelConfig.slAdjustmentTolerancePercent,
         channelConfig.useLimitOrderForEntry,
         channelConfig.maxSkippablePastTPs,
-        channelConfig.useMarketRangeForEntry
+        channelConfig.useMarketRangeForEntry,
+        channelConfig.maxRisk
       );
 
       // --- Show result ---

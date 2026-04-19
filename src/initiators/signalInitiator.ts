@@ -48,7 +48,8 @@ const isRetryableError = (error: unknown): boolean => {
     'invalid price relationships',
     'entry order cancelled',
     'all take profit orders failed',
-    'cannot place cTrader MARKET_RANGE'
+    'cannot place cTrader MARKET_RANGE',
+    'max risk:'
   ];
 
   // Check if error matches any non-retryable pattern
@@ -107,7 +108,8 @@ export const processUnparsedMessages = async (
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   useLimitOrderForEntry?: boolean, // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
   maxSkippablePastTPs?: number, // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
-  useMarketRangeForEntry?: boolean // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
+  useMarketRangeForEntry?: boolean, // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
+  maxRisk?: number
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -196,7 +198,8 @@ export const processUnparsedMessages = async (
     slAdjustmentTolerancePercent,
     useLimitOrderForEntry,
     maxSkippablePastTPs,
-    useMarketRangeForEntry
+    useMarketRangeForEntry,
+    maxRisk
   );
   
   logger.debug('Finished processing messages', {
@@ -230,7 +233,8 @@ export const processMessages = async (
   useLimitOrderForEntry?: boolean,
   maxSkippablePastTPs?: number,
   /** cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2) */
-  useMarketRangeForEntry?: boolean
+  useMarketRangeForEntry?: boolean,
+  maxRisk?: number
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -311,6 +315,7 @@ export const processMessages = async (
           accounts,
           accountFilters,
           propFirms,
+          maxRisk,
           slAdjustmentTolerancePercent,
           useLimitOrderForEntry,
           maxSkippablePastTPs,

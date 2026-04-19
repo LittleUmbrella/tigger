@@ -162,6 +162,12 @@ export interface ChannelSetConfig {
   dynamicBreakevenAfterTPs?: boolean; // Per-channel override for dynamic breakeven threshold (overrides monitor config)
   entryTimeoutMinutes?: number; // Per-channel override for minutes to wait for entry before cancelling (overrides monitor config)
   riskPercentage?: number; // Per-channel override for percentage of account to risk (overrides initiator config)
+  /**
+   * Cap total portfolio worst-case loss vs account balance (human percent: 1 = 1%).
+   * Blocks if existing open exposure already exceeds the cap, or if exposure + this trade would exceed it.
+   * Same worst-case aggregation as prop firm pre-trade drawdown checks.
+   */
+  maxRisk?: number;
   baseLeverage?: number; // Per-channel base leverage (default leverage if not specified in message, also used as confidence indicator for risk adjustment)
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
@@ -241,4 +247,6 @@ export interface EvaluationConfig {
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
   tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp (same as channel config)
   slAdjustmentTolerancePercent?: number; // When price past SL, max overshoot % to allow proportional adjustment (0 = reject)
+  /** Portfolio worst-case exposure cap — same semantics as {@link ChannelSetConfig.maxRisk} */
+  maxRisk?: number;
 }

@@ -80,7 +80,8 @@
       "type": "bybit",
       "testnet": false,
       "pollInterval": 10000,
-      "entryTimeoutMinutes": 2880, // 2 days = 2880 minutes
+      "_comment_entryTimeoutMinutes": "2880 minutes = 2 days",
+      "entryTimeoutMinutes": 2880,
       "breakevenAfterTPs": 1
     }
   ],
@@ -93,6 +94,8 @@
       "monitor": "bybit",
       "breakevenAfterTPs": 1,
       "baseLeverage": 20,
+      "_comment_maxRisk": "optional. Human percent (5 = 5%; 1 = 1%). Caps total worst-case exposure (open positions + new trade) as a share of account balance.",
+      "maxRisk": 5,
       "tradeObfuscation": {
         "sl": { "minPercent": -0.5, "maxPercent": 0.5 },
         "entry": { "minPercent": -0.3, "maxPercent": 0.3 },

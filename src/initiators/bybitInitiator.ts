@@ -14,6 +14,7 @@ import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
+import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
 import dayjs from 'dayjs';
 
 /**
@@ -295,7 +296,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, maxRisk } = context;
 
   try {
     // Log trade initiation start for this account - critical for investigations
@@ -768,9 +769,66 @@ const executeTradeForAccount = async (
     if (!roundedEntryPrice || roundedEntryPrice <= 0 || !isFinite(roundedEntryPrice)) {
       throw new Error(`Cannot create order: invalid price ${roundedEntryPrice} for symbol ${symbol}`);
     }
-    
+
+    const maxRiskEnabled =
+      maxRisk !== undefined && maxRisk !== null && maxRisk >= 0;
+    const propFirmEnabled = !!(context.propFirms && context.propFirms.length > 0 && !isSimulation);
+
+    let openWorstCaseLoss = 0;
+    const needsOpenExposureFetch =
+      !isSimulation && !!bybitClient && (maxRiskEnabled || propFirmEnabled);
+
+    if (needsOpenExposureFetch) {
+      const requiredBybitClient = bybitClient!;
+      try {
+        const openPositions = await fetchMergedOpenLinearPositions(requiredBybitClient);
+        const activeOrders = await fetchMergedLinearActiveOrders(requiredBybitClient);
+        const analysis = analyzeWorstCaseLossWithPendingOrders(openPositions, activeOrders);
+        openWorstCaseLoss = analysis.withPendingAddsWorstCaseQuote;
+
+        if (!Number.isFinite(openWorstCaseLoss)) {
+          logger.warn('Worst-case exposure unbounded or incomplete (prop firm / maxRisk)', {
+            channel,
+            messageId: message.message_id,
+            accountName: accountName || 'default',
+            missingStopLossSymbols: analysis.missingStopLossSymbols,
+            unboundedReasons: analysis.unboundedReasons,
+            orphanOpeningOrders: analysis.orphanOpeningOrders.map((o) => ({
+              symbol: o.symbol,
+              orderId: o.orderId,
+              missingStopLoss: o.missingStopLoss,
+            })),
+          });
+        }
+      } catch (error) {
+        logger.warn('Exception while fetching positions/orders for worst-case exposure', {
+          channel,
+          accountName: accountName || 'default',
+          error: serializeErrorForLog(error),
+          note: 'Proceeding with existing exposure treated as 0',
+        });
+        openWorstCaseLoss = 0;
+      }
+    } else if (maxRiskEnabled && !isSimulation && !bybitClient) {
+      throw new Error('Configured maxRisk requires a Bybit client to fetch open positions and orders');
+    }
+
+    if (maxRiskEnabled) {
+      enforceChannelMaxPortfolioRiskConfigured({
+        maxRisk,
+        existingWorstCaseLoss: openWorstCaseLoss,
+        entryPrice: roundedEntryPrice,
+        stopLoss: roundedStopLoss || 0,
+        quantity: qty,
+        referenceBalance: balance,
+        channel,
+        messageId: message.message_id,
+        tradingPair: order.tradingPair,
+      });
+    }
+
     // Prop firm pre-trade validation: check if total loss would violate rules
-    if (context.propFirms && context.propFirms.length > 0 && !isSimulation) {
+    if (propFirmEnabled) {
       if (!bybitClient) {
         throw new Error('Prop firm validation requires a Bybit client to fetch open positions');
       }
@@ -781,46 +839,10 @@ const executeTradeForAccount = async (
       const initialBalance = balance;
       const dayStartBalance = await getUtcDayStartBalance(requiredBybitClient, accountName || 'default', balance);
 
-      // Worst-case loss: open positions + non-reduce-only orders that add to a position (blended
-      // avg entry, same position SL), and orphan opening orders on other symbols (SL on order row).
-      let openWorstCaseLoss = 0;
-      let missingStopLossSymbols: string[] = [];
-
-      try {
-        const openPositions = await fetchMergedOpenLinearPositions(requiredBybitClient);
-        const activeOrders = await fetchMergedLinearActiveOrders(requiredBybitClient);
-        const analysis = analyzeWorstCaseLossWithPendingOrders(openPositions, activeOrders);
-        openWorstCaseLoss = analysis.withPendingAddsWorstCaseQuote;
-        missingStopLossSymbols = analysis.missingStopLossSymbols;
-
-        if (!Number.isFinite(openWorstCaseLoss)) {
-          logger.warn('Prop firm validation: worst-case exposure unbounded or incomplete', {
-            channel,
-            messageId: message.message_id,
-            accountName: accountName || 'default',
-            missingStopLossSymbols,
-            unboundedReasons: analysis.unboundedReasons,
-            orphanOpeningOrders: analysis.orphanOpeningOrders.map((o) => ({
-              symbol: o.symbol,
-              orderId: o.orderId,
-              missingStopLoss: o.missingStopLoss,
-            })),
-          });
-        }
-      } catch (error) {
-        logger.warn('Exception while fetching positions/orders for prop firm worst-case', {
-          channel,
-          accountName: accountName || 'default',
-          error: serializeErrorForLog(error),
-          note: 'Prop firm validation will proceed without including existing exposure',
-        });
-        openWorstCaseLoss = 0;
-      }
-
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
-        context.propFirms,
+        context.propFirms!,
         initialBalance,
         roundedEntryPrice,
         roundedStopLoss || 0,
