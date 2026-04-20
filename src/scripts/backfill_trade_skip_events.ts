@@ -159,9 +159,6 @@ function parseReason(errorText: string): BackfillReason | null {
   ) {
     return 'all_take_profits_already_past_price';
   }
-  if (errorText.includes('Cannot place cTrader market order')) {
-    return 'cannot_place_ctrader_market_order';
-  }
   return null;
 }
 
@@ -318,7 +315,6 @@ async function main(): Promise<void> {
       'OR "TP(s) already past current price"',
       'OR "all TPs already past current price"',
       'OR "all take profits already past current price"',
-      'OR "Cannot place cTrader market order"',
       ')',
       ')',
     ].join(' ');
