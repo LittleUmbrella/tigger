@@ -59,7 +59,7 @@ const parseTpTokens = (content: string): TpToken[] => {
   return out;
 };
 
-/** Parse SL from text starting at `SL` through end of line (avoids conflating entry `@` with SL `@`). */
+/** Parse SL from text starting at SL label through end of line (avoids conflating entry `@` with SL `@`). */
 const parseStopLossFromSlClause = (slClause: string): number | undefined => {
   const slAfterAt = slClause.match(/@\s*([\d.]+)/);
   if (slAfterAt) {
@@ -71,7 +71,7 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
     const v = parseFloat(solidBreak[1]);
     if (!isNaN(v) && v > 0) return v;
   }
-  const slPlain = slClause.match(/SL[\s:]+([\d.]+)/i);
+  const slPlain = slClause.match(/(?:SL|Stop\s*Loss)\s*:?\s*([\d.]+)/i);
   if (slPlain) {
     const v = parseFloat(slPlain[1]);
     if (!isNaN(v) && v > 0) return v;
@@ -79,9 +79,9 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
   return undefined;
 };
 
-/** Prefer first `SL …` clause on a line; if parsing fails, scan full message (single-line layouts). */
+/** Prefer first SL label clause on a line; if parsing fails, scan full message (single-line layouts). */
 const resolveStopLossFromDgfContent = (normalizedContent: string): number | undefined => {
-  const slClauseMatch = normalizedContent.match(/\bSL[\s:][^\n]*/i);
+  const slClauseMatch = normalizedContent.match(/\b(?:SL|Stop\s*Loss)\b\s*:?\s*[^\n]*/i);
   const slClause = slClauseMatch?.[0] ?? '';
   let stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
   if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) {

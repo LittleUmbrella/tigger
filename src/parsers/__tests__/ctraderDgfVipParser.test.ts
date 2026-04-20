@@ -116,6 +116,19 @@ Use proper money management. Consistency is 🔑`;
     expect(order!.takeProfits).toEqual([4660, 4670, 4680, 4700]);
   });
 
+  it('parses single-line XAUUSD BUY with "Stop Loss:" label', () => {
+    const msg =
+      '🛡XAUUSD BUY 4795-4805 TP1: 4810 TP2: 4815 TP3: 4820 💣Stop Loss: 4780 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.marketExecution).toBe(true);
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4780);
+    expect(order!.takeProfits).toEqual([4810, 4815, 4820]);
+  });
+
   it('parses Format 7: pipe before side, TP arrow lines, Tp N — price', () => {
     const msg = `🛡XAUUSD | BUY  4713-4718
 
