@@ -179,6 +179,8 @@ const toRelativeSlTp = (priceDiff: number, pricePrecision: number): number => {
   return Math.round(rounded * 100000);
 };
 
+const TRADE_SKIP_PRICE_BEYOND_TP_EVENT = 'trade_skipped_price_beyond_tp';
+
 const executeTradeForAccount = async (
   context: InitiatorContext,
   account: AccountConfig | null,
@@ -1271,6 +1273,24 @@ const executeTradeForAccount = async (
                   const past =
                     boundaryTpForRange != null &&
                     hasNoRoomToBoundaryTpForMarketRange(order.signalType, cp, boundaryTpForRange);
+                  if (past) {
+                    await db.insertTradeEvent({
+                      message_id: String(message.message_id),
+                      channel,
+                      event_type: TRADE_SKIP_PRICE_BEYOND_TP_EVENT,
+                      metadata: JSON.stringify({
+                        timestamp: new Date().toISOString(),
+                        reason: 'market_range_boundary_tp_already_past',
+                        exchange: 'ctrader',
+                        symbol,
+                        signalType: order.signalType,
+                        accountName: accountName || 'default',
+                        currentPrice: cp,
+                        boundaryTp: boundaryTpForRange,
+                        boundaryTpIndex: usedBoundaryIdx
+                      })
+                    });
+                  }
                   throw new Error(
                     past
                       ? `Cannot place cTrader MARKET_RANGE: current price ${cp} already at or past boundary TP ${boundaryTpForRange} for ${order.signalType} — order not placed.`
@@ -1325,11 +1345,44 @@ const executeTradeForAccount = async (
                   exchange: 'ctrader'
                 });
               } else if (pastTPs.length > maxSkippable) {
+                await db.insertTradeEvent({
+                  message_id: String(message.message_id),
+                  channel,
+                  event_type: TRADE_SKIP_PRICE_BEYOND_TP_EVENT,
+                  metadata: JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    reason: 'too_many_take_profits_already_past_price',
+                    exchange: 'ctrader',
+                    symbol,
+                    signalType: order.signalType,
+                    accountName: accountName || 'default',
+                    currentPrice: cp,
+                    pastTPs: pastTPs.map(tp => tp.price),
+                    pastCount: pastTPs.length,
+                    maxSkippable
+                  })
+                });
                 throw new Error(
                   `Cannot place cTrader market order: ${pastTPs.length} TP(s) already past current price ${cp} ` +
                   `(max skippable: ${maxSkippable}). Past TPs: ${pastTPs.map(tp => tp.price).join(', ')}`
                 );
               } else if (pastTPs.length > 0 && activeTPs.length === 0) {
+                await db.insertTradeEvent({
+                  message_id: String(message.message_id),
+                  channel,
+                  event_type: TRADE_SKIP_PRICE_BEYOND_TP_EVENT,
+                  metadata: JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    reason: 'all_take_profits_already_past_price',
+                    exchange: 'ctrader',
+                    symbol,
+                    signalType: order.signalType,
+                    accountName: accountName || 'default',
+                    currentPrice: cp,
+                    pastTPs: pastTPs.map(tp => tp.price),
+                    pastCount: pastTPs.length
+                  })
+                });
                 throw new Error(
                   `Cannot place cTrader market order: all TPs already past current price ${cp}`
                 );

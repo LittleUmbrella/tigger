@@ -106,6 +106,15 @@ export interface SignalFormatRecord {
   created_at: string;
 }
 
+export interface TradeEventRecord {
+  id: number;
+  message_id: string;
+  channel: string;
+  event_type: string;
+  metadata?: string; // JSON object with event-specific context
+  created_at: string;
+}
+
 type DatabaseType = 'sqlite' | 'postgresql';
 
 interface DatabaseAdapter {
@@ -136,6 +145,7 @@ interface DatabaseAdapter {
   insertSignalFormat(format: Omit<SignalFormatRecord, 'id' | 'created_at'>): Promise<number>;
   getSignalFormats(channel?: string, formatHash?: string): Promise<SignalFormatRecord[]>;
   updateSignalFormat(id: number, updates: Partial<SignalFormatRecord>): Promise<void>;
+  insertTradeEvent(event: Omit<TradeEventRecord, 'id' | 'created_at'>): Promise<number>;
   insertOrder(order: Omit<Order, 'id' | 'created_at' | 'updated_at'>): Promise<number>;
   getOrdersByTradeId(tradeId: number): Promise<Order[]>;
   getOrdersByStatus(status: Order['status']): Promise<Order[]>;
@@ -480,6 +490,18 @@ class SQLiteAdapter implements DatabaseAdapter {
       )
     `);
 
+    // Trade events table - captures non-execution outcomes and other lifecycle events
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trade_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        metadata TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
     // Create indexes
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_channel_parsed ON messages(channel, parsed);
@@ -496,6 +518,9 @@ class SQLiteAdapter implements DatabaseAdapter {
       CREATE INDEX IF NOT EXISTS idx_signal_formats_channel ON signal_formats(channel);
       CREATE INDEX IF NOT EXISTS idx_signal_formats_hash ON signal_formats(format_hash);
       CREATE INDEX IF NOT EXISTS idx_signal_formats_classification ON signal_formats(classification);
+      CREATE INDEX IF NOT EXISTS idx_trade_events_message_channel ON trade_events(message_id, channel);
+      CREATE INDEX IF NOT EXISTS idx_trade_events_type ON trade_events(event_type);
+      CREATE INDEX IF NOT EXISTS idx_trade_events_created_at ON trade_events(created_at);
     `);
   }
 
@@ -1079,6 +1104,22 @@ class SQLiteAdapter implements DatabaseAdapter {
     stmt.run(...values);
   }
 
+  async insertTradeEvent(event: Omit<TradeEventRecord, 'id' | 'created_at'>): Promise<number> {
+    const stmt = this.db.prepare(`
+      INSERT INTO trade_events (
+        message_id, channel, event_type, metadata, created_at
+      )
+      VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    `);
+    const result = stmt.run(
+      event.message_id,
+      event.channel,
+      event.event_type,
+      event.metadata || null
+    );
+    return result.lastInsertRowid as number;
+  }
+
   async close(): Promise<void> {
     this.db.close();
   }
@@ -1539,6 +1580,18 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         )
       `);
 
+      // Trade events table - captures non-execution outcomes and other lifecycle events
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS trade_events (
+          id SERIAL PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          event_type TEXT NOT NULL,
+          metadata TEXT,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+      `);
+
       // Migrate TIMESTAMP to TIMESTAMPTZ (existing databases - new installs use TIMESTAMPTZ above)
       // Existing values assumed to be UTC (ISO strings we've been storing). Only migrate if column is timestamp without tz.
       const timestampToTimestamptz = async (table: string, ...columns: string[]) => {
@@ -1568,6 +1621,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       await timestampToTimestamptz('orders', 'filled_at', 'created_at', 'updated_at');
       await timestampToTimestamptz('evaluation_results', 'start_date', 'end_date', 'created_at');
       await timestampToTimestamptz('signal_formats', 'first_seen', 'last_seen', 'created_at');
+      await timestampToTimestamptz('trade_events', 'created_at');
 
       // Create indexes
       await client.query(`
@@ -1585,6 +1639,9 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         CREATE INDEX IF NOT EXISTS idx_signal_formats_channel ON signal_formats(channel);
         CREATE INDEX IF NOT EXISTS idx_signal_formats_hash ON signal_formats(format_hash);
         CREATE INDEX IF NOT EXISTS idx_signal_formats_classification ON signal_formats(classification);
+        CREATE INDEX IF NOT EXISTS idx_trade_events_message_channel ON trade_events(message_id, channel);
+        CREATE INDEX IF NOT EXISTS idx_trade_events_type ON trade_events(event_type);
+        CREATE INDEX IF NOT EXISTS idx_trade_events_created_at ON trade_events(created_at);
       `);
     } finally {
       client.release();
@@ -2242,6 +2299,22 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     );
   }
 
+  async insertTradeEvent(event: Omit<TradeEventRecord, 'id' | 'created_at'>): Promise<number> {
+    const result = await this.pool.query(`
+      INSERT INTO trade_events (
+        message_id, channel, event_type, metadata, created_at
+      )
+      VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
+      RETURNING id
+    `, [
+      event.message_id,
+      event.channel,
+      event.event_type,
+      event.metadata || null
+    ]);
+    return result.rows[0].id;
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }
@@ -2411,6 +2484,10 @@ export class DatabaseManager {
 
   updateSignalFormat(id: number, updates: Partial<SignalFormatRecord>): Promise<void> {
     return this.adapter.updateSignalFormat(id, updates);
+  }
+
+  insertTradeEvent(event: Omit<TradeEventRecord, 'id' | 'created_at'>): Promise<number> {
+    return this.adapter.insertTradeEvent(event);
   }
 
   close(): Promise<void> {
