@@ -356,10 +356,45 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       };
     }
 
+    const entryOrderByTradeId = new Map<number, Order | undefined>();
+    await Promise.all(
+      trades.map(async (trade) => {
+        const tradeOrders = await db.getOrdersByTradeId(trade.id);
+        const entryOrder = tradeOrders.find((o) => o.order_type === 'entry');
+        entryOrderByTradeId.set(trade.id, entryOrder);
+      })
+    );
+
+    const duplicateOrderGroups = new Map<string, Trade[]>();
+    for (const trade of trades) {
+      if (!trade.order_id) continue;
+      const key = String(trade.order_id);
+      const existing = duplicateOrderGroups.get(key) ?? [];
+      existing.push(trade);
+      duplicateOrderGroups.set(key, existing);
+    }
+
+    const duplicateOrderSummaries = Array.from(duplicateOrderGroups.entries())
+      .filter(([, groupedTrades]) => groupedTrades.length > 1)
+      .map(([orderId, groupedTrades]) => ({
+        orderId,
+        trades: groupedTrades.map((trade) => {
+          const entryOrder = entryOrderByTradeId.get(trade.id);
+          return {
+            tradeId: trade.id,
+            tpIndex: entryOrder?.tp_index,
+            tradeQuantity: trade.quantity,
+            entryOrderQuantity: entryOrder?.quantity
+          };
+        })
+      }));
+
     steps[2].status = 'success';
     steps[2].details = {
       tradeCount: trades.length,
+      duplicateOrderIds: duplicateOrderSummaries,
       trades: trades.map(t => ({
+        entryOrderQuantity: entryOrderByTradeId.get(t.id)?.quantity,
         id: t.id,
         status: t.status,
         tradingPair: t.trading_pair,
@@ -402,11 +437,16 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       }
 
       steps[stepIndex].status = 'success';
+      const entryOrder = entryOrderByTradeId.get(trade.id);
       steps[stepIndex].details = {
         ...steps[stepIndex].details,
         entryOrderType: trade.entry_order_type,
         entryPrice: trade.entry_price,
         quantity: trade.quantity,
+        tradeQuantity: trade.quantity,
+        entryOrderQuantity: entryOrder?.quantity,
+        quantityMismatch:
+          entryOrder?.quantity != null && Math.abs(entryOrder.quantity - trade.quantity) > 1e-12,
         entryFilledAt: trade.entry_filled_at
       };
 

@@ -15,6 +15,14 @@ describe('distributeQuantityAcrossTPs', () => {
     const sum = q.reduce((a, b) => a + b, 0);
     expect(sum).toBeLessThanOrEqual(totalQty + 1e-12);
   });
+
+  it('cTrader floor distribution spreads remainder instead of concentrating it on last TP', () => {
+    const totalQty = 0.05;
+    const q = distributeQuantityAcrossTPs(totalQty, 3, 2, { lastSliceRounding: 'floor' });
+    expect(q).toEqual([0.02, 0.02, 0.01]);
+    const sum = q.reduce((a, b) => a + b, 0);
+    expect(sum).toBeLessThanOrEqual(totalQty + 1e-12);
+  });
 });
 
 describe('validateAndRedistributeTPQuantities + floor', () => {

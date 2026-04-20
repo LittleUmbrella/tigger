@@ -269,9 +269,13 @@ export type TpSplitRoundingOptions = {
 };
 
 /**
- * Distribute quantity evenly across take profits. First n−1 slices use floor; the last slice
- * uses `lastSliceRounding` (default `ceil` for Bybit-style “don’t lose dust”; use `floor` for
- * cTrader so the sum of legs never exceeds `totalQty`).
+ * Distribute quantity across take profits.
+ *
+ * Default behavior (Bybit-style): first n−1 slices use floor and the last slice uses ceil,
+ * preserving dust and allowing exchange reduce-only behavior to trim.
+ *
+ * cTrader floor behavior: keep total sum <= `totalQty` and distribute remainder in step-sized
+ * increments across legs (instead of concentrating all remainder on the last TP).
  *
  * @param totalQty - Total quantity to distribute
  * @param numTPs - Number of take profit levels
@@ -287,6 +291,24 @@ export const distributeQuantityAcrossTPs = (
 ): number[] => {
   if (numTPs === 0) return [];
   if (numTPs === 1) return [roundQuantity(totalQty, decimalPrecision, false)];
+
+  // cTrader path: when we must never exceed totalQty, spread remainder steps across legs
+  // to avoid highly skewed allocations like [0.01, 0.01, 0.03].
+  if ((options?.lastSliceRounding ?? 'ceil') === 'floor') {
+    const step = Math.pow(10, -decimalPrecision);
+    const baseQty = roundQuantity(totalQty / numTPs, decimalPrecision, false);
+    const quantities = Array.from({ length: numTPs }, () => baseQty);
+
+    const allocatedQty = quantities.reduce((sum, qty) => sum + qty, 0);
+    const remainingQty = Math.max(0, totalQty - allocatedQty);
+    const extraSteps = Math.floor((remainingQty + 1e-12) / step);
+
+    for (let i = 0; i < extraSteps && i < quantities.length; i++) {
+      quantities[i] = roundQuantity(quantities[i] + step, decimalPrecision, false);
+    }
+
+    return quantities;
+  }
   
   // Calculate base quantity per TP
   const baseQty = totalQty / numTPs;
