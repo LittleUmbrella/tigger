@@ -438,15 +438,16 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
 
       steps[stepIndex].status = 'success';
       const entryOrder = entryOrderByTradeId.get(trade.id);
+      const tradeQuantity = trade.quantity ?? 0;
       steps[stepIndex].details = {
         ...steps[stepIndex].details,
         entryOrderType: trade.entry_order_type,
         entryPrice: trade.entry_price,
         quantity: trade.quantity,
-        tradeQuantity: trade.quantity,
+        tradeQuantity,
         entryOrderQuantity: entryOrder?.quantity,
         quantityMismatch:
-          entryOrder?.quantity != null && Math.abs(entryOrder.quantity - trade.quantity) > 1e-12,
+          entryOrder?.quantity != null && Math.abs(entryOrder.quantity - tradeQuantity) > 1e-12,
         entryFilledAt: trade.entry_filled_at
       };
 
