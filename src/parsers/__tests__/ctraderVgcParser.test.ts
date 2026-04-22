@@ -42,4 +42,16 @@ TP: 4608.96`;
     expect(order!.entryPrice).toBeUndefined();
     expect(order!.takeProfits).toEqual([4608.96]);
   });
+
+  it('parses FTG-style single-line message with TP.OPEN and SL checkmark decoration', () => {
+    const msg =
+      'XAUUSD sell now 4756//4759 TP 4753 TP 4750 TP 4747 TP 4744 TP 4741 TP 4740 TP.OPEN SL✓4766 ✔️';
+    const order = ctraderVgcParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4766);
+    expect(order!.takeProfits).toEqual([4753, 4750, 4747, 4744, 4741, 4740]);
+  });
 });

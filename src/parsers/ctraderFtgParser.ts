@@ -202,7 +202,8 @@ const extractStopLoss = (content: string): number | undefined => {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) return v;
     }
-    m = line.match(/\bSL\s*\*?\s*:?\s*([\d.]+)/i);
+    // Accept decorated SL markers such as "SL✓4766" and "SL ✅ 4766".
+    m = line.match(/\bSL(?:\s*\*?\s*:?\s*|\s*[^\w\d\s]+\s*)([\d.]+)/i);
     if (m) {
       const v = parseFloat(m[1]);
       if (!isNaN(v) && v > 0) return v;
