@@ -146,6 +146,25 @@ export async function loadCompletedTradesForChannel(
   );
 }
 
+/**
+ * Completed trades for a settlement account (all channels), for prop / drawdown projection on that account.
+ * Prefer this over {@link loadCompletedTradesForChannel} when pre-trade rules apply to the whole Bybit/cTrader account
+ * and `currentBalance` comes from the exchange (not a single channel's DB stream).
+ */
+export async function loadCompletedTradesForAccount(
+  db: DatabaseManager,
+  accountName: string
+): Promise<Trade[]> {
+  const allTrades = await db.getActiveTrades();
+  const closedTrades = await db.getClosedTrades();
+  const accountTrades = [...allTrades, ...closedTrades].filter(
+    (t) => t.account_name === accountName
+  );
+  return accountTrades.filter(
+    (t) => t.status === 'closed' || t.status === 'stopped' || t.status === 'completed'
+  );
+}
+
 /** Daily realized PnL by UTC date — independent of challenge starting balance. */
 export function buildDailyPnLMap(completedTrades: Trade[]): Map<string, number> {
   const dailyPnL = new Map<string, number>();

@@ -4,6 +4,7 @@ import { CustomPropFirmConfig } from '../types/config.js';
 import { logger } from './logger.js';
 import {
   calculatePotentialLoss,
+  loadCompletedTradesForAccount,
   loadCompletedTradesForChannel,
   buildDailyPnLMap,
   projectRunningBalanceAndPeak,
@@ -40,19 +41,22 @@ function resolveChallengeInitialBalance(
  *   Prop firm drawdown % is always calculated against the challenge initial balance (e.g. $10k), not current balance.
  * @param quantity - Size in **base units** for P&L: Bybit linear = coin qty; cTrader = units per
  *   `calculatePotentialLoss` (e.g. oz for gold) = **lots × (lotSize/100)**, not raw API lots.
+ * @param settlementAccountName - When set (e.g. Bybit `account_name` / cTrader account), use **all** completed trades
+ *   for that settlement account to build peak & daily P&L, so the projection matches exchange equity instead of
+ *   mixing one channel's P&L path with a whole-account balance.
  */
 export async function validateTradeAgainstPropFirms(
   db: DatabaseManager,
   channel: string,
   propFirmConfigs: (string | CustomPropFirmConfig)[],
-  initialBalance: number,
   entryPrice: number,
   stopLoss: number,
   quantity: number,
   leverage: number,
   additionalWorstCaseLoss: number = 0,
   dayStartBalance: number | undefined = undefined,
-  currentBalanceFromExchange?: number
+  currentBalanceFromExchange?: number,
+  settlementAccountName?: string
 ): Promise<PreTradeValidationResult[]> {
   const results: PreTradeValidationResult[] = [];
 
@@ -60,7 +64,13 @@ export async function validateTradeAgainstPropFirms(
   const potentialLoss = calculatePotentialLoss(entryPrice, stopLoss, quantity);
   const totalWorstCaseLoss = potentialLoss + additionalWorstCaseLoss;
 
-  const completedTrades = await loadCompletedTradesForChannel(db, channel);
+  let completedTrades =
+    settlementAccountName !== undefined && settlementAccountName !== ''
+      ? await loadCompletedTradesForAccount(db, settlementAccountName)
+      : await loadCompletedTradesForChannel(db, channel);
+  if (settlementAccountName && completedTrades.length === 0) {
+    completedTrades = await loadCompletedTradesForChannel(db, channel);
+  }
   const dailyPnLAll = buildDailyPnLMap(completedTrades);
 
   // Validate against each prop firm

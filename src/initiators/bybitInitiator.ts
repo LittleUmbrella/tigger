@@ -834,23 +834,20 @@ const executeTradeForAccount = async (
       }
       const requiredBybitClient = bybitClient;
 
-      // Use current balance from exchange as initial balance for prop firm validation
-      // This treats the current account balance as the baseline for rule checking
-      const initialBalance = balance;
       const dayStartBalance = await getUtcDayStartBalance(requiredBybitClient, accountName || 'default', balance);
 
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
         context.propFirms!,
-        initialBalance,
         roundedEntryPrice,
         roundedStopLoss || 0,
         qty,
         effectiveLeverage,
         openWorstCaseLoss,
         dayStartBalance,
-        balance // Use exchange balance as source of truth for current balance (drawdown % uses challenge initial)
+        balance, // Use exchange balance as source of truth for current balance (drawdown % uses challenge initial)
+        accountName || undefined
       );
       
       // Check if any prop firm would be violated

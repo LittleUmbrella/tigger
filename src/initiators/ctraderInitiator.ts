@@ -897,21 +897,20 @@ const executeTradeForAccount = async (
         throw new Error('Prop firm validation requires a cTrader client to fetch open positions');
       }
 
-      const initialBalance = balance;
-      const dayStartBalance = initialBalance;
+      const dayStartBalance = balance;
 
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
         context.propFirms!,
-        initialBalance,
         roundedEntryPrice,
         roundedStopLoss || 0,
         baseQuantityForRisk,
         effectiveLeverage,
         openWorstCaseLoss,
         dayStartBalance,
-        balance // Use exchange balance as source of truth for current balance (drawdown % uses challenge initial)
+        balance, // Use exchange balance as source of truth for current balance (drawdown % uses challenge initial)
+        accountName || undefined
       );
       
       // Check if any prop firm would be violated

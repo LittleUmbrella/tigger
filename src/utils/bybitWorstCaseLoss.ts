@@ -15,20 +15,29 @@ function num(v: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-/** Downside-only loss to SL (breakeven/profit-side SL → 0 loss from entry). */
+/**
+ * Downside-only loss to SL from a reference price.
+ * @param markPrice - If set, loss from current mark to SL (use with MTM balance / prop sim). If unset, from avg/entry
+ *   to SL (e.g. orphan order or pro forma blended entry after adds fill).
+ */
 export function worstCaseLossQuoteForLeg(
   avgPrice: number,
   stopLoss: number,
   positionSide: string,
-  quantity: number
+  quantity: number,
+  markPrice?: number
 ): number {
   const side = positionSide.toLowerCase();
   if (!quantity || !isFinite(quantity) || quantity <= 0) return 0;
   if (!stopLoss || stopLoss <= 0 || !isFinite(stopLoss)) return Infinity;
   if (!avgPrice || avgPrice <= 0 || !isFinite(avgPrice)) return Infinity;
 
+  const ref =
+    markPrice !== undefined && markPrice > 0 && isFinite(markPrice) ? markPrice : avgPrice;
+  if (!ref || !isFinite(ref) || ref <= 0) return Infinity;
+
   const perUnitLoss =
-    side === 'buy' ? Math.max(0, avgPrice - stopLoss) : Math.max(0, stopLoss - avgPrice);
+    side === 'buy' ? Math.max(0, ref - stopLoss) : Math.max(0, stopLoss - ref);
 
   return perUnitLoss * Math.abs(quantity);
 }
@@ -57,6 +66,7 @@ export function calculateWorstCaseLossForOpenPositions(positions: unknown[]): {
         getBybitField<string>(p, 'avgEntryPrice', 'avg_entry_price')
     );
     const stopLoss = num(getBybitField<string>(p, 'stopLoss', 'stop_loss'));
+    const markPrice = num(getBybitField<string>(p, 'markPrice', 'mark_price'));
 
     if (!isFinite(avgPrice) || avgPrice <= 0) {
       return { worstCaseLoss: Infinity, missingStopLossSymbols: [symbol] };
@@ -67,12 +77,11 @@ export function calculateWorstCaseLossForOpenPositions(positions: unknown[]): {
       continue;
     }
 
-    const perUnitLoss =
-      side === 'buy'
-        ? Math.max(0, avgPrice - stopLoss)
-        : Math.max(0, stopLoss - avgPrice);
-
-    worstCaseLoss += perUnitLoss * size;
+    const leg = worstCaseLossQuoteForLeg(avgPrice, stopLoss, side, size, markPrice);
+    if (!isFinite(leg)) {
+      return { worstCaseLoss: Infinity, missingStopLossSymbols: [symbol] };
+    }
+    worstCaseLoss += leg;
   }
 
   if (missingStopLossSymbols.length > 0) {
@@ -222,7 +231,7 @@ export function analyzeWorstCaseLossWithPendingOrders(
     const stopLoss = num(getBybitField<string>(p, 'stopLoss', 'stop_loss'));
     const markPrice = num(getBybitField<string>(p, 'markPrice', 'mark_price'));
 
-    const lossPosOnly = worstCaseLossQuoteForLeg(avgPrice, stopLoss, side, size);
+    const lossPosOnly = worstCaseLossQuoteForLeg(avgPrice, stopLoss, side, size, markPrice);
     const qc = quoteFromSymbol(symbol);
 
     const related = (ordersByKey.get(key) || []).filter((o) => {
