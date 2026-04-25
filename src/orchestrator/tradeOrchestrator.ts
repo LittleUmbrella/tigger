@@ -36,6 +36,9 @@ import { ctraderVgcParser } from '../parsers/ctraderVgcParser.js';
 import { ctraderKlhParser } from '../parsers/ctraderKlhParser.js';
 import { stevenParser } from '../parsers/stevenParser.js';
 import { fxcmChartParser } from '../parsers/fxcmChartParser.js';
+import '../strategies/index.js';
+import { getStrategy, getRegisteredStrategyNames } from '../strategies/strategyRegistry.js';
+import { initiateFromStrategy } from '../initiators/signalInitiator.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -57,6 +60,7 @@ registerParser('fxcm_chart', fxcmChartParser);
 
 interface OrchestratorState {
   stopHarvesters: (() => Promise<void>)[];
+  stopStrategies: (() => Promise<void>)[];
   stopMonitors: (() => Promise<void>)[];
   parserInterval?: NodeJS.Timeout;
   initiatorInterval?: NodeJS.Timeout;
@@ -78,6 +82,7 @@ export const startTradeOrchestrator = async (
   await db.initialize();
   const state: OrchestratorState = {
     stopHarvesters: [],
+    stopStrategies: [],
     stopMonitors: [],
     running: true
   };
@@ -267,9 +272,27 @@ export const startTradeOrchestrator = async (
   // Start all channel sets
   for (const channelConfig of config.channels) {
     try {
-      // Resolve harvester
-      const harvester = harvesterMap.get(channelConfig.harvester);
-      if (!harvester) {
+      const useStrategy = Boolean(channelConfig.strategy);
+
+      if (!channelConfig.strategy && !channelConfig.harvester) {
+        logger.error('Channel must set harvester or strategy', {
+          channel: channelConfig.channel
+        });
+        continue;
+      }
+      if (channelConfig.strategy && channelConfig.harvester) {
+        logger.warn('Channel has both harvester and strategy; only strategy runs (harvester ignored)', {
+          channel: channelConfig.channel,
+          harvester: channelConfig.harvester,
+          strategy: channelConfig.strategy
+        });
+      }
+
+      const harvester =
+        !useStrategy && channelConfig.harvester
+          ? harvesterMap.get(channelConfig.harvester)
+          : undefined;
+      if (!useStrategy && !harvester) {
         logger.error('Harvester not found', {
           channel: channelConfig.channel,
           harvesterName: channelConfig.harvester
@@ -277,9 +300,18 @@ export const startTradeOrchestrator = async (
         continue;
       }
 
-      // Resolve parser
-      const parser = parserMap.get(channelConfig.parser);
-      if (!parser) {
+      if (!useStrategy && !channelConfig.parser) {
+        logger.error('Parser is required for non-strategy channel', { channel: channelConfig.channel });
+        continue;
+      }
+
+      const parser =
+        !useStrategy && channelConfig.parser
+          ? parserMap.get(channelConfig.parser)
+          : useStrategy && channelConfig.parser
+            ? parserMap.get(channelConfig.parser)
+            : undefined;
+      if (!useStrategy && !parser) {
         logger.error('Parser not found', {
           channel: channelConfig.channel,
           parserName: channelConfig.parser
@@ -307,23 +339,59 @@ export const startTradeOrchestrator = async (
         continue;
       }
 
-      // Start harvester for this channel
-      let stopHarvester: () => Promise<void>;
-      if (isSimulation && config.simulation?.messagesFile) {
-        // Use CSV harvester in simulation mode
-        stopHarvester = await startCSVHarvester(config.simulation.messagesFile, channelConfig.channel, db);
-      } else {
-        // Select harvester based on platform
-        const platform = harvester.platform || 'telegram'; // Default to telegram for backward compatibility
-        if (platform === 'discord') {
-          stopHarvester = await startDiscordHarvester(harvester, db);
-        } else if (platform === 'discord-selfbot') {
-          stopHarvester = await startDiscordSelfBotHarvester(harvester, db);
-        } else {
-          stopHarvester = await startSignalHarvester(harvester, db);
+      const entryTimeoutForChannel =
+        channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880;
+
+      if (useStrategy) {
+        const strategyStart = getStrategy(channelConfig.strategy!);
+        if (!strategyStart) {
+          logger.error('Strategy not found in registry', {
+            channel: channelConfig.channel,
+            strategyName: channelConfig.strategy,
+            knownStrategies: getRegisteredStrategyNames()
+          });
+          continue;
         }
+        const stopStrategy = await strategyStart({
+          strategyName: channelConfig.strategy!,
+          channel: channelConfig.channel,
+          db,
+          isSimulation,
+          isRunning: () => state.running,
+          options: channelConfig.strategyOptions,
+          getBybitClient: (accountName?: string) => createBybitClient(accountName),
+          getCTraderClient: (accountName?: string) => createCTraderClient(accountName),
+          initiateTrade: (order, signalId) =>
+            initiateFromStrategy({
+              strategyName: channelConfig.strategy!,
+              order,
+              signalId,
+              channelConfig,
+              initiatorConfig: initiator,
+              entryTimeoutMinutes: entryTimeoutForChannel,
+              db,
+              isSimulation,
+              priceProvider,
+              accounts: config.accounts
+            })
+        });
+        state.stopStrategies.push(stopStrategy);
+      } else {
+        let stopHarvester: () => Promise<void>;
+        if (isSimulation && config.simulation?.messagesFile) {
+          stopHarvester = await startCSVHarvester(config.simulation.messagesFile, channelConfig.channel, db);
+        } else {
+          const platform = harvester!.platform || 'telegram';
+          if (platform === 'discord') {
+            stopHarvester = await startDiscordHarvester(harvester!, db);
+          } else if (platform === 'discord-selfbot') {
+            stopHarvester = await startDiscordSelfBotHarvester(harvester!, db);
+          } else {
+            stopHarvester = await startSignalHarvester(harvester!, db);
+          }
+        }
+        state.stopHarvesters.push(stopHarvester);
       }
-      state.stopHarvesters.push(stopHarvester);
 
       // Merge channel-specific breakevenAfterTPs, dynamicBreakevenAfterTPs, entryTimeoutMinutes, and useLimitOrderForBreakeven overrides with monitor config
       const monitorConfigWithOverride: MonitorConfig = {
@@ -362,8 +430,9 @@ export const startTradeOrchestrator = async (
 
       logger.info('Started channel set', {
         channel: channelConfig.channel,
-        harvester: harvester.name,
-        parser: parser.name,
+        harvester: harvester?.name,
+        strategy: channelConfig.strategy,
+        parser: parser?.name,
         initiator: initiator.name || initiator.type || channelConfig.initiator,
         monitor: monitor.type
       });
@@ -392,7 +461,8 @@ export const startTradeOrchestrator = async (
 
     // Get parser config for LLM fallback if configured
     const channelConfig = config.channels.find(c => c.channel === channel);
-    const parserConfig = channelConfig ? parserMap.get(channelConfig.parser) : undefined;
+    const parserNameForChannel = channelConfig?.parser;
+    const parserConfig = parserNameForChannel ? parserMap.get(parserNameForChannel) : undefined;
     const ollamaConfig = parserConfig?.ollama ? {
       ...parserConfig.ollama,
       channel: channel
@@ -551,7 +621,8 @@ export const startTradeOrchestrator = async (
     
     // Get parser config for this channel to check for LLM fallback
     const channelConfig = config.channels.find(c => c.channel === channel);
-    const parserConfig = channelConfig ? parserMap.get(channelConfig.parser) : undefined;
+    const managementParserName = channelConfig?.parser;
+    const parserConfig = managementParserName ? parserMap.get(managementParserName) : undefined;
     const ollamaConfig = parserConfig?.ollama ? {
       ...parserConfig.ollama,
       channel: channel
@@ -608,7 +679,10 @@ export const startTradeOrchestrator = async (
     // Process messages in chronological order based on their timestamps
     const processSimulationMessages = async () => {
       for (const channelConfig of config.channels) {
-        const parser = parserMap.get(channelConfig.parser);
+        if (channelConfig.strategy) {
+          continue;
+        }
+        const parser = parserMap.get(channelConfig.parser!);
         if (!parser) continue;
 
         // Get unparsed messages ordered by date
@@ -630,7 +704,7 @@ export const startTradeOrchestrator = async (
             // Check if this is an edited message - process it specially
             if (message.old_content) {
               // First check if edited message is a management command
-              const parser = parserMap.get(channelConfig.parser);
+              const parser = channelConfig.parser ? parserMap.get(channelConfig.parser) : undefined;
               const ollamaConfig = parser?.ollama ? {
                 ...parser.ollama,
                 channel: channelConfig.channel
@@ -747,7 +821,7 @@ export const startTradeOrchestrator = async (
 
             // Normal processing for non-edited messages
             // First check if it's a management command (with LLM fallback if configured)
-            const parser = parserMap.get(channelConfig.parser);
+            const parser = channelConfig.parser ? parserMap.get(channelConfig.parser) : undefined;
             const ollamaConfig = parser?.ollama ? {
               ...parser.ollama,
               channel: channelConfig.channel
@@ -844,7 +918,10 @@ export const startTradeOrchestrator = async (
       if (!state.running) return;
       
       for (const channelConfig of config.channels) {
-        const parser = parserMap.get(channelConfig.parser);
+        if (channelConfig.strategy) {
+          continue;
+        }
+        const parser = parserMap.get(channelConfig.parser!);
         if (parser) {
           // First check for management messages
           processManagementMessages(
@@ -912,6 +989,9 @@ export const startTradeOrchestrator = async (
     // In simulation mode, process all messages once in chronological order
     const processSimulationTrades = async () => {
       for (const channelConfig of config.channels) {
+        if (channelConfig.strategy) {
+          continue;
+        }
         const initiator = initiatorMap.get(channelConfig.initiator);
         const monitor = monitorMap.get(channelConfig.monitor);
         
@@ -933,7 +1013,7 @@ export const startTradeOrchestrator = async (
           db,
           isSimulation,
           priceProvider,
-          channelConfig.parser, // Pass parser name to initiator
+          channelConfig.parser!, // Pass parser name to initiator
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
@@ -973,6 +1053,9 @@ export const startTradeOrchestrator = async (
       if (!state.running) return;
       
       for (const channelConfig of config.channels) {
+        if (channelConfig.strategy) {
+          continue;
+        }
         const initiator = initiatorMap.get(channelConfig.initiator);
         const monitor = monitorMap.get(channelConfig.monitor);
         
@@ -993,7 +1076,7 @@ export const startTradeOrchestrator = async (
           db,
           isSimulation,
           priceProvider,
-          channelConfig.parser, // Pass parser name to initiator
+          channelConfig.parser!, // Pass parser name to initiator
           config.accounts, // Pass accounts config
           undefined, // startDate (not used in live mode)
           channelConfig.baseLeverage, // Pass channel-specific baseLeverage
@@ -1021,6 +1104,7 @@ export const startTradeOrchestrator = async (
   logger.info('Trade orchestrator started', {
     channels: config.channels.length,
     harvesters: config.harvesters.length,
+    strategyChannels: config.channels.filter(c => c.strategy).length,
     parsers: config.parsers.length,
     initiators: config.initiators.length,
     monitors: config.monitors.length
@@ -1050,6 +1134,16 @@ export const startTradeOrchestrator = async (
         await stopHarvester();
       } catch (error) {
         logger.error('Error stopping harvester', {
+          error: serializeErrorForLog(error)
+        });
+      }
+    }
+
+    for (const stopStrategy of state.stopStrategies) {
+      try {
+        await stopStrategy();
+      } catch (error) {
+        logger.error('Error stopping strategy', {
           error: serializeErrorForLog(error)
         });
       }

@@ -3,8 +3,10 @@ import {
   AccountConfig,
   AccountFilter,
   CustomPropFirmConfig,
-  TradeObfuscationConfig
+  TradeObfuscationConfig,
+  ChannelSetConfig
 } from '../types/config.js';
+import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
@@ -13,6 +15,7 @@ import { parseMessage } from '../parsers/signalParser.js';
 import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
+import { validateParsedOrder } from '../utils/tradeValidation.js';
 
 /**
  * Determine if an error is retryable (should not mark message as parsed)
@@ -87,6 +90,124 @@ const isRetryableError = (error: unknown): boolean => {
   // Default: assume non-retryable for unknown errors (safer to mark as parsed than retry forever)
   // This prevents infinite retries for unexpected error types
   return false;
+};
+
+/**
+ * Strategy path: no text parser. Builds a small audit `messages` row, then runs the channel initiator
+ * with the given `ParsedOrder` (same `insertTrade` / exchange behavior as parsed Telegram signals).
+ */
+export const initiateFromStrategy = async (options: {
+  strategyName: string;
+  order: ParsedOrder;
+  signalId: string;
+  channelConfig: ChannelSetConfig;
+  initiatorConfig: InitiatorConfig;
+  entryTimeoutMinutes: number;
+  db: DatabaseManager;
+  isSimulation: boolean;
+  priceProvider?: HistoricalPriceProvider;
+  accounts?: AccountConfig[];
+}): Promise<void> => {
+  const {
+    strategyName,
+    order: inputOrder,
+    signalId,
+    channelConfig,
+    initiatorConfig,
+    entryTimeoutMinutes,
+    db,
+    isSimulation,
+    priceProvider,
+    accounts
+  } = options;
+  const channel = channelConfig.channel;
+  const initiatorName = initiatorConfig.name || initiatorConfig.type;
+  if (!initiatorName) {
+    logger.error('initiateFromStrategy: initiator has no name', { channel, strategyName });
+    return;
+  }
+  const initiatorFunction = getInitiator(initiatorName);
+  if (!initiatorFunction) {
+    logger.error('initiateFromStrategy: initiator not registered', { channel, strategyName, initiatorName });
+    return;
+  }
+  if (!validateParsedOrder(inputOrder, { channel })) {
+    logger.warn('initiateFromStrategy: order failed validation, skipping', { channel, strategyName });
+    return;
+  }
+  let order = inputOrder;
+  if (channelConfig.tradeObfuscation) {
+    order = applyTradeObfuscation(order, channelConfig.tradeObfuscation);
+  }
+  const messageId = `strategy:${strategyName}:${signalId}`;
+  const placeholder = `[strategy:${strategyName}]`;
+  await db.insertMessage({
+    message_id: messageId,
+    channel,
+    content: placeholder,
+    sender: `strategy:${strategyName}`,
+    date: new Date().toISOString()
+  });
+  const message = await db.getMessageByMessageId(messageId, channel);
+  if (!message) {
+    logger.error('initiateFromStrategy: message row missing after insert', { messageId, channel, strategyName });
+    return;
+  }
+  if (isSimulation && priceProvider) {
+    priceProvider.setCurrentTime(dayjs(message.date));
+  }
+  const mergedInitiatorConfig: InitiatorConfig = {
+    ...initiatorConfig,
+    baseLeverage:
+      channelConfig.baseLeverage !== undefined ? channelConfig.baseLeverage : initiatorConfig.baseLeverage
+  };
+  const riskPercentage = channelConfig.riskPercentage ?? initiatorConfig.riskPercentage;
+  const context: InitiatorContext = {
+    channel,
+    riskPercentage,
+    entryTimeoutMinutes,
+    message,
+    order,
+    db,
+    isSimulation,
+    priceProvider,
+    config: mergedInitiatorConfig,
+    accounts,
+    accountFilters: channelConfig.accountFilters,
+    propFirms: channelConfig.propFirms,
+    maxRisk: channelConfig.maxRisk,
+    slAdjustmentTolerancePercent: channelConfig.slAdjustmentTolerancePercent,
+    useLimitOrderForEntry: channelConfig.useLimitOrderForEntry,
+    maxSkippablePastTPs: channelConfig.maxSkippablePastTPs,
+    useMarketRangeForEntry: channelConfig.useMarketRangeForEntry
+  };
+  try {
+    logger.info('initiateFromStrategy: running initiator', {
+      channel,
+      strategyName,
+      initiatorName,
+      messageId: message.message_id,
+      tradingPair: order.tradingPair
+    });
+    await initiatorFunction(context);
+    await db.markMessageParsed(message.id);
+    logger.info('initiateFromStrategy: completed, message marked parsed', {
+      channel,
+      messageId: message.message_id
+    });
+  } catch (initiatorError) {
+    const isRetryable = isRetryableError(initiatorError);
+    logger.error('initiateFromStrategy: initiator error', {
+      channel,
+      strategyName,
+      initiatorName,
+      isRetryable,
+      error: serializeErrorForLog(initiatorError)
+    });
+    if (!isRetryable) {
+      await db.markMessageParsed(message.id);
+    }
+  }
 };
 
 export const processUnparsedMessages = async (
