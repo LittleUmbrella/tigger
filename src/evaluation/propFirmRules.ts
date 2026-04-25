@@ -17,12 +17,18 @@ export interface PropFirmRule {
   
   // Drawdown limits
   maxDrawdown?: number; // Maximum drawdown percentage (e.g., 10 = 10% of initial balance)
+  /**
+   * Maximum drawdown calculation mode.
+   * - 'trailing' (default): high-watermark drawdown based on peak equity
+   * - 'static': fixed floor from initial balance (initial - maxDrawdown%)
+   */
+  maxDrawdownMode?: 'trailing' | 'static';
   dailyDrawdown?: number; // Daily drawdown limit percentage (e.g., 5 = 5% of initial balance)
   /**
    * Daily drawdown calculation mode.
-   * - 'dayStartPercent' (default): limit is % of the balance at the start of the day
-   * - 'swing': limit is a static % of the initial balance (e.g., HyroTrader Swing daily drawdown)
-   * - 'trailing': placeholder for intraday trailing-from-peak equity logic (not fully supported yet)
+   * - 'trailing' (default): intraday high-watermark drawdown, reset daily (UTC)
+   * - 'swing': fixed daily floor from start-of-day equity minus % of initial balance
+   * - 'dayStartPercent': legacy mode, % of start-of-day equity
    */
   dailyDrawdownMode?: 'dayStartPercent' | 'swing' | 'trailing';
   
@@ -80,8 +86,9 @@ export const PROP_FIRM_RULES: Record<string, PropFirmRule> = {
     profitTarget: 10, // 10% profit target
     
     maxDrawdown: 10, // 10% maximum drawdown
+    maxDrawdownMode: 'static',
     dailyDrawdown: 5, // 5% daily drawdown limit
-    dailyDrawdownMode: 'swing',
+    dailyDrawdownMode: 'trailing',
     
     minTradingDays: 10, // 10 minimum trading days
     

@@ -22,6 +22,8 @@ import { logger } from '../utils/logger.js';
 import { BotConfig, ChannelSetConfig, InitiatorConfig } from '../types/config.js';
 import { processMessages } from '../initiators/signalInitiator.js';
 import { getInitiator } from '../initiators/initiatorRegistry.js';
+// Register built-in initiators before lookup (bybit/ctrader/evaluation)
+import '../initiators/index.js';
 
 const program = new Command();
 
@@ -57,8 +59,20 @@ program
 
       const config: BotConfig = JSON.parse(await fs.readFile(configPath, 'utf-8'));
 
-      const dbType = config.database?.type || 'sqlite';
-      const dbPath = config.database?.path || config.database?.url || 'data/trading_bot.db';
+      const rawDbType = (config.database?.type || 'sqlite').toLowerCase();
+      const dbType =
+        rawDbType === 'postgres' || rawDbType === 'postgresql'
+          ? 'postgresql'
+          : 'sqlite';
+      const dbPath =
+        dbType === 'sqlite'
+          ? (config.database?.path || 'data/trading_bot.db')
+          : (config.database?.url || process.env.DATABASE_URL || '');
+      if (dbType === 'postgresql' && !dbPath) {
+        throw new Error(
+          'PostgreSQL database selected but no URL provided. Set config.database.url or DATABASE_URL in .env'
+        );
+      }
       const db = new DatabaseManager({
         type: dbType,
         path: dbType === 'sqlite' ? dbPath : undefined,

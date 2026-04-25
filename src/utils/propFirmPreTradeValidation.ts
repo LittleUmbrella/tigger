@@ -8,6 +8,7 @@ import {
   loadCompletedTradesForChannel,
   buildDailyPnLMap,
   projectRunningBalanceAndPeak,
+  projectTodayRealizedPnLAndPeak,
   getUtcTodayString,
 } from './risk.js';
 
@@ -90,7 +91,9 @@ export async function validateTradeAgainstPropFirms(
       if (propFirmConfig.displayName !== undefined)    overrides.displayName = propFirmConfig.displayName;
       if (propFirmConfig.profitTarget !== undefined)    overrides.profitTarget = propFirmConfig.profitTarget;
       if (propFirmConfig.maxDrawdown !== undefined)     overrides.maxDrawdown = propFirmConfig.maxDrawdown;
+      if (propFirmConfig.maxDrawdownMode !== undefined) overrides.maxDrawdownMode = propFirmConfig.maxDrawdownMode;
       if (propFirmConfig.dailyDrawdown !== undefined)   overrides.dailyDrawdown = propFirmConfig.dailyDrawdown;
+      if (propFirmConfig.dailyDrawdownMode !== undefined) overrides.dailyDrawdownMode = propFirmConfig.dailyDrawdownMode;
       if (propFirmConfig.minTradingDays !== undefined)   overrides.minTradingDays = propFirmConfig.minTradingDays;
       if (propFirmConfig.minTradesPerDay !== undefined)  overrides.minTradesPerDay = propFirmConfig.minTradesPerDay;
       if (propFirmConfig.maxRiskPerTrade !== undefined)  overrides.maxRiskPerTrade = propFirmConfig.maxRiskPerTrade;
@@ -153,13 +156,23 @@ export async function validateTradeAgainstPropFirms(
 
     // Check maxDrawdown rule (drawdown % is vs challenge initial balance, e.g. $10k)
     if (rule.maxDrawdown !== undefined) {
-      const drawdown = simulatedPeakBalance - simulatedBalance;
+      const maxDrawdownMode = rule.maxDrawdownMode ?? 'trailing';
+      const drawdown = maxDrawdownMode === 'static'
+        ? Math.max(0, rule.initialBalance - simulatedBalance)
+        : simulatedPeakBalance - simulatedBalance;
       const drawdownPercentage = (drawdown / rule.initialBalance) * 100;
 
       if (drawdownPercentage > rule.maxDrawdown) {
-        violations.push(
-          `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (peak equity: ${simulatedPeakBalance.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
-        );
+        if (maxDrawdownMode === 'static') {
+          const staticFloor = rule.initialBalance * (1 - rule.maxDrawdown / 100);
+          violations.push(
+            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: static, floor: ${staticFloor.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+          );
+        } else {
+          violations.push(
+            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: trailing, peak equity: ${simulatedPeakBalance.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+          );
+        }
       }
     }
 
@@ -169,19 +182,35 @@ export async function validateTradeAgainstPropFirms(
 
       const currentDailyPnL = dailyPnLAll.get(today) || 0;
       const simulatedDailyPnL = currentDailyPnL - totalWorstCaseLoss;
+      const dailyLimitAmount = (rule.dailyDrawdown / 100) * rule.initialBalance;
+      const dailyDrawdownMode = rule.dailyDrawdownMode ?? 'trailing';
+      const inferredDayStartEquity = currentBalance - currentDailyPnL;
+      const dayStartEquity = dayStartBalance ?? inferredDayStartEquity;
 
-      const dailyDrawdownLimit = rule.dailyDrawdownMode === 'swing'
-        ? (rule.dailyDrawdown / 100) * (dayStartBalance ?? rule.initialBalance)
-        : (rule.dailyDrawdown / 100) * (
-            dailyPnLAll.has(today)
-              ? currentBalance - (dailyPnLAll.get(today) || 0)
-              : currentBalance
+      if (dailyDrawdownMode === 'swing') {
+        const dailyFloor = dayStartEquity - dailyLimitAmount;
+        if (simulatedBalance <= dailyFloor) {
+          violations.push(
+            `Trade would cause daily drawdown violation: simulated equity ${simulatedBalance.toFixed(2)} <= floor ${dailyFloor.toFixed(2)} (mode: swing, day start equity: ${dayStartEquity.toFixed(2)}, daily limit: ${dailyLimitAmount.toFixed(2)} = ${rule.dailyDrawdown}% of initial balance ${rule.initialBalance})`
           );
-
-      if (simulatedDailyPnL < -dailyDrawdownLimit) {
-        violations.push(
-          `Trade would cause daily drawdown violation: ${simulatedDailyPnL.toFixed(2)} USDT < -${dailyDrawdownLimit.toFixed(2)} USDT (daily limit: ${rule.dailyDrawdown}% of day start balance)`
-        );
+        }
+      } else if (dailyDrawdownMode === 'trailing') {
+        const { realizedPeakPnL } = projectTodayRealizedPnLAndPeak(completedTrades, today);
+        const realizedPeakEquity = dayStartEquity + realizedPeakPnL;
+        const intradayPeakEquity = Math.max(dayStartEquity, realizedPeakEquity, currentBalance);
+        const trailingDailyFloor = intradayPeakEquity - dailyLimitAmount;
+        if (simulatedBalance <= trailingDailyFloor) {
+          violations.push(
+            `Trade would cause daily drawdown violation: simulated equity ${simulatedBalance.toFixed(2)} <= floor ${trailingDailyFloor.toFixed(2)} (mode: trailing, intraday peak equity: ${intradayPeakEquity.toFixed(2)}, daily limit: ${dailyLimitAmount.toFixed(2)} = ${rule.dailyDrawdown}% of initial balance ${rule.initialBalance})`
+          );
+        }
+      } else {
+        const dayStartPercentLimit = (rule.dailyDrawdown / 100) * dayStartEquity;
+        if (simulatedDailyPnL < -dayStartPercentLimit) {
+          violations.push(
+            `Trade would cause daily drawdown violation: ${simulatedDailyPnL.toFixed(2)} USDT < -${dayStartPercentLimit.toFixed(2)} USDT (mode: dayStartPercent, daily limit: ${rule.dailyDrawdown}% of day start equity ${dayStartEquity.toFixed(2)})`
+          );
+        }
       }
     }
 

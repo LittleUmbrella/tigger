@@ -154,8 +154,24 @@ export interface TradeObfuscationConfig {
 
 export interface ChannelSetConfig {
   channel: string;
-  harvester: string; // Reference to harvester name
-  parser: string; // Reference to parser name
+  /**
+   * Telegram/Discord/CSV harvester name from `harvesters`.
+   * Omit when `strategy` is set (market-driven signals replace inbound messages).
+   */
+  harvester?: string;
+  /**
+   * Registered strategy name (see `src/strategies/`). When set, no harvester runs for this channel;
+   * the strategy is responsible for polling/ws and may insert signals via the strategy JSON path.
+   */
+  strategy?: string;
+  /**
+   * Passed to the strategy implementation (e.g. symbol, pollIntervalMs). Shape is strategy-specific.
+   */
+  strategyOptions?: Record<string, unknown>;
+  /**
+   * Signal parser for harvested messages. Omitted for `strategy` channels (orders come from the strategy via initiators).
+   */
+  parser?: string;
   initiator: string; // Reference to initiator name
   monitor: 'bybit' | 'dex' | 'ctrader'; // Reference to monitor type
   breakevenAfterTPs?: number; // Per-channel override for number of TPs before breakeven (overrides monitor config)
@@ -217,7 +233,9 @@ export interface CustomPropFirmConfig {
   initialBalance?: number;
   profitTarget?: number;
   maxDrawdown?: number;
+  maxDrawdownMode?: 'trailing' | 'static';
   dailyDrawdown?: number;
+  dailyDrawdownMode?: 'dayStartPercent' | 'swing' | 'trailing';
   minTradingDays?: number;
   minTradesPerDay?: number;
   maxRiskPerTrade?: number;

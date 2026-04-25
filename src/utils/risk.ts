@@ -179,6 +179,30 @@ export function buildDailyPnLMap(completedTrades: Trade[]): Map<string, number> 
 }
 
 /**
+ * Return today's realized PnL and realized intraday peak PnL (both in quote currency).
+ * "Peak" is cumulative realized PnL high-watermark for today's closed trades.
+ */
+export function projectTodayRealizedPnLAndPeak(
+  completedTrades: Trade[],
+  utcDate: string
+): { realizedPnL: number; realizedPeakPnL: number } {
+  const todaysTrades = completedTrades
+    .filter((trade) => trade.exit_filled_at && trade.pnl !== undefined && toUtcDateString(trade.exit_filled_at) === utcDate)
+    .sort((a, b) => dayjs(a.exit_filled_at!).valueOf() - dayjs(b.exit_filled_at!).valueOf());
+
+  let realizedPnL = 0;
+  let realizedPeakPnL = 0;
+  for (const trade of todaysTrades) {
+    realizedPnL += trade.pnl!;
+    if (realizedPnL > realizedPeakPnL) {
+      realizedPeakPnL = realizedPnL;
+    }
+  }
+
+  return { realizedPnL, realizedPeakPnL };
+}
+
+/**
  * Peak equity and DB-derived balance from completed trades vs a starting balance.
  * Used for drawdown-style simulation from trade history.
  */
