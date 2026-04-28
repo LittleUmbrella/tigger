@@ -23,6 +23,19 @@ const applyPercentAdjustment = (
   return value * factor;
 };
 
+const applyWorseTpOffset = (
+  value: number,
+  tpOffsetPercent: number,
+  signalType: ParsedOrder['signalType']
+): number => {
+  const normalizedOffsetPercent = Math.abs(tpOffsetPercent);
+  const factor =
+    signalType === 'long'
+      ? 1 - normalizedOffsetPercent / 100
+      : 1 + normalizedOffsetPercent / 100;
+  return value * factor;
+};
+
 /**
  * Applies trade obfuscation to a parsed order.
  * Modifies sl, entry, and tp by a random percent within their configured ranges.
@@ -59,10 +72,10 @@ export const applyTradeObfuscation = (
     );
   }
 
-  if (config.tp && order.takeProfits.length) {
-    const { minPercent, maxPercent } = config.tp;
+  const tpOffsetPercent = config.tp;
+  if (tpOffsetPercent != null && order.takeProfits.length) {
     result.takeProfits = order.takeProfits.map((v) =>
-      applyPercentAdjustment(v, minPercent, maxPercent)
+      applyWorseTpOffset(v, tpOffsetPercent, order.signalType)
     );
   }
 

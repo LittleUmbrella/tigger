@@ -31,11 +31,17 @@ const parsePercentRange = (value: string | undefined): { minPercent: number; max
   return { minPercent: parts[0], maxPercent: parts[1] };
 };
 
+const parsePercentValue = (value: string | undefined): number | undefined => {
+  if (value == null || value === '') return undefined;
+  const parsed = parseFloat(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+};
+
 /** Build TradeObfuscationConfig from CLI options. Returns undefined if none provided. */
 const buildTradeObfuscationFromCli = (options: { obfuscationSl?: string; obfuscationEntry?: string; obfuscationTp?: string }): TradeObfuscationConfig | undefined => {
   const sl = parsePercentRange(options.obfuscationSl);
   const entry = parsePercentRange(options.obfuscationEntry);
-  const tp = parsePercentRange(options.obfuscationTp);
+  const tp = parsePercentValue(options.obfuscationTp);
   if (!sl && !entry && !tp) return undefined;
   return { ...(sl && { sl }), ...(entry && { entry }), ...(tp && { tp }) };
 };
@@ -134,7 +140,7 @@ program
   .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
   .option('--obfuscation-sl <min,max>', 'Trade obfuscation for SL: percent range as "min,max" (e.g. "-0.5,0.5")')
   .option('--obfuscation-entry <min,max>', 'Trade obfuscation for entry: percent range as "min,max" (e.g. "-0.3,0.3")')
-  .option('--obfuscation-tp <min,max>', 'Trade obfuscation for TP: percent range as "min,max" (e.g. "-0.2,0.2")')
+  .option('--obfuscation-tp <percent>', 'Trade obfuscation for TP: single percent offset toward worse TP by direction (e.g. "0.2")')
   .option('--monitor-type <type>', 'Monitor/exchange type: bybit or ctrader (default: bybit)', 'bybit')
   .option('--ctrader-use-tick-data', 'Use tick data instead of M1 candles (ctrader only, more precise)', false)
   .option('--ctrader-symbol-map <json>', 'cTrader symbol map JSON, e.g. \'{"XAUUSD":"GOLD"}\' when broker uses different names')

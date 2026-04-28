@@ -42,23 +42,39 @@ describe('applyTradeObfuscation', () => {
     randomSpy.mockRestore();
   });
 
-  it('applies tp obfuscation when tp config present', () => {
-    const randomSpy = vi
-      .spyOn(Math, 'random')
-      .mockReturnValueOnce(0)
-      .mockReturnValueOnce(0.5)
-      .mockReturnValueOnce(1);
+  it('applies tp obfuscation in worse direction for long trades', () => {
     const config: TradeObfuscationConfig = {
-      tp: { minPercent: -0.2, maxPercent: 0.2 },
+      tp: 0.2,
     };
     const result = applyTradeObfuscation(baseOrder, config);
     expect(result.takeProfits).toHaveLength(3);
-    // random 0 -> factor 0.998, 0.5 -> 1, 1 -> 1.002
     expect(result.takeProfits[0]).toBeCloseTo(50898, 0);
-    expect(result.takeProfits[1]).toBe(52000);
-    expect(result.takeProfits[2]).toBeCloseTo(53106, 0);
+    expect(result.takeProfits[1]).toBeCloseTo(51896, 0);
+    expect(result.takeProfits[2]).toBeCloseTo(52894, 0);
     expect(result.stopLoss).toBe(baseOrder.stopLoss);
-    randomSpy.mockRestore();
+  });
+
+  it('applies tp obfuscation in worse direction for short trades', () => {
+    const shortOrder: ParsedOrder = {
+      ...baseOrder,
+      signalType: 'short',
+    };
+    const config: TradeObfuscationConfig = {
+      tp: 0.2,
+    };
+    const result = applyTradeObfuscation(shortOrder, config);
+    expect(result.takeProfits).toHaveLength(3);
+    expect(result.takeProfits[0]).toBeCloseTo(51102, 0);
+    expect(result.takeProfits[1]).toBeCloseTo(52104, 0);
+    expect(result.takeProfits[2]).toBeCloseTo(53106, 0);
+  });
+
+  it('treats negative tp offset as absolute value', () => {
+    const config: TradeObfuscationConfig = {
+      tp: -0.2,
+    };
+    const result = applyTradeObfuscation(baseOrder, config);
+    expect(result.takeProfits[0]).toBeCloseTo(50898, 0);
   });
 
   it('does not mutate the input order', () => {

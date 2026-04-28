@@ -149,7 +149,12 @@ export interface PercentRange {
 export interface TradeObfuscationConfig {
   sl?: PercentRange;
   entry?: PercentRange;
-  tp?: PercentRange;
+  /**
+   * Single percent offset applied to all TPs in the worse direction for the trade:
+   * - long: TP is reduced by this percent
+   * - short: TP is increased by this percent
+   */
+  tp?: number;
 }
 
 export interface ChannelSetConfig {
