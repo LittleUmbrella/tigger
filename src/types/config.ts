@@ -193,7 +193,10 @@ export interface ChannelSetConfig {
   maxMessageStalenessMinutes?: number; // Maximum age of messages to process in minutes (messages older than this will be skipped)
   accountFilters?: AccountFilter[]; // Signal-based account filtering rules (evaluated in order, first match wins)
   useLimitOrderForBreakeven?: boolean; // When true: conditional limit at BE fill + trigger a few ticks better + backup SL slightly worse (default: false uses setTradingStop at BE only)
-  /** cTrader only: When true, convert market orders to limit at current price (like Bybit). When false, use actual market orders with relative SL/TP (default: true) */
+  /**
+   * Per-channel market-style entry. When true (default), initiators use a limit at the current quote where that path exists (e.g. Bybit omits entry → limit @ last traded price).
+   * When false, cTrader places native MARKET orders; other initiators may ignore or reserve this (see initiator implementation).
+   */
   useLimitOrderForEntry?: boolean;
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection

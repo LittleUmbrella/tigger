@@ -227,7 +227,7 @@ export const processUnparsedMessages = async (
   propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
   tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
-  useLimitOrderForEntry?: boolean, // cTrader: When true use limit at current price; when false use market with relative SL/TP (default: true)
+  useLimitOrderForEntry?: boolean, // From channel config; each initiator interprets (not cTrader-specific).
   maxSkippablePastTPs?: number, // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
   useMarketRangeForEntry?: boolean, // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
   maxRisk?: number

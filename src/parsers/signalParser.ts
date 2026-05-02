@@ -21,6 +21,7 @@ import { ctraderVgcParser } from './ctraderVgcParser.js';
 import { ctraderKlhParser } from './ctraderKlhParser.js';
 import { stevenParser } from './stevenParser.js';
 import { fxcmChartParser } from './fxcmChartParser.js';
+import { cmpDcaSignalParser } from './cmpDcaSignalParser.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { isTransientInfrastructureError, serializeErrorForLog } from '../utils/errorUtils.js';
 
@@ -42,6 +43,7 @@ registerParser('ctrader_vgc', ctraderVgcParser);
 registerParser('ctrader_klh', ctraderKlhParser);
 registerParser('steven', stevenParser);
 registerParser('fxcm_chart', fxcmChartParser);
+registerParser('cmp_dca_signal', cmpDcaSignalParser);
 
 /**
  * Parse a message using the specified parser name

@@ -1023,7 +1023,7 @@ export const startTradeOrchestrator = async (
           channelConfig.propFirms, // Pass prop firm configurations
           channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
-          channelConfig.useLimitOrderForEntry, // Pass cTrader: use limit vs market for entry
+          channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
           channelConfig.maxRisk
@@ -1086,7 +1086,7 @@ export const startTradeOrchestrator = async (
           channelConfig.propFirms, // Pass prop firm configurations
           channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
-          channelConfig.useLimitOrderForEntry, // Pass cTrader: use limit vs market for entry
+          channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
           channelConfig.maxRisk

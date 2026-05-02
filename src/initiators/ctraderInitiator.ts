@@ -188,7 +188,7 @@ const executeTradeForAccount = async (
 ): Promise<void> => {
   const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs, useMarketRangeForEntry, maxRisk } = context;
 
-  /** False → real market order (relative SL/TP). True → limit at current price ("limit-at-touch"). Parsers may set order.marketExecution to force the market path. */
+  /** Channel `useLimitOrderForEntry` (defaults true when omitted): false → MARKET + relative SL/TP; true → limit-at-touch. `order.marketExecution` forces the MARKET path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
 
   let ctraderClient: CTraderClient | undefined = undefined;

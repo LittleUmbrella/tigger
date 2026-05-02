@@ -177,7 +177,7 @@ export async function runEvaluation(
     undefined, // propFirms (evaluation validates prop firms after simulation)
     config.tradeObfuscation,
     config.slAdjustmentTolerancePercent,
-    undefined, // useLimitOrderForEntry (evaluation uses initiator defaults)
+    undefined, // useLimitOrderForEntry (evaluation path leaves it unset; initiator defaults apply)
     undefined, // maxSkippablePastTPs
     undefined, // useMarketRangeForEntry
     config.maxRisk

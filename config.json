@@ -43,7 +43,16 @@
       "platform": "discord-selfbot",
       "envVarNames": {
         "userToken": "DISCORD_USER_TOKEN"
-      }      
+      }
+    },
+    {
+      "_comment": "`main_harvester` already harvests Telegram 2427485240; discord CMP/DCA channel uses dedicated self-bot harvester (same DISCORD_USER_TOKEN pattern as gold_scalps)",
+      "name": "cmp_dca_signal_harvester",
+      "channel": "1486846570531000412",
+      "platform": "discord-selfbot",
+      "envVarNames": {
+        "userToken": "DISCORD_USER_TOKEN"
+      }
     },
     {
       "name": "star_format_harvester",
@@ -168,6 +177,10 @@
       "channel": "1441399338805891174"
     },
     {
+      "name": "cmp_dca_signal",
+      "channel": "1486846570531000412"
+    },
+    {
       "name": "big",
       "channel": "2385521106"
     },
@@ -278,7 +291,22 @@
       "initiator": "bybit",
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
-      "riskPercentage": 0.2,
+      "riskPercentage": 0.6,
+      "baseLeverage": 20,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}]
+    },
+    {
+      "channel": "1486846570531000412",
+      "harvester": "cmp_dca_signal_harvester",
+      "parser": "cmp_dca_signal",
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "useLimitOrderForEntry": true,
+      "useLimitOrderForBreakeven": true,
+      "entryTimeoutMinutes": 60,
+      "maxMessageStalenessMinutes": 5,
+      "riskPercentage": 1.4,
       "baseLeverage": 20,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}]
@@ -293,7 +321,7 @@
       "monitor": "bybit",
       "maxMessageStalenessMinutes": 5,
       "riskPercentage": 0.2,
-      "maxRisk": 2.6,
+      "maxRisk": 2.8,
       "baseLeverage": 5,
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}]
