@@ -1,6 +1,6 @@
 /**
  * Message Harvester for Evaluation
- * 
+ *
  * Pulls historical messages from Telegram or Discord channels and stores them in the database.
  * This is a re-implementation of the script utility that uses the database instead of flat files.
  */
@@ -28,6 +28,12 @@ export interface HarvestOptions {
   endDate?: string; // ISO date string
   keywords?: string[]; // Optional keywords to filter messages
   limit?: number; // Maximum messages to harvest (0 = unlimited)
+  /**
+   * When false (default), `--limit` counts **new** rows inserted. When true, limit counts **Discord API
+   * messages fetched** (`totalMessages`), so pulling “the last N channel messages” works even if they
+   * are already in the DB (duplicates).
+   */
+  limitFetchedTotal?: boolean;
   delay?: number | 'auto'; // Delay between batches in ms, or 'auto' for random delays
   downloadImages?: boolean; // Whether to download and store images from messages (default: false)
 }
@@ -38,6 +44,15 @@ export interface HarvestResult {
   skippedMessages: number;
   errors: number;
   lastMessageId: string | number; // String for Discord, number for Telegram (legacy)
+}
+
+function discordHarvestFetchLimit(options: HarvestOptions, result: HarvestResult): number {
+  if (!options.limit || options.limit <= 0) return 100;
+  const remaining = options.limitFetchedTotal
+    ? options.limit - result.totalMessages
+    : options.limit - result.newMessages;
+  if (remaining <= 0) return 0;
+  return Math.min(100, remaining);
 }
 
 /**
@@ -646,8 +661,16 @@ async function harvestDiscordMessages(
         : (options.delay || 0);
 
       try {
-        const limit = Math.min(100, options.limit && options.limit > 0 ? options.limit - result.newMessages : 100);
-        const fetchOptions: any = { limit };
+        const fetchLimit = discordHarvestFetchLimit(options, result);
+        if (options.limit && options.limit > 0 && fetchLimit <= 0) {
+          logger.info('Harvest limit satisfied (Discord)', {
+            channel: options.channel,
+            limit: options.limit,
+            limitFetchedTotal: Boolean(options.limitFetchedTotal),
+          });
+          break;
+        }
+        const fetchOptions: any = { limit: fetchLimit };
         
         if (lastMessageId) {
           fetchOptions.before = lastMessageId;
@@ -759,8 +782,13 @@ async function harvestDiscordMessages(
             }
           }
 
-          // Check limit
-          if (options.limit && options.limit > 0 && result.newMessages >= options.limit) {
+          // Check limit (new-insert semantics only; fetched-total limit is checked after the batch)
+          if (
+            !options.limitFetchedTotal &&
+            options.limit &&
+            options.limit > 0 &&
+            result.newMessages >= options.limit
+          ) {
             logger.info('Reached message limit', {
               channel: options.channel,
               limit: options.limit
@@ -772,6 +800,15 @@ async function harvestDiscordMessages(
 
         result.totalMessages += messages.size;
         result.skippedMessages += batchSkipped;
+
+        if (options.limitFetchedTotal && options.limit && options.limit > 0 && result.totalMessages >= options.limit) {
+          logger.info('Reached fetched message limit (Discord)', {
+            channel: options.channel,
+            limit: options.limit,
+            totalFetched: result.totalMessages,
+          });
+          shouldStop = true;
+        }
 
         if (batchNewMessages > 0) {
           // Reset counter when we find new messages
@@ -798,7 +835,10 @@ async function harvestDiscordMessages(
 
           // Stop if we've encountered multiple consecutive batches with all duplicates
           // This indicates we've reached already-harvested messages
-          if (consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES) {
+          if (
+            !options.limitFetchedTotal &&
+            consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES
+          ) {
             logger.info('Stopping harvest: multiple consecutive batches were all duplicates', {
               channel: options.channel,
               consecutiveDuplicateBatches,
@@ -945,7 +985,7 @@ async function harvestDiscordSelfBotMessages(
     const startDate = options.startDate ? dayjs(options.startDate) : null;
     const endDate = options.endDate ? dayjs(options.endDate) : null;
 
-    // For evaluation harvester: 
+    // For evaluation harvester:
     // - If no messages exist: start from newest and go backward to get ALL messages
     // - If messages exist: continue going backward to fill gaps and get new messages
     // We use 'before' parameter to paginate backward through all messages
@@ -986,8 +1026,16 @@ async function harvestDiscordSelfBotMessages(
         : (options.delay || 0);
 
       try {
-        const limit = Math.min(100, options.limit && options.limit > 0 ? options.limit - result.newMessages : 100);
-        const fetchOptions: any = { limit };
+        const fetchLimit = discordHarvestFetchLimit(options, result);
+        if (options.limit && options.limit > 0 && fetchLimit <= 0) {
+          logger.info('Harvest limit satisfied (Discord self-bot)', {
+            channel: options.channel,
+            limit: options.limit,
+            limitFetchedTotal: Boolean(options.limitFetchedTotal),
+          });
+          break;
+        }
+        const fetchOptions: any = { limit: fetchLimit };
         
         if (lastMessageId) {
           fetchOptions.before = lastMessageId;
@@ -1122,8 +1170,13 @@ async function harvestDiscordSelfBotMessages(
             }
           }
 
-          // Check limit
-          if (options.limit && options.limit > 0 && result.newMessages >= options.limit) {
+          // Check limit (new-insert semantics only; fetched-total limit is checked after the batch)
+          if (
+            !options.limitFetchedTotal &&
+            options.limit &&
+            options.limit > 0 &&
+            result.newMessages >= options.limit
+          ) {
             logger.info('Reached message limit', {
               channel: options.channel,
               limit: options.limit
@@ -1135,6 +1188,15 @@ async function harvestDiscordSelfBotMessages(
 
         result.totalMessages += messageArray.length;
         result.skippedMessages += batchSkipped;
+
+        if (options.limitFetchedTotal && options.limit && options.limit > 0 && result.totalMessages >= options.limit) {
+          logger.info('Reached fetched message limit (Discord self-bot)', {
+            channel: options.channel,
+            limit: options.limit,
+            totalFetched: result.totalMessages,
+          });
+          shouldStop = true;
+        }
 
         if (batchNewMessages > 0) {
           // Reset counter when we find new messages
@@ -1161,7 +1223,10 @@ async function harvestDiscordSelfBotMessages(
 
           // Stop if we've encountered multiple consecutive batches with all duplicates
           // This indicates we've reached already-harvested messages
-          if (consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES) {
+          if (
+            !options.limitFetchedTotal &&
+            consecutiveDuplicateBatches >= MAX_CONSECUTIVE_DUPLICATE_BATCHES
+          ) {
             logger.info('Stopping harvest: multiple consecutive batches were all duplicates (self-bot)', {
               channel: options.channel,
               consecutiveDuplicateBatches,

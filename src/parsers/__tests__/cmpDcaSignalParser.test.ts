@@ -27,6 +27,15 @@ SL: H4 candle close below 0.02975
     expect(order!.leverage).toBe(20);
   });
 
+  it('parses compact single-line Discord body (no newlines)', () => {
+    const content =
+      'Long: ID/USDT (20x-50x Leverage) Entry at CMP: 0.03155 DCA: 0.03070 ------------- TP ➊: 0.03295 TP ➋: 0.03540 TP ➌: 0.03790 ------------- SL: H4 candle close below 0.02975 ------------- 1% risk at CMP & 2% at DCA';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.takeProfits).toEqual([0.03295, 0.0354, 0.0379]);
+    expect(order!.stopLoss).toBe(0.02975);
+  });
+
   it('parses short with numeric SL and TP1 numbering', () => {
     const content = `Short: BTC/USDT
 (5x Leverage)

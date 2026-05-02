@@ -30,7 +30,8 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   if (!Number.isFinite(cmpRef) || cmpRef <= 0) return null;
 
   const takeProfits: number[] = [];
-  const tpLine = /^TP\s*[^:]+:\s*([\d.]+)/gim;
+  /** Word-boundary TP (not line-start): Discord/harvest often collapses to a single line. */
+  const tpLine = /\bTP\s*[^:]+:\s*([\d.]+)/gi;
   let m: RegExpExecArray | null;
   while ((m = tpLine.exec(content)) !== null) {
     const v = parseFloat(m[1]);
