@@ -225,7 +225,8 @@ program
         channelConfig.useLimitOrderForEntry,
         channelConfig.maxSkippablePastTPs,
         channelConfig.useMarketRangeForEntry,
-        channelConfig.maxRisk
+        channelConfig.maxRisk,
+        !!force
       );
 
       // --- Show result ---

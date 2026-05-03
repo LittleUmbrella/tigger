@@ -132,6 +132,8 @@ interface DatabaseAdapter {
   getMessageByMessageId(messageId: string, channel: string): Promise<Message | null>;
   getMessagesByReplyTo(replyToMessageId: string, channel: string): Promise<Message[]>;
   getMessageReplyChain(messageId: string, channel: string): Promise<Message[]>;
+  acquireTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean>;
+  releaseTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<void>;
   insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number>;
   getActiveTrades(): Promise<Trade[]>;
   getClosedTrades(): Promise<Trade[]>;
@@ -502,6 +504,19 @@ class SQLiteAdapter implements DatabaseAdapter {
       )
     `);
 
+    // Persistent idempotency guard for live trade initiation. Locks are kept
+    // after success/permanent failure so overlapping work cannot place again.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS trade_initiation_locks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id TEXT NOT NULL,
+        channel TEXT NOT NULL,
+        scope TEXT NOT NULL,
+        acquired_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(message_id, channel, scope)
+      )
+    `);
+
     // Create indexes
     this.db.exec(`
       CREATE INDEX IF NOT EXISTS idx_messages_channel_parsed ON messages(channel, parsed);
@@ -521,6 +536,7 @@ class SQLiteAdapter implements DatabaseAdapter {
       CREATE INDEX IF NOT EXISTS idx_trade_events_message_channel ON trade_events(message_id, channel);
       CREATE INDEX IF NOT EXISTS idx_trade_events_type ON trade_events(event_type);
       CREATE INDEX IF NOT EXISTS idx_trade_events_created_at ON trade_events(created_at);
+      CREATE INDEX IF NOT EXISTS idx_trade_initiation_locks_message_channel ON trade_initiation_locks(message_id, channel);
     `);
   }
 
@@ -805,6 +821,23 @@ class SQLiteAdapter implements DatabaseAdapter {
     }
 
     return chain;
+  }
+
+  async acquireTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO trade_initiation_locks (message_id, channel, scope)
+      VALUES (?, ?, ?)
+    `);
+    const result = stmt.run(messageId, channel, scope);
+    return result.changes === 1;
+  }
+
+  async releaseTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<void> {
+    const stmt = this.db.prepare(`
+      DELETE FROM trade_initiation_locks
+      WHERE message_id = ? AND channel = ? AND scope = ?
+    `);
+    stmt.run(messageId, channel, scope);
   }
 
   async getTradeWithMessage(tradeId: number): Promise<TradeWithMessage | null> {
@@ -1592,6 +1625,19 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         )
       `);
 
+      // Persistent idempotency guard for live trade initiation. Locks are kept
+      // after success/permanent failure so overlapping work cannot place again.
+      await client.query(`
+        CREATE TABLE IF NOT EXISTS trade_initiation_locks (
+          id SERIAL PRIMARY KEY,
+          message_id TEXT NOT NULL,
+          channel TEXT NOT NULL,
+          scope TEXT NOT NULL,
+          acquired_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE(message_id, channel, scope)
+        )
+      `);
+
       // Migrate TIMESTAMP to TIMESTAMPTZ (existing databases - new installs use TIMESTAMPTZ above)
       // Existing values assumed to be UTC (ISO strings we've been storing). Only migrate if column is timestamp without tz.
       const timestampToTimestamptz = async (table: string, ...columns: string[]) => {
@@ -1622,6 +1668,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       await timestampToTimestamptz('evaluation_results', 'start_date', 'end_date', 'created_at');
       await timestampToTimestamptz('signal_formats', 'first_seen', 'last_seen', 'created_at');
       await timestampToTimestamptz('trade_events', 'created_at');
+      await timestampToTimestamptz('trade_initiation_locks', 'acquired_at');
 
       // Create indexes
       await client.query(`
@@ -1642,6 +1689,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
         CREATE INDEX IF NOT EXISTS idx_trade_events_message_channel ON trade_events(message_id, channel);
         CREATE INDEX IF NOT EXISTS idx_trade_events_type ON trade_events(event_type);
         CREATE INDEX IF NOT EXISTS idx_trade_events_created_at ON trade_events(created_at);
+        CREATE INDEX IF NOT EXISTS idx_trade_initiation_locks_message_channel ON trade_initiation_locks(message_id, channel);
       `);
     } finally {
       client.release();
@@ -2028,6 +2076,29 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       [messageId, channel]
     );
     return this.normalizeTrades(result.rows);
+  }
+
+  async acquireTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        INSERT INTO trade_initiation_locks (message_id, channel, scope)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (message_id, channel, scope) DO NOTHING
+        RETURNING id
+      `,
+      [messageId, channel, scope]
+    );
+    return result.rowCount === 1;
+  }
+
+  async releaseTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<void> {
+    await this.pool.query(
+      `
+        DELETE FROM trade_initiation_locks
+        WHERE message_id = $1 AND channel = $2 AND scope = $3
+      `,
+      [messageId, channel, scope]
+    );
   }
 
   async updateTrade(id: number, updates: Partial<Trade>): Promise<void> {
@@ -2488,6 +2559,14 @@ export class DatabaseManager {
 
   insertTradeEvent(event: Omit<TradeEventRecord, 'id' | 'created_at'>): Promise<number> {
     return this.adapter.insertTradeEvent(event);
+  }
+
+  acquireTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    return this.adapter.acquireTradeInitiationLock(messageId, channel, scope);
+  }
+
+  releaseTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<void> {
+    return this.adapter.releaseTradeInitiationLock(messageId, channel, scope);
   }
 
   close(): Promise<void> {

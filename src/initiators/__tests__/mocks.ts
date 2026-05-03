@@ -8,8 +8,10 @@ import { HistoricalPriceProvider } from '../../utils/historicalPriceProvider.js'
 export function createMockDatabase(): DatabaseManager {
   const messages: any[] = [];
   const trades: any[] = [];
+  const orders: any[] = [];
   let messageIdCounter = 1;
   let tradeIdCounter = 1;
+  let orderIdCounter = 1;
 
   return {
     insertMessage: vi.fn((msg: any) => {
@@ -20,6 +22,9 @@ export function createMockDatabase(): DatabaseManager {
     getUnparsedMessages: vi.fn((channel?: string) => {
       const unparsed = messages.filter(m => !m.parsed);
       return channel ? unparsed.filter(m => m.channel === channel) : unparsed;
+    }),
+    getMessagesByChannel: vi.fn((channel: string) => {
+      return messages.filter(m => m.channel === channel);
     }),
     markMessageParsed: vi.fn((id: number) => {
       const msg = messages.find(m => m.id === id);
@@ -43,6 +48,34 @@ export function createMockDatabase(): DatabaseManager {
     }),
     getTradesByStatus: vi.fn((status: string) => {
       return trades.filter(t => t.status === status);
+    }),
+    getTradesByMessageId: vi.fn((messageId: string, channel: string) => {
+      return trades.filter(t => t.message_id === messageId && t.channel === channel);
+    }),
+    acquireTradeInitiationLock: vi.fn().mockResolvedValue(true),
+    releaseTradeInitiationLock: vi.fn().mockResolvedValue(undefined),
+    insertOrder: vi.fn((order: any) => {
+      const id = orderIdCounter++;
+      orders.push({
+        ...order,
+        id,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      });
+      return id;
+    }),
+    getOrdersByTradeId: vi.fn((tradeId: number) => {
+      return orders.filter(o => o.trade_id === tradeId);
+    }),
+    getOrdersByStatus: vi.fn((status: string) => {
+      return orders.filter(o => o.status === status);
+    }),
+    updateOrder: vi.fn((id: number, updates: any) => {
+      const order = orders.find(o => o.id === id);
+      if (order) {
+        Object.assign(order, updates);
+        order.updated_at = new Date().toISOString();
+      }
     }),
     updateTrade: vi.fn((id: number, updates: any) => {
       const trade = trades.find(t => t.id === id);

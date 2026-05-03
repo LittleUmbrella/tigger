@@ -355,7 +355,8 @@ export const processMessages = async (
   maxSkippablePastTPs?: number,
   /** cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2) */
   useMarketRangeForEntry?: boolean,
-  maxRisk?: number
+  maxRisk?: number,
+  bypassInitiationLock: boolean = false
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -378,6 +379,10 @@ export const processMessages = async (
   }
 
   const processMessage = async (message: Message): Promise<void> => {
+    const lockScope = `trade:${initiatorName || initiatorConfig.name || initiatorConfig.type || 'unknown'}`;
+    const shouldUseInitiationLock = !isSimulation && !bypassInitiationLock;
+    let initiationLockAcquired = false;
+
     try {
       // Log message processing start - critical for tracing flow in Loggly
       logger.info('Processing message for trade initiation', {
@@ -388,6 +393,19 @@ export const processMessages = async (
         parserName: parserName || 'default',
         initiatorName
       });
+
+      if (shouldUseInitiationLock) {
+        initiationLockAcquired = await db.acquireTradeInitiationLock(message.message_id, channel, lockScope);
+        if (!initiationLockAcquired) {
+          logger.warn('Skipping trade initiation - message already claimed or processed', {
+            channel,
+            messageId: message.message_id,
+            initiatorName,
+            lockScope
+          });
+          return;
+        }
+      }
 
       // In simulation mode, set price provider time to message time
       if (isSimulation && priceProvider) {
@@ -420,6 +438,21 @@ export const processMessages = async (
         };
 
         const riskPercentage = channelRiskPercentage ?? initiatorConfig.riskPercentage;
+
+        if (shouldUseInitiationLock) {
+          const existingTrades = await db.getTradesByMessageId(message.message_id, channel);
+          if (existingTrades.length > 0) {
+            await db.markMessageParsed(message.id);
+            logger.warn('Skipping trade initiation - trades already exist for message', {
+              channel,
+              messageId: message.message_id,
+              initiatorName,
+              existingTradeCount: existingTrades.length,
+              existingTradeIds: existingTrades.map(t => t.id).slice(0, 20)
+            });
+            return;
+          }
+        }
         
         // Create context for the initiator
         // Note: currentBalance is not passed here - quantities will be calculated later
@@ -497,6 +530,10 @@ export const processMessages = async (
               reason: 'Permanent failure - will not succeed on retry'
             });
           } else {
+            if (initiationLockAcquired) {
+              await db.releaseTradeInitiationLock(message.message_id, channel, lockScope);
+              initiationLockAcquired = false;
+            }
             // Log retryable errors - don't mark as parsed, allow retry
             logger.warn('Trade initiation failed with retryable error, message will be retried', {
               channel,
@@ -523,6 +560,9 @@ export const processMessages = async (
         await db.markMessageParsed(message.id);
       }
     } catch (error) {
+      if (initiationLockAcquired) {
+        await db.releaseTradeInitiationLock(message.message_id, channel, lockScope);
+      }
       logger.error('Error processing message for initiation', {
         channel,
         messageId: message.message_id,

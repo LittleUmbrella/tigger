@@ -162,9 +162,9 @@ describe('Signal Initiator Integration Tests', () => {
     expect(mockDb.insertTrade).toHaveBeenCalledTimes(4);
   });
 
-  it('should handle initiator errors gracefully', async () => {
+  it('should handle retryable initiator errors gracefully', async () => {
     // Create a failing initiator
-    const failingInitiator = vi.fn().mockRejectedValue(new Error('Initiator failed'));
+    const failingInitiator = vi.fn().mockRejectedValue(new Error('network timeout'));
     registerInitiator('failing_initiator', failingInitiator);
 
     const initiatorConfig: InitiatorConfig = {
