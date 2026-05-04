@@ -10,6 +10,7 @@ import { ParserOptions } from './parserRegistry.js';
  *
  * Long: ID/USDT
  * Entry at CMP: 0.03155   (informative reference only — not used as limit price)
+ * Entry: 0.02 - 0.03 (CMP)   — range + (CMP) same as above; cmpRef is midpoint for recognition only
  * TP ➊: ...
  * SL: ...
  */
@@ -23,10 +24,23 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   if (quote === 'USD') quote = 'USDT';
   const tradingPair = `${base}${quote}`;
 
-  const cmpMatch =
-    content.match(/Entry\s+at\s+CMP\s*:\s*([\d.]+)/i) || content.match(/\bCMP\s*:\s*([\d.]+)/i);
-  if (!cmpMatch) return null;
-  const cmpRef = parseFloat(cmpMatch[1]);
+  const entryAtCmp = content.match(/Entry\s+at\s+CMP\s*:\s*([\d.]+)/i);
+  const cmpColon = content.match(/\bCMP\s*:\s*([\d.]+)/i);
+  const entryRangeCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
+
+  let cmpRef: number;
+  if (entryAtCmp) {
+    cmpRef = parseFloat(entryAtCmp[1]);
+  } else if (cmpColon) {
+    cmpRef = parseFloat(cmpColon[1]);
+  } else if (entryRangeCmp) {
+    const lo = parseFloat(entryRangeCmp[1]);
+    const hi = parseFloat(entryRangeCmp[2]);
+    cmpRef = (lo + hi) / 2;
+  } else {
+    return null;
+  }
+
   if (!Number.isFinite(cmpRef) || cmpRef <= 0) return null;
 
   const takeProfits: number[] = [];

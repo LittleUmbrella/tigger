@@ -36,6 +36,18 @@ SL: H4 candle close below 0.02975
     expect(order!.stopLoss).toBe(0.02975);
   });
 
+  it('parses Entry: low - high (CMP) as CMP-style; still no entryPrice (pseudo-market)', () => {
+    const content =
+      'Long: RESOLV/USDT (20x-50x Leverage) Entry: 0.02890 - 0.03004 (CMP) DCA: 0.02800 ------------- TP ➊: 0.03150 TP ➋: 0.03270 TP ➌: 0.03700 ------------- SL: H4 candle close below 0.02740';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('RESOLVUSDT');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.takeProfits).toEqual([0.0315, 0.0327, 0.037]);
+    expect(order!.stopLoss).toBe(0.0274);
+    expect(order!.leverage).toBe(20);
+  });
+
   it('parses short with numeric SL and TP1 numbering', () => {
     const content = `Short: BTC/USDT
 (5x Leverage)
