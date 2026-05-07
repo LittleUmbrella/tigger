@@ -69,9 +69,6 @@ export async function validateTradeAgainstPropFirms(
     settlementAccountName !== undefined && settlementAccountName !== ''
       ? await loadCompletedTradesForAccount(db, settlementAccountName)
       : await loadCompletedTradesForChannel(db, channel);
-  if (settlementAccountName && completedTrades.length === 0) {
-    completedTrades = await loadCompletedTradesForChannel(db, channel);
-  }
   const dailyPnLAll = buildDailyPnLMap(completedTrades);
 
   // Validate against each prop firm
