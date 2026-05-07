@@ -239,7 +239,7 @@
       }
     },
     {
-      "name": "ctrader_demo",
+      "name": "ctrader_demo_2",
       "exchange": "ctrader",
       "demo": false,
       "_comment": "cTrader demo account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials.",
@@ -263,7 +263,7 @@
       "name": "ctrader",
       "riskPercentage": 1,
       "baseLeverage": 20,
-      "accounts": ["ctrader_demo"]
+      "accounts": ["ctrader_demo_2"]
     }
   ],
   "monitors": [
