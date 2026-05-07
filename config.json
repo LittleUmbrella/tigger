@@ -249,6 +249,18 @@
         "accessToken": "CTRADER_ACCESS_TOKEN",
         "accountId": "CTRADER_ACCOUNT_ID"
       }
+    },
+    {
+      "name": "ctrader_demo_2_100",
+      "exchange": "ctrader",
+      "demo": false,
+      "_comment": "cTrader demo account (variant for CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_demo_2; only the accountId env var differs.",
+      "envVarNames": {
+        "apiKey": "CTRADER_CLIENT_ID",
+        "apiSecret": "CTRADER_CLIENT_SECRET",
+        "accessToken": "CTRADER_ACCESS_TOKEN",
+        "accountId": "CTRADER_ACCOUNT_ID_2_100"
+      }
     }
   ],
   "initiators": [
@@ -338,14 +350,20 @@
       "entryTimeoutMinutes": 3000,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules. accountFilters scopes the extra ctrader_demo_2_100 account to this channel only (won't apply to other channels sharing the ctrader initiator).",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02
       },
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
+      "useMarketRangeForEntry": true,
+      "accountFilters": [
+        {
+          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100"],
+          "rules": {}
+        }
+      ]
     },
     {
       "channel": "2120484771",
