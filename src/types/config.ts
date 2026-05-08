@@ -88,6 +88,12 @@ export interface AccountConfig {
     apiKey?: string;
     apiSecret?: string;
   };
+  /**
+   * Optional per-account prop firm rules. When set, overrides the channel-level `propFirms`
+   * for trades on this account. Use when accounts of different challenge sizes share a
+   * channel (e.g. one $5k and one $100k account on the same signal source).
+   */
+  propFirms?: (string | CustomPropFirmConfig)[];
 }
 
 export interface InitiatorConfig {

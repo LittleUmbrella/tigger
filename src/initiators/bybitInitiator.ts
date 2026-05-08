@@ -772,7 +772,10 @@ const executeTradeForAccount = async (
 
     const maxRiskEnabled =
       maxRisk !== undefined && maxRisk !== null && maxRisk >= 0;
-    const propFirmEnabled = !!(context.propFirms && context.propFirms.length > 0 && !isSimulation);
+    // Per-account propFirms (when present on AccountConfig) override the channel-level config.
+    // Necessary when accounts of different challenge sizes share a channel.
+    const effectivePropFirms = account?.propFirms ?? context.propFirms;
+    const propFirmEnabled = !!(effectivePropFirms && effectivePropFirms.length > 0 && !isSimulation);
 
     let openWorstCaseLoss = 0;
     const needsOpenExposureFetch =
@@ -839,7 +842,7 @@ const executeTradeForAccount = async (
       const validationResults = await validateTradeAgainstPropFirms(
         db,
         channel,
-        context.propFirms!,
+        effectivePropFirms!,
         roundedEntryPrice,
         roundedStopLoss || 0,
         qty,
