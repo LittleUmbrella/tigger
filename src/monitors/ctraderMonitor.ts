@@ -227,6 +227,15 @@ const checkAndApplyBreakeven = async (
   dynamicBreakevenAfterTPs: boolean
 ): Promise<void> => {
   if (trade.stop_loss_breakeven) return;
+  if (!ctraderClient || !trade.position_id) {
+    logger.debug('Skipping cTrader breakeven — need client and position_id', {
+      tradeId: trade.id,
+      hasClient: !!ctraderClient,
+      hasPositionId: !!trade.position_id,
+      exchange: 'ctrader'
+    });
+    return;
+  }
 
   const allSiblings = await db.getTradesByMessageId(trade.message_id, trade.channel);
   const relevantSiblings = allSiblings.filter(
@@ -251,7 +260,7 @@ const checkAndApplyBreakeven = async (
   try {
     const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
     const symbol = normalizeCTraderSymbol(trade.trading_pair);
-    const symbolInfo = ctraderClient ? await ctraderClient.getSymbolInfo(symbol) : undefined;
+    const symbolInfo = await ctraderClient.getSymbolInfo(symbol);
 
     const rawDigits = symbolInfo?.digits;
     const digits = typeof rawDigits === 'number' ? rawDigits : (typeof rawDigits === 'object' && rawDigits?.low != null ? rawDigits.low : 2);
@@ -274,21 +283,19 @@ const checkAndApplyBreakeven = async (
     const rawSlPrice = isLong ? bePrice - minNudge : bePrice + minNudge;
     const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
 
-    if (ctraderClient && trade.position_id) {
-      let knownTakeProfit: number | undefined;
-      try {
-        const tps: number[] = JSON.parse(trade.take_profits || '[]');
-        const last = tps[tps.length - 1];
-        if (isFinite(last) && last > 0) knownTakeProfit = last;
-      } catch { /* ignore parse errors */ }
+    let knownTakeProfit: number | undefined;
+    try {
+      const tps: number[] = JSON.parse(trade.take_profits || '[]');
+      const last = tps[tps.length - 1];
+      if (isFinite(last) && last > 0) knownTakeProfit = last;
+    } catch { /* ignore parse errors */ }
 
-      await ctraderClient.modifyPosition({
-        positionId: trade.position_id,
-        stopLoss: slPrice,
-        knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
-        knownTakeProfit
-      });
-    }
+    await ctraderClient.modifyPosition({
+      positionId: trade.position_id,
+      stopLoss: slPrice,
+      knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
+      knownTakeProfit
+    });
 
     await db.updateTrade(trade.id, {
       stop_loss: slPrice,
@@ -318,6 +325,208 @@ const checkAndApplyBreakeven = async (
       exchange: 'ctrader',
       error: serializeErrorForLog(beError)
     });
+  }
+};
+
+type SweepPosCand = {
+  positionId: string;
+  avgPrice: number;
+  volLots: number;
+  isLong: boolean;
+  openMs: number;
+};
+
+const ctraderPositionVolumeApi = (p: any): number => {
+  const v = p.volume ?? p.quantity ?? 0;
+  if (typeof v === 'object' && v != null && 'low' in v) return Math.abs(protobufLongToNumber(v) ?? 0);
+  return Math.abs(Number(v) || 0);
+};
+
+const sweepScoreMatch = (trade: Trade, c: SweepPosCand): number => {
+  const wantLong = getIsLong(trade);
+  if (wantLong !== c.isLong) return -1;
+  let s = 0;
+  const entry = trade.entry_price;
+  if (entry > 0 && c.avgPrice > 0) {
+    const rel = Math.abs(entry - c.avgPrice) / entry;
+    if (rel < 0.0015) s += 2;
+    else if (rel < 0.005) s += 1.5;
+    else if (rel < 0.02) s += 1;
+    else if (rel < 0.05) s += 0.5;
+  }
+  const q = trade.quantity ?? 0;
+  if (q > 0 && c.volLots > 0) {
+    const rq = Math.abs(q - c.volLots) / q;
+    if (rq < 0.12) s += 2;
+    else if (rq < 0.25) s += 1;
+    else if (rq < 0.4) s += 0.5;
+  }
+  const filledMs = trade.entry_filled_at
+    ? new Date(trade.entry_filled_at).getTime()
+    : new Date(trade.created_at).getTime();
+  if (c.openMs > 0 && filledMs > 0) {
+    const dt = Math.abs(filledMs - c.openMs);
+    if (dt < 120_000) s += 2;
+    else if (dt < 600_000) s += 1;
+    else if (dt < 3_600_000) s += 0.5;
+  }
+  return s;
+};
+
+const MIN_CTRADER_SWEEP_SCORE = 4;
+
+/**
+ * When breakeven is due but sibling legs share a wrong position_id, duplicate order_id resolution
+ * missed a distinct exchange position, or position_id is null — match open positions to trades
+ * by side, quantity, entry, and open time; then persist position_id for the normal BE pass.
+ */
+const sweepCtraderPositionsForBreakeven = async (
+  db: DatabaseManager,
+  channel: string,
+  getCTraderClient: ((accountName?: string) => Promise<CTraderClient | undefined>) | undefined,
+  defaultClient: CTraderClient | undefined,
+  breakevenAfterTPs: number,
+  dynamicBreakevenAfterTPs: boolean
+): Promise<void> => {
+  const allActive = (await db.getActiveTrades()).filter(
+    (t) => t.channel === channel && t.exchange === 'ctrader'
+  );
+  const byKey = new Map<string, Trade[]>();
+  for (const t of allActive) {
+    const sym = normalizeCTraderSymbol(t.trading_pair);
+    const k = `${t.message_id}\0${t.account_name ?? ''}\0${sym}`;
+    if (!byKey.has(k)) byKey.set(k, []);
+    byKey.get(k)!.push(t);
+  }
+
+  for (const [, group] of byKey) {
+    const needBe = group.filter((t) => !t.stop_loss_breakeven);
+    if (needBe.length === 0) continue;
+    if (group.length < 2 && !group.some((t) => !t.position_id)) continue;
+
+    const rep = needBe[0];
+    const client = getCTraderClient ? await getCTraderClient(rep.account_name) : defaultClient;
+    if (!client) continue;
+
+    const allSiblings = await db.getTradesByMessageId(rep.message_id, channel);
+    const totalTpLevels = allSiblings
+      .filter((t) => t.exchange === 'ctrader' && t.account_name === rep.account_name)
+      .reduce((sum, t) => sum + Math.max(getTakeProfitLevelCount(t), 1), 0);
+    const effectiveBreakevenAfterTPs = resolveBreakevenAfterTPs(totalTpLevels, {
+      breakevenAfterTPs,
+      dynamicBreakevenAfterTPs
+    });
+    const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(
+      allSiblings,
+      rep.id,
+      rep.account_name,
+      client
+    );
+    if (siblingsHitTp < effectiveBreakevenAfterTPs) continue;
+
+    const pidsAmongNeed = needBe.map((t) => t.position_id).filter(Boolean) as string[];
+    const distinct = new Set(pidsAmongNeed);
+    const hasNull = needBe.some((t) => !t.position_id);
+    const duplicateAssigned = pidsAmongNeed.length > distinct.size;
+    if (!hasNull && !duplicateAssigned && distinct.size === needBe.length) continue;
+
+    const sym = normalizeCTraderSymbol(rep.trading_pair);
+    const claimedOutside = new Set<string>();
+    for (const t of allActive) {
+      if (!t.position_id) continue;
+      if (String(t.message_id) === String(rep.message_id) && (t.account_name ?? '') === (rep.account_name ?? '')) {
+        continue;
+      }
+      if (normalizeCTraderSymbol(t.trading_pair) !== sym) continue;
+      claimedOutside.add(String(t.position_id));
+    }
+
+    let symbolInfo: any;
+    try {
+      symbolInfo = await client.getSymbolInfo(sym);
+    } catch (error) {
+      logger.debug('cTrader BE sweep: symbol info failed', {
+        symbol: sym,
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+      continue;
+    }
+    const lotSize =
+      typeof symbolInfo?.lotSize === 'object' && symbolInfo?.lotSize?.low != null
+        ? symbolInfo.lotSize.low
+        : symbolInfo?.lotSize ?? 100;
+    const lotDiv = lotSize > 0 ? lotSize : 100;
+
+    let positions: any[];
+    try {
+      positions = await client.getOpenPositions();
+    } catch (error) {
+      logger.debug('cTrader BE sweep: getOpenPositions failed', {
+        error: serializeErrorForLog(error),
+        exchange: 'ctrader'
+      });
+      continue;
+    }
+
+    const candidates: SweepPosCand[] = [];
+    for (const p of positions) {
+      const pSym = (p.symbolName || p.symbol || '').toString();
+      if (pSym !== sym) continue;
+      const volApi = ctraderPositionVolumeApi(p);
+      if (volApi <= 0) continue;
+      const positionId = String(p.positionId ?? p.id);
+      if (claimedOutside.has(positionId)) continue;
+      const avg = parseFloat(String(p.avgPrice || p.averagePrice || p.price || '0'));
+      const tradeSide = p.tradeSide || p.side || '';
+      const isLong = tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long';
+      const openTs = p.tradeData?.openTimestamp ?? p.openTimestamp;
+      const openMs = protobufLongToNumber(openTs) ?? 0;
+      candidates.push({
+        positionId,
+        avgPrice: avg,
+        volLots: volApi / lotDiv,
+        isLong,
+        openMs
+      });
+    }
+    if (candidates.length === 0) continue;
+
+    const usedPos = new Set<string>();
+    const tradesToAssign = [...needBe].sort((a, b) => a.id - b.id);
+    while (tradesToAssign.length > 0) {
+      let bestT: Trade | null = null;
+      let bestPid: string | null = null;
+      let bestSc = -1;
+      for (const t of tradesToAssign) {
+        for (const c of candidates) {
+          if (usedPos.has(c.positionId)) continue;
+          const sc = sweepScoreMatch(t, c);
+          if (sc < MIN_CTRADER_SWEEP_SCORE) continue;
+          if (sc > bestSc) {
+            bestSc = sc;
+            bestT = t;
+            bestPid = c.positionId;
+          }
+        }
+      }
+      if (!bestT || !bestPid || bestSc < 0) break;
+      usedPos.add(bestPid);
+      const idx = tradesToAssign.indexOf(bestT);
+      if (idx >= 0) tradesToAssign.splice(idx, 1);
+      if (bestT.position_id !== bestPid) {
+        await db.updateTrade(bestT.id, { position_id: bestPid });
+        bestT.position_id = bestPid;
+        logger.info('cTrader pre-BE sweep relinked position_id from open positions', {
+          tradeId: bestT.id,
+          positionId: bestPid,
+          score: bestSc,
+          messageId: bestT.message_id,
+          channel,
+          exchange: 'ctrader'
+        });
+      }
+    }
   }
 };
 
@@ -375,19 +584,49 @@ const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: 
   ]);
 };
 
+const isCtraderOpeningFilledDeal = (d: any): boolean => {
+  const status = d.dealStatus ?? d.deal_status;
+  if (status !== 2 && status !== 'FILLED') return false;
+  const detail = d.closePositionDetail ?? d.close_position_detail;
+  return detail == null;
+};
+
 /**
- * Resolve positionId from orderId for trades that have order_id but no position_id.
- * One ProtoOADealListReq per account (paginated internally), then ProtoOAOrderDetailsReq for misses.
+ * Keys for (channel, message_id, account, symbol) groups that have >1 pending cTrader leg.
+ * Used to disable dangerous "first open position for symbol" matching for N-trades / netting.
+ */
+const buildPendingMultiLegKeySet = (trades: Trade[]): Set<string> => {
+  const counts = new Map<string, number>();
+  for (const t of trades) {
+    if (t.exchange !== 'ctrader' || t.status !== 'pending') continue;
+    const sym = normalizeCTraderSymbol(t.trading_pair);
+    const k = `${t.channel}\0${t.message_id}\0${t.account_name ?? ''}\0${sym}`;
+    counts.set(k, (counts.get(k) ?? 0) + 1);
+  }
+  const out = new Set<string>();
+  for (const [k, c] of counts) {
+    if (c > 1) out.add(k);
+  }
+  return out;
+};
+
+const pendingMultiLegKeyForTrade = (trade: Trade): string =>
+  `${trade.channel}\0${trade.message_id}\0${trade.account_name ?? ''}\0${normalizeCTraderSymbol(trade.trading_pair)}`;
+
+/**
+ * Resolve positionId per trade for rows with order_id but no position_id.
+ * One ProtoOADealListReq per account, then order details for misses.
+ * Supports duplicate entry orderIds (cTrader netting): multiple opening deals → multiple positionIds in order.
  */
 const resolvePositionIdsBatch = async (
   trades: Trade[],
   getCTraderClient: ((accountName?: string) => Promise<CTraderClient | undefined>) | undefined,
   ctraderClient: CTraderClient | undefined
-): Promise<Map<string, string>> => {
+): Promise<Map<number, string>> => {
   const needsResolution = trades.filter((t) => t.order_id && !t.position_id);
   if (needsResolution.length === 0) return new Map();
 
-  const result = new Map<string, string>();
+  const result = new Map<number, string>();
   const byAccount = new Map<string, Trade[]>();
   for (const t of needsResolution) {
     const key = t.account_name ?? '';
@@ -412,24 +651,55 @@ const resolvePositionIdsBatch = async (
       });
     }
 
-    const positionByOrderId = new Map<string, string>();
+    const positionIdsByOrderId = new Map<string, string[]>();
     for (const d of dealsSnapshot) {
-      const oid = d.orderId != null ? String(d.orderId) : '';
-      const pid = d.positionId != null ? String(d.positionId) : '';
-      if (oid && pid && !positionByOrderId.has(oid)) positionByOrderId.set(oid, pid);
+      if (!isCtraderOpeningFilledDeal(d)) continue;
+      const rawOid = d.orderId ?? d.order_id;
+      const oid =
+        rawOid != null
+          ? String(typeof rawOid === 'object' && rawOid?.low != null ? protobufLongToNumber(rawOid) : rawOid)
+          : '';
+      const rawPid = d.positionId ?? d.position_id;
+      const pid =
+        rawPid != null
+          ? String(typeof rawPid === 'object' && rawPid?.low != null ? protobufLongToNumber(rawPid) : rawPid)
+          : '';
+      if (!oid || !pid) continue;
+      let arr = positionIdsByOrderId.get(oid);
+      if (!arr) {
+        arr = [];
+        positionIdsByOrderId.set(oid, arr);
+      }
+      if (!arr.includes(pid)) arr.push(pid);
     }
+
+    const consumeByOrderScope = new Map<string, number>();
+    const orderScopeKey = (t: Trade, orderIdStr: string) =>
+      `${t.channel}\0${t.message_id}\0${orderIdStr}`;
+
+    accountTrades.sort((a, b) => {
+      if (a.channel !== b.channel) return a.channel.localeCompare(b.channel);
+      if (String(a.message_id) !== String(b.message_id))
+        return String(a.message_id).localeCompare(String(b.message_id));
+      return a.id - b.id;
+    });
 
     for (const t of accountTrades) {
       if (!t.order_id) continue;
       const orderIdStr = String(t.order_id);
       try {
-        const fromDeals = positionByOrderId.get(orderIdStr);
-        if (fromDeals) {
-          result.set(orderIdStr, fromDeals);
-          logger.debug('Resolved position from batch deal list', {
+        const list = positionIdsByOrderId.get(orderIdStr);
+        const scopeKey = orderScopeKey(t, orderIdStr);
+        const idx = consumeByOrderScope.get(scopeKey) ?? 0;
+        if (list && idx < list.length) {
+          const pid = list[idx]!;
+          consumeByOrderScope.set(scopeKey, idx + 1);
+          result.set(t.id, pid);
+          logger.debug('Resolved position from batch deal list (per-trade, netting-aware)', {
             tradeId: t.id,
             orderId: orderIdStr,
-            positionId: fromDeals,
+            positionId: pid,
+            dealListIndex: idx,
             exchange: 'ctrader'
           });
           continue;
@@ -438,7 +708,7 @@ const resolvePositionIdsBatch = async (
           allowDealListFallback: false
         });
         if (posId) {
-          result.set(orderIdStr, posId);
+          result.set(t.id, posId);
           logger.debug('Resolved position from order details', {
             tradeId: t.id,
             orderId: orderIdStr,
@@ -452,7 +722,7 @@ const resolvePositionIdsBatch = async (
             allowDealListFallback: true
           });
           if (posIdDeal) {
-            result.set(orderIdStr, posIdDeal);
+            result.set(t.id, posIdDeal);
             logger.debug('Resolved position after empty batch deal list', {
               tradeId: t.id,
               orderId: orderIdStr,
@@ -736,7 +1006,8 @@ const checkEntryFilled = async (
   isSimulation: boolean,
   priceProvider?: HistoricalPriceProvider,
   preFetched?: { positions: any[]; orders: any[] },
-  preResolvedPositionIds?: Map<string, string>
+  preResolvedPositionByTradeId?: Map<number, string>,
+  pendingMultiLegKeys?: Set<string>
 ): Promise<{
   filled: boolean;
   positionId?: string;
@@ -815,26 +1086,31 @@ const checkEntryFilled = async (
         }
       }
       
-      // Order-based position resolution: use pre-resolved map to find the exact position for this order.
-      // Prevents incorrect symbol-only matching when multiple orders exist for the same symbol (N-trades).
-      const resolvedPosId = trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined;
+      // Order-based position resolution: use pre-resolved map (trade id → position id) so duplicate
+      // entry orderIds (cTrader netting) still map to distinct positions per leg.
+      const resolvedPosId = preResolvedPositionByTradeId?.get(trade.id);
+      const blockSymbolOnlyMatch =
+        pendingMultiLegKeys?.has(pendingMultiLegKeyForTrade(trade)) === true;
       const position = resolvedPosId
         ? positions.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
-        : positions.find((p: any) => {
-            const positionSymbol = p.symbolName || p.symbol;
-            const volume = Math.abs(p.volume || p.quantity || 0);
-            const matches = positionSymbol === symbol && volume > 0;
-        
-            logger.debug('Checking position match', {
-              tradeId: trade.id,
-              positionSymbol,
-              expectedSymbol: symbol,
-              volume,
-              matches
-            });
-        
-            return matches;
-          });
+        : !blockSymbolOnlyMatch
+          ? positions.find((p: any) => {
+              const positionSymbol = p.symbolName || p.symbol;
+              const volume = Math.abs(p.volume || p.quantity || 0);
+              const matches = positionSymbol === symbol && volume > 0;
+
+              logger.debug('Checking position match', {
+                tradeId: trade.id,
+                positionSymbol,
+                expectedSymbol: symbol,
+                volume,
+                matches,
+                exchange: 'ctrader'
+              });
+
+              return matches;
+            })
+          : undefined;
       
       if (position) {
         const positionId = position.positionId || position.id;
@@ -915,11 +1191,13 @@ const checkEntryFilled = async (
                 );
             const positionAgain = resolvedPosId
               ? positionsAgain.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
-              : positionsAgain.find((p: any) => {
-                  const positionSymbol = p.symbolName || p.symbol;
-                  const volume = Math.abs(p.volume || p.quantity || 0);
-                  return positionSymbol === symbol && volume > 0;
-                });
+              : !blockSymbolOnlyMatch
+                ? positionsAgain.find((p: any) => {
+                    const positionSymbol = p.symbolName || p.symbol;
+                    const volume = Math.abs(p.volume || p.quantity || 0);
+                    return positionSymbol === symbol && volume > 0;
+                  })
+                : undefined;
             
             if (positionAgain) {
               const posId = positionAgain.positionId || positionAgain.id;
@@ -1140,7 +1418,9 @@ export const previewCtraderPendingTradeBotOutcome = async (
     ctraderClient,
     false,
     undefined,
-    options?.preFetched
+    options?.preFetched,
+    undefined,
+    undefined
   );
   const entryFillCheck = {
     filled: entry.filled,
@@ -1729,7 +2009,8 @@ const promotePendingIfOpenPositionVisible = async (
   db: DatabaseManager,
   ctraderClient: CTraderClient,
   cachedPositions: any[] | undefined,
-  preResolvedPositionIds?: Map<string, string>
+  preResolvedPositionByTradeId?: Map<number, string>,
+  pendingMultiLegKeys?: Set<string>
 ): Promise<void> => {
   if (trade.status !== 'pending') return;
   let positions: any[] | undefined = cachedPositions;
@@ -1750,14 +2031,18 @@ const promotePendingIfOpenPositionVisible = async (
     }
   }
   const symbol = normalizeCTraderSymbol(trade.trading_pair);
-  const resolvedPosId = trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined;
+  const resolvedPosId = preResolvedPositionByTradeId?.get(trade.id);
+  const blockSymbolOnlyMatch =
+    pendingMultiLegKeys?.has(pendingMultiLegKeyForTrade(trade)) === true;
   const position = resolvedPosId
     ? positions.find((p: any) => (p.positionId || p.id)?.toString() === resolvedPosId)
-    : positions.find((p: any) => {
-        const positionSymbol = p.symbolName || p.symbol;
-        const volume = Math.abs(p.volume || p.quantity || 0);
-        return positionSymbol === symbol && volume > 0;
-      });
+    : !blockSymbolOnlyMatch
+      ? positions.find((p: any) => {
+          const positionSymbol = p.symbolName || p.symbol;
+          const volume = Math.abs(p.volume || p.quantity || 0);
+          return positionSymbol === symbol && volume > 0;
+        })
+      : undefined;
   if (!position) return;
 
   const positionId = position.positionId || position.id;
@@ -2039,7 +2324,8 @@ const monitorTrade = async (
   ctraderClient: CTraderClient | undefined,
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
-  preResolvedPositionIds?: Map<string, string>
+  preResolvedPositionByTradeId?: Map<number, string>,
+  pendingMultiLegKeys?: Set<string>
 ): Promise<void> => {
   const timings: Record<string, number> = {};
   let t0 = Date.now();
@@ -2087,7 +2373,7 @@ const monitorTrade = async (
           isSimulation,
           priceProvider,
           cachedPositions,
-          trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
+          preResolvedPositionByTradeId?.get(trade.id)
         );
         timings.checkPositionClosedEarly = Date.now() - t0;
         if (positionResultEarly.closed) {
@@ -2106,7 +2392,14 @@ const monitorTrade = async (
 
       if (trade.status === 'pending' && !isSimulation && ctraderClient) {
         t0 = Date.now();
-        await promotePendingIfOpenPositionVisible(trade, db, ctraderClient, cachedPositions, preResolvedPositionIds);
+        await promotePendingIfOpenPositionVisible(
+          trade,
+          db,
+          ctraderClient,
+          cachedPositions,
+          preResolvedPositionByTradeId,
+          pendingMultiLegKeys
+        );
         timings.pendingPositionCheck = Date.now() - t0;
       }
     }
@@ -2172,7 +2465,8 @@ const monitorTrade = async (
               isSimulation,
               priceProvider,
               cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined,
-              preResolvedPositionIds
+              preResolvedPositionByTradeId,
+              pendingMultiLegKeys
             );
             timings.checkEntryFilledFast = Date.now() - t0;
             pendingEntryFillAttempted = true;
@@ -2212,7 +2506,8 @@ const monitorTrade = async (
         isSimulation,
         priceProvider,
         cachedPositions && cachedOrders ? { positions: cachedPositions, orders: cachedOrders } : undefined,
-        preResolvedPositionIds
+        preResolvedPositionByTradeId,
+        pendingMultiLegKeys
       );
       timings.checkEntryFilled = Date.now() - t0;
       logger.debug('cTrader entry fill check result', {
@@ -2346,7 +2641,7 @@ const monitorTrade = async (
         isSimulation,
         priceProvider,
         cachedPositions,
-        trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
+        preResolvedPositionByTradeId?.get(trade.id)
       );
       timings.checkPositionClosed = Date.now() - t0;
       if (positionResult.closed) {
@@ -2387,7 +2682,7 @@ const monitorTrade = async (
           isSimulation,
           priceProvider,
           cachedPositions,
-          trade.order_id ? preResolvedPositionIds?.get(trade.order_id) : undefined
+          preResolvedPositionByTradeId?.get(trade.id)
         );
         if (stopLossResult.closed) {
           await applyCtraderReconciledClose(trade, db, stopLossResult.exitPrice, stopLossResult.pnl, ctraderClient);
@@ -2491,11 +2786,13 @@ export const startCTraderMonitor = async (
       try {
         const trades = (await db.getActiveTrades()).filter(t => t.channel === channel && t.exchange === 'ctrader');
 
+        const pendingMultiLegKeys = !isSimulation ? buildPendingMultiLegKeySet(trades) : new Set<string>();
+
         // Batch-resolve positionIds for trades with order_id but no position_id - one getDealList per account
         // instead of per-trade, to stay under cTrader historical rate limit (5 req/sec)
-        const preResolvedPositionIds = !isSimulation
+        const preResolvedPositionByTradeId = !isSimulation
           ? await resolvePositionIdsBatch(trades, getCTraderClient, ctraderClient)
-          : new Map<string, string>();
+          : new Map<number, string>();
 
         // Process trades with limited concurrency - avoids bursting cTrader historical API (5 req/sec limit)
         const tradeTasks = trades.map((trade) =>
@@ -2520,7 +2817,8 @@ export const startCTraderMonitor = async (
                 accountCTraderClient,
                 isSimulation,
                 priceProvider,
-                preResolvedPositionIds
+                preResolvedPositionByTradeId,
+                pendingMultiLegKeys
               ),
               new Promise<void>((_, reject) =>
                 setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)
@@ -2540,6 +2838,25 @@ export const startCTraderMonitor = async (
               channel,
               exchange: 'ctrader',
               error: serializeErrorForLog(result.reason)
+            });
+          }
+        }
+
+        if (!isSimulation) {
+          try {
+            await sweepCtraderPositionsForBreakeven(
+              db,
+              channel,
+              getCTraderClient,
+              ctraderClient,
+              breakevenAfterTPs,
+              dynamicBreakevenAfterTPs
+            );
+          } catch (err) {
+            logger.warn('cTrader pre-BE position sweep failed', {
+              channel,
+              exchange: 'ctrader',
+              error: serializeErrorForLog(err)
             });
           }
         }

@@ -9,6 +9,7 @@
 import { Trade, DatabaseManager } from '../db/schema.js';
 import { getBybitField } from './bybitFieldHelper.js';
 import { normalizeCTraderSymbol } from './ctraderSymbolUtils.js';
+import { protobufLongToNumber } from './protobufLong.js';
 import { logger } from './logger.js';
 import { serializeErrorForLog } from './errorUtils.js';
 import { withBybitRateLimitRetry } from './bybitRateLimitRetry.js';
@@ -83,11 +84,30 @@ export async function getEntryFillPrice(
     try {
       const symbol = normalizeCTraderSymbol(trade.trading_pair);
       const positions = await options.ctraderClient.getOpenPositions();
-      const position = positions.find((p: any) => {
-        const positionSymbol = p.symbolName || p.symbol;
-        const volume = Math.abs(p.volume || p.quantity || 0);
-        return positionSymbol === symbol && volume > 0;
-      });
+      let position: any;
+      if (trade.position_id) {
+        const want = String(trade.position_id);
+        position = positions.find((p: any) => {
+          const raw = p.positionId ?? p.id;
+          const pid =
+            typeof raw === 'object' && raw != null && 'low' in raw
+              ? String(protobufLongToNumber(raw) ?? raw.low)
+              : String(raw ?? '');
+          return pid === want;
+        });
+      }
+      if (!position) {
+        position = positions.find((p: any) => {
+          const positionSymbol = p.symbolName || p.symbol;
+          const volRaw = p.volume ?? p.quantity ?? 0;
+          const volume = Math.abs(
+            typeof volRaw === 'object' && volRaw != null && 'low' in volRaw
+              ? protobufLongToNumber(volRaw) ?? 0
+              : Number(volRaw) || 0
+          );
+          return positionSymbol === symbol && volume > 0;
+        });
+      }
       if (position) {
         const avgPrice = parseFloat(
           position.avgPrice || position.averagePrice || position.price || '0'

@@ -1585,13 +1585,15 @@ export class CTraderClient {
         });
       }
 
-      if (!resolvedFromExchange) {
-        if (effectiveStopLoss === undefined && params.knownStopLoss != null && isFinite(params.knownStopLoss) && params.knownStopLoss > 0) {
-          effectiveStopLoss = params.knownStopLoss;
-        }
-        if (effectiveTakeProfit === undefined && params.knownTakeProfit != null && isFinite(params.knownTakeProfit) && params.knownTakeProfit > 0) {
-          effectiveTakeProfit = params.knownTakeProfit;
-        }
+      // Fill any field the exchange did not return. Important: we often use separate limit
+      // orders for non-best TPs, so position.takeProfit can be empty even when reconcile
+      // finds the position — previously we only used known* when reconcile missed entirely,
+      // which caused silent no-ops for SL-only amends (breakeven / management).
+      if (effectiveTakeProfit === undefined && params.knownTakeProfit != null && isFinite(params.knownTakeProfit) && params.knownTakeProfit > 0) {
+        effectiveTakeProfit = params.knownTakeProfit;
+      }
+      if (effectiveStopLoss === undefined && params.knownStopLoss != null && isFinite(params.knownStopLoss) && params.knownStopLoss > 0) {
+        effectiveStopLoss = params.knownStopLoss;
       }
 
       logger.debug('Resolved SL/TP for position amend', {
@@ -1600,11 +1602,12 @@ export class CTraderClient {
         requestedTp: params.takeProfit,
         effectiveStopLoss,
         effectiveTakeProfit,
-        source: resolvedFromExchange ? 'exchange' : 'db-fallback'
+        source: resolvedFromExchange ? 'exchange+fill' : 'db-fallback'
       });
 
       if (effectiveStopLoss === undefined || effectiveTakeProfit === undefined) {
-        logger.warn('Aborting position modify — cannot resolve both SL and TP; would wipe the missing field', {
+        const msg = `Cannot amend cTrader position ${params.positionId} SL/TP: would omit ${effectiveStopLoss === undefined ? 'stopLoss ' : ''}${effectiveTakeProfit === undefined ? 'takeProfit' : ''}(known SL/TP unavailable)`;
+        logger.warn(msg, {
           positionId: params.positionId,
           accountId: this.config.accountId,
           exchange: 'ctrader',
@@ -1615,7 +1618,7 @@ export class CTraderClient {
           knownSl: params.knownStopLoss,
           knownTp: params.knownTakeProfit
         });
-        return;
+        throw new Error(msg);
       }
     }
 
