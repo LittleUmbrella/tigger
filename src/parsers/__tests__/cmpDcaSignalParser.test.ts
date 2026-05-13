@@ -48,6 +48,19 @@ SL: H4 candle close below 0.02975
     expect(order!.leverage).toBe(20);
   });
 
+  it('parses Entry: low - high CMP without parens; Lev abbreviation; textual SL above (short)', () => {
+    const content =
+      'Short: ONDO/USDT (20x-50x Lev) Entry: 0.4085 - 0.3985 CMP DCA: 0.4285 ------------- TP ➊: 0.3785 TP ➋: 0.3540 TP ➌: 0.3245 ------------- SL: H4 candle close above 0.4410 ------------- 1% risk at CMP & 2% at DCA';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('ONDOUSDT');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.takeProfits).toEqual([0.3785, 0.354, 0.3245]);
+    expect(order!.stopLoss).toBe(0.441);
+    expect(order!.leverage).toBe(20);
+  });
+
   it('parses short with numeric SL and TP1 numbering', () => {
     const content = `Short: BTC/USDT
 (5x Leverage)

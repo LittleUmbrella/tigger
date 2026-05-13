@@ -11,6 +11,7 @@ import { ParserOptions } from './parserRegistry.js';
  * Long: ID/USDT
  * Entry at CMP: 0.03155   (informative reference only — not used as limit price)
  * Entry: 0.02 - 0.03 (CMP)   — range + (CMP) same as above; cmpRef is midpoint for recognition only
+ * Entry: 0.02 - 0.03 CMP DCA: …   — bare CMP before DCA (same midpoint rule)
  * TP ➊: ...
  * SL: ...
  */
@@ -27,6 +28,7 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   const entryAtCmp = content.match(/Entry\s+at\s+CMP\s*:\s*([\d.]+)/i);
   const cmpColon = content.match(/\bCMP\s*:\s*([\d.]+)/i);
   const entryRangeCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
+  const entryRangeBareCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s+CMP\b/i);
 
   let cmpRef: number;
   if (entryAtCmp) {
@@ -36,6 +38,10 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   } else if (entryRangeCmp) {
     const lo = parseFloat(entryRangeCmp[1]);
     const hi = parseFloat(entryRangeCmp[2]);
+    cmpRef = (lo + hi) / 2;
+  } else if (entryRangeBareCmp) {
+    const lo = parseFloat(entryRangeBareCmp[1]);
+    const hi = parseFloat(entryRangeBareCmp[2]);
     cmpRef = (lo + hi) / 2;
   } else {
     return null;
@@ -64,8 +70,10 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   if (takeProfits.length === 0) return null;
 
   let leverage = 20;
-  const levRange = content.match(/\(\s*(\d+)\s*[x×]\s*-\s*(\d+)\s*[x×]\s*[Ll]everage\s*\)/);
-  const levSingle = content.match(/\b(\d+)\s*[x×]\s*[Ll]everage\b/i);
+  const levRange = content.match(
+    /\(\s*(\d+)\s*[x×]\s*-\s*(\d+)\s*[x×]\s*(?:[Ll]everage|[Ll]ev)\s*\)/i
+  );
+  const levSingle = content.match(/\b(\d+)\s*[x×]\s*(?:[Ll]everage|[Ll]ev)\b/i);
   if (levRange) {
     const lo = parseInt(levRange[1], 10);
     const hi = parseInt(levRange[2], 10);
