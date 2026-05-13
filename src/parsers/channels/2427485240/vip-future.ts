@@ -84,8 +84,10 @@ export const vipCryptoSignals = (content: string, options?: ParserOptions): Pars
     takeProfitMatch = content.match(/Targets?:?\s*[:\-]?\s*([\d.\s\-+]+?)(?:\s*\+?\s*🚀|👩‍🚀|$)/i);
   }
   if (!takeProfitMatch) {
-    // Pattern 3: "TP: 0.3250 - 0.3400" or "Target: 0.3250 - 0.3400" or "TARGET- 2.23-2.30" or "Targets : 0.50-0.55" or "💸TP :- 1.26$ - 1.274$"
-    takeProfitMatch = content.match(/(?:TP|Target|TARGET|Targets|💸TP)[:\s=-]+([\d.\s\-+$]+)/i);
+    // Pattern 3: "TP: ..." / "Target: ..." / "EXIT: 0.21 , 0.22 , ..." (comma-separated) / "💸TP :- 1.26$ - 1.274$"
+    takeProfitMatch = content.match(
+      /(?:TP|Target|TARGET|Targets|💸TP|EXIT|Exits)[:\s=-]+([\d.,\s\-+$]+)/i
+    );
   }
   if (!takeProfitMatch) {
     // Pattern 4: "🎯 5.135 2) 🎯 5.25" format
