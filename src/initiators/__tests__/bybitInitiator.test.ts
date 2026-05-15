@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { bybitInitiator } from '../bybitInitiator.js';
 import { InitiatorContext } from '../initiatorRegistry.js';
 import { DatabaseManager } from '../../db/schema.js';
-import { mockMessage, mockParsedOrder, mockBybitResponses } from './fixtures.js';
+import { mockMessage, mockParsedOrder, mockShortParsedOrder } from './fixtures.js';
 import { createMockDatabase, createMockPriceProvider, createMockBybitClient } from './mocks.js';
 import { HistoricalPriceProvider } from '../../utils/historicalPriceProvider.js';
 // Mock the bybit-api module
@@ -81,13 +81,7 @@ describe('Bybit Initiator', () => {
   });
 
   it('should handle short signals correctly', async () => {
-    const shortOrder = {
-      ...mockParsedOrder,
-      signalType: 'short' as const,
-      tradingPair: 'ETH/USDT',
-      entryPrice: 3000,
-      stopLoss: 3100,
-    };
+    const shortOrder = mockShortParsedOrder;
 
     const context: InitiatorContext = {
       channel: 'test_channel',
