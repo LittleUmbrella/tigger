@@ -19,18 +19,36 @@ describe('applyTradeObfuscation', () => {
     expect(result).toEqual(baseOrder);
   });
 
-  it('applies sl obfuscation when sl config present', () => {
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(1);
+  it('applies sl obfuscation toward worse price for long trades', () => {
     const config: TradeObfuscationConfig = {
-      sl: { minPercent: 0, maxPercent: 1 },
+      sl: 1,
     };
     const result = applyTradeObfuscation(baseOrder, config);
-    expect(result.stopLoss).toBe(49490); // 49000 * 1.01
+    expect(result.stopLoss).toBe(48510); // 49000 * (1 - 0.01)
     expect(result.entryPrice).toBe(baseOrder.entryPrice);
     expect(result.takeProfits).toEqual(baseOrder.takeProfits);
-    randomSpy.mockRestore();
   });
 
+  it('applies sl obfuscation toward worse price for short trades', () => {
+    const shortOrder: ParsedOrder = {
+      ...baseOrder,
+      signalType: 'short',
+      stopLoss: 51000,
+    };
+    const config: TradeObfuscationConfig = {
+      sl: 1,
+    };
+    const result = applyTradeObfuscation(shortOrder, config);
+    expect(result.stopLoss).toBeCloseTo(51510, 0); // 51000 * (1 + 0.01)
+  });
+
+  it('treats negative sl offset as absolute value', () => {
+    const config: TradeObfuscationConfig = {
+      sl: -0.5,
+    };
+    const result = applyTradeObfuscation(baseOrder, config);
+    expect(result.stopLoss).toBeCloseTo(48755, 0); // 49000 * (1 - 0.005)
+  });
   it('applies entry obfuscation when entry config present', () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
     const config: TradeObfuscationConfig = {
@@ -80,7 +98,7 @@ describe('applyTradeObfuscation', () => {
   it('does not mutate the input order', () => {
     const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const config: TradeObfuscationConfig = {
-      sl: { minPercent: 0.5, maxPercent: 0.5 },
+      entry: { minPercent: 0.5, maxPercent: 0.5 },
     };
     const original = { ...baseOrder };
     applyTradeObfuscation(baseOrder, config);

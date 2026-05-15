@@ -23,12 +23,13 @@ const applyPercentAdjustment = (
   return value * factor;
 };
 
-const applyWorseTpOffset = (
+/** Move a price by |offsetPercent| in the direction that is worse for the given side (same factor for SL and TP). */
+const applyWorseDirectionPercentOffset = (
   value: number,
-  tpOffsetPercent: number,
+  offsetPercent: number,
   signalType: ParsedOrder['signalType']
 ): number => {
-  const normalizedOffsetPercent = Math.abs(tpOffsetPercent);
+  const normalizedOffsetPercent = Math.abs(offsetPercent);
   const factor =
     signalType === 'long'
       ? 1 - normalizedOffsetPercent / 100
@@ -38,7 +39,7 @@ const applyWorseTpOffset = (
 
 /**
  * Applies trade obfuscation to a parsed order.
- * Modifies sl, entry, and tp by a random percent within their configured ranges.
+ * Entry uses a random percent in range when configured; SL and TP shift by a single worse-direction percent.
  * Returns a new ParsedOrder; does not mutate the input.
  *
  * IMPORTANT: Obfuscation must run before any rounding or manipulation for exchange
@@ -49,15 +50,19 @@ export const applyTradeObfuscation = (
   order: ParsedOrder,
   config: TradeObfuscationConfig
 ): ParsedOrder => {
-  if (!config.sl && !config.entry && !config.tp) {
+  if (config.sl == null && !config.entry && config.tp == null) {
     return order;
   }
 
   const result: ParsedOrder = { ...order };
 
-  if (config.sl) {
-    const { minPercent, maxPercent } = config.sl;
-    result.stopLoss = applyPercentAdjustment(order.stopLoss, minPercent, maxPercent);
+  const slOffsetPercent = config.sl;
+  if (slOffsetPercent != null) {
+    result.stopLoss = applyWorseDirectionPercentOffset(
+      order.stopLoss,
+      slOffsetPercent,
+      order.signalType
+    );
   }
 
   if (config.entry && order.entryPrice != null) {
@@ -75,7 +80,7 @@ export const applyTradeObfuscation = (
   const tpOffsetPercent = config.tp;
   if (tpOffsetPercent != null && order.takeProfits.length) {
     result.takeProfits = order.takeProfits.map((v) =>
-      applyWorseTpOffset(v, tpOffsetPercent, order.signalType)
+      applyWorseDirectionPercentOffset(v, tpOffsetPercent, order.signalType)
     );
   }
 

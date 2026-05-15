@@ -149,11 +149,16 @@ export interface PercentRange {
 
 /**
  * Per-channel trade obfuscation to deter copy trading detection.
- * Each field applies a random percent adjustment within its range.
+ * `entry` uses a random percent in range; SL/TP use a single deterministic offset toward a worse price by direction (see field docs).
  * Obfuscation is applied before any rounding for exchange symbol constraints (tick size, etc.).
  */
 export interface TradeObfuscationConfig {
-  sl?: PercentRange;
+  /**
+   * Single percent offset moving SL toward a worse outcome for the trade (sign ignored; magnitude only):
+   * - long: SL is reduced (tighter adverse exit)
+   * - short: SL is increased
+   */
+  sl?: number;
   entry?: PercentRange;
   /**
    * Single percent offset applied to all TPs in the worse direction for the trade:
@@ -205,7 +210,7 @@ export interface ChannelSetConfig {
    */
   useLimitOrderForEntry?: boolean;
   propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
-  tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp to deter copy detection
+  tradeObfuscation?: TradeObfuscationConfig; // Obfuscate entry (random range) and/or SL & TP (worse-direction %) to deter copy detection
   /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */
   slAdjustmentTolerancePercent?: number;
   /** cTrader market orders only: max number of TPs to skip when price has already moved past them. Skipped TP quantity is redistributed to remaining valid TPs. 0 or undefined = reject if any TP is past price (default). Same index selects the MARKET_RANGE boundary TP when useMarketRangeForEntry is true (0 = TP1, 1 = TP2, …). */
@@ -277,7 +282,7 @@ export interface EvaluationConfig {
   startDate?: string; // ISO date string - when to start evaluation (optional, uses earliest message if not provided)
   speedMultiplier?: number; // How fast to play back (0 or Infinity = maximum speed, no delays)
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
-  tradeObfuscation?: TradeObfuscationConfig; // Random percent adjustment for sl/entry/tp (same as channel config)
+  tradeObfuscation?: TradeObfuscationConfig; // Same shape as channel tradeObfuscation
   slAdjustmentTolerancePercent?: number; // When price past SL, max overshoot % to allow proportional adjustment (0 = reject)
   /** Portfolio worst-case exposure cap — same semantics as {@link ChannelSetConfig.maxRisk} */
   maxRisk?: number;

@@ -97,7 +97,7 @@
       "_comment_maxRisk": "optional. Human percent (5 = 5%; 1 = 1%). Caps total worst-case exposure (open positions + new trade) as a share of account balance.",
       "maxRisk": 5,
       "tradeObfuscation": {
-        "sl": { "minPercent": -0.5, "maxPercent": 0.5 },
+        "sl": 0.5,
         "entry": { "minPercent": -0.3, "maxPercent": 0.3 },
         "tp": 0.2
       }

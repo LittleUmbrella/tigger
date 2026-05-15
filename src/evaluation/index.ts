@@ -39,11 +39,11 @@ const parsePercentValue = (value: string | undefined): number | undefined => {
 
 /** Build TradeObfuscationConfig from CLI options. Returns undefined if none provided. */
 const buildTradeObfuscationFromCli = (options: { obfuscationSl?: string; obfuscationEntry?: string; obfuscationTp?: string }): TradeObfuscationConfig | undefined => {
-  const sl = parsePercentRange(options.obfuscationSl);
+  const sl = parsePercentValue(options.obfuscationSl);
   const entry = parsePercentRange(options.obfuscationEntry);
   const tp = parsePercentValue(options.obfuscationTp);
-  if (!sl && !entry && !tp) return undefined;
-  return { ...(sl && { sl }), ...(entry && { entry }), ...(tp && { tp }) };
+  if (sl == null && !entry && tp == null) return undefined;
+  return { ...(sl != null && { sl }), ...(entry && { entry }), ...(tp != null && { tp }) };
 };
 
 // Helper function to log all options
@@ -138,7 +138,7 @@ program
   .option('--dynamic-breakeven-after-tps', 'Scale breakeven threshold from total TP count (see computeDynamicBreakevenAfterTPs)', false)
   .option('--entry-timeout-minutes <n>', 'Minutes to wait for entry before cancelling trade (default: 2880 = 2 days)', '2880')
   .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
-  .option('--obfuscation-sl <min,max>', 'Trade obfuscation for SL: percent range as "min,max" (e.g. "-0.5,0.5")')
+  .option('--obfuscation-sl <percent>', 'Trade obfuscation for SL: single percent toward worse SL by direction (e.g. "0.2")')
   .option('--obfuscation-entry <min,max>', 'Trade obfuscation for entry: percent range as "min,max" (e.g. "-0.3,0.3")')
   .option('--obfuscation-tp <percent>', 'Trade obfuscation for TP: single percent offset toward worse TP by direction (e.g. "0.2")')
   .option('--monitor-type <type>', 'Monitor/exchange type: bybit or ctrader (default: bybit)', 'bybit')
