@@ -8,7 +8,6 @@
 import { DatabaseManager, Trade, Message } from '../db/schema.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { createCTraderHistoricalPriceProvider } from '../utils/ctraderHistoricalPriceProvider.js';
-import { parseMessage } from '../parsers/signalParser.js';
 import { createPropFirmEvaluator, PropFirmEvaluator, EvaluationResult } from './propFirmEvaluator.js';
 import { PropFirmRule, getPropFirmRule, createCustomPropFirmRule } from './propFirmRules.js';
 import { logger } from '../utils/logger.js';
@@ -61,6 +60,15 @@ export async function runEvaluation(
     startDate = parsedDate.startOf('day').toISOString();
   } else {
     startDate = new Date().toISOString();
+  }
+
+  let evaluationEndDate: string | undefined;
+  if (config.endDate) {
+    const endParsed = dayjs(config.endDate);
+    if (!endParsed.isValid()) {
+      throw new Error(`Invalid end date format: ${config.endDate}. Expected YYYY-MM-DD or ISO format.`);
+    }
+    evaluationEndDate = endParsed.format('YYYY-MM-DD');
   }
 
   const monitorType = monitorConfig.type || 'bybit';
@@ -124,7 +132,7 @@ export async function runEvaluation(
 
   // Filter messages by startDate if provided
   const startDateObj = dayjs(startDate);
-  const filteredMessages = config.startDate
+  let filteredMessages = config.startDate
     ? sortedMessages.filter(msg => {
         const msgDate = dayjs(msg.date);
         // Include messages on or after startDate (same day or later)
@@ -132,10 +140,16 @@ export async function runEvaluation(
       })
     : sortedMessages;
 
+  if (evaluationEndDate) {
+    const endDateObj = dayjs(evaluationEndDate).endOf('day');
+    filteredMessages = filteredMessages.filter(msg => !dayjs(msg.date).isAfter(endDateObj));
+  }
+
   if (filteredMessages.length === 0) {
-    logger.warn('No messages found for evaluation after filtering by start date', { 
+    logger.warn('No messages found for evaluation after filtering by date range', { 
       channel,
       startDate,
+      endDate: evaluationEndDate,
       totalMessagesBeforeFilter: sortedMessages.length
     });
     return {
@@ -153,6 +167,7 @@ export async function runEvaluation(
     messageCount: filteredMessages.length,
     totalMessagesBeforeFilter: sortedMessages.length,
     startDate: config.startDate || 'not set',
+    endDate: evaluationEndDate || 'not set',
     firstMessage: filteredMessages[0].date,
     lastMessage: filteredMessages[filteredMessages.length - 1].date
   });
@@ -180,7 +195,9 @@ export async function runEvaluation(
     undefined, // useLimitOrderForEntry (evaluation path leaves it unset; initiator defaults apply)
     undefined, // maxSkippablePastTPs
     undefined, // useMarketRangeForEntry
-    config.maxRisk
+    config.maxRisk,
+    undefined, // entryPriceStrategy (evaluation uses parser defaults unless extended on EvaluationConfig)
+    evaluationEndDate
   );
 
   // Get all trades for this channel that need simulation

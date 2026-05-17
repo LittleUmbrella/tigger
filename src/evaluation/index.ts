@@ -61,14 +61,23 @@ const logOptions = (commandName: string, options: any) => {
 // Harvest command
 program
   .command('harvest')
-  .description('Harvest historical messages from a Telegram or Discord channel')
+  .description(
+    'Harvest channel messages into the evaluation DB. Default: full available history (no date filter). ' +
+      'Use --start-date / --end-date only when you want to bound the range.'
+  )
   .requiredOption('-c, --channel <channel>', 'Channel identifier (Telegram: username/invite/channel ID, Discord: channel ID)')
   .option('-p, --platform <platform>', 'Platform type: telegram, discord, or discord-selfbot (default: telegram)', 'telegram')
   .option('-a, --access-hash <hash>', 'Access hash for private Telegram channels')
   .option('--bot-token <token>', 'Discord bot token (can also use DISCORD_BOT_TOKEN env var)')
   .option('--user-token <token>', 'Discord user token for self-bot (can also use DISCORD_USER_TOKEN env var)')
-  .option('-s, --start-date <date>', 'Start date (YYYY-MM-DD or ISO format)')
-  .option('-e, --end-date <date>', 'End date (YYYY-MM-DD or ISO format)')
+  .option(
+    '-s, --start-date <date>',
+    'Optional. Oldest day to include (YYYY-MM-DD). Omit to go back as far as the API yields.'
+  )
+  .option(
+    '-e, --end-date <date>',
+    'Optional. Newest day to include (YYYY-MM-DD). Omit to include messages through the latest fetch.'
+  )
   .option('-k, --keywords <keywords>', 'Comma-separated keywords to filter messages')
   .option('-l, --limit <n>', 'Maximum messages to harvest (0 = unlimited)', '0')
   .option('-d, --delay <ms>', 'Delay between batches in ms, or "auto"', 'auto')
@@ -95,8 +104,8 @@ program
         accessHash: options.accessHash,
         botToken: options.botToken,
         userToken: options.userToken,
-        startDate: options.startDate,
-        endDate: options.endDate,
+        startDate: options.startDate?.trim() || undefined,
+        endDate: options.endDate?.trim() || undefined,
         keywords: options.keywords ? options.keywords.split(',').map((k: string) => k.trim()) : undefined,
         limit: parseInt(options.limit, 10) || 0,
         delay: options.delay === 'auto' ? 'auto' : parseInt(options.delay, 10) || 0,
@@ -129,7 +138,8 @@ program
   .requiredOption('--prop-firms <firms>', 'Comma-separated list of prop firms (e.g., crypto-fund-trader,hyrotrader,mubite)')
   .option('--config <path>', 'Path to evaluation config JSON file')
   .option('--initial-balance <amount>', 'Initial account balance in USDT', '10000')
-  .option('--start-date <date>', 'Start date (YYYY-MM-DD or ISO format)')
+  .option('--start-date <date>', 'Oldest calendar day to include (start of message window)')
+  .option('--end-date <date>', 'Newest calendar day to include, end-of-day (end of message window; typically today)')
   .option('--speed-multiplier <n>', 'Speed multiplier (0 = max speed)', '0')
   .option('--max-trade-duration <days>', 'Maximum trade duration in days', '7')
   .option('--risk-percentage <n>', 'Risk percentage per trade', '3')
@@ -201,6 +211,7 @@ program
           propFirms,
           initialBalance: parseFloat(options.initialBalance) || 10000,
           startDate: options.startDate,
+          endDate: options.endDate,
           speedMultiplier: parseFloat(options.speedMultiplier) || 0,
           maxTradeDurationDays: parseFloat(options.maxTradeDuration) || 7,
           slAdjustmentTolerancePercent: options.slAdjustmentTolerancePercent != null ? parseFloat(options.slAdjustmentTolerancePercent) : undefined,
@@ -360,6 +371,53 @@ program
       process.exit(0);
     } catch (error) {
       console.error('❌ Parser generation failed:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
+
+// Interactive channel evaluation wizard
+program
+  .command('wizard')
+  .description(
+    'Interactive: harvest → optional sample IDs (message text for manual parser work) → evaluate (1–5 month window)'
+  )
+  .option('-c, --channel <channel>', 'Channel ID or username')
+  .option('--months <n>', 'Months back from today for harvest/eval window (1–5)', '3')
+  .option('--platform <platform>', 'telegram | discord | discord-selfbot', 'telegram')
+  .option('--skip-harvest', 'Use messages already in the evaluation DB')
+  .option('--skip-samples', 'Do not prompt for sample message IDs or print reference text')
+  .option('--sample-ids <ids>', 'Comma-separated message IDs to print as parser reference')
+  .option('-p, --parser <name>', 'Parser registry name (must already exist)')
+  .option('--prop-firms <firms>', 'Comma-separated prop firms', 'crypto-fund-trader')
+  .option('--risk-percentage <n>', 'Risk % per trade', '3')
+  .option('--base-leverage <n>', 'Optional base leverage')
+  .option('--monitor-type <type>', 'bybit | ctrader', 'bybit')
+  .option('--initial-balance <amount>', 'Initial balance', '10000')
+  .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
+  .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
+  .action(async (options) => {
+    logOptions('wizard', options);
+    try {
+      const { runChannelEvalWizard } = await import('./channelEvalWizard.js');
+      await runChannelEvalWizard({
+        channel: options.channel,
+        months: options.months,
+        platform: options.platform,
+        skipHarvest: options.skipHarvest,
+        skipSamples: options.skipSamples,
+        sampleIds: options.sampleIds,
+        parserName: options.parser,
+        propFirms: options.propFirms,
+        dbPath: options.dbPath,
+        dbType: options.dbType,
+        riskPercentage: options.riskPercentage,
+        baseLeverage: options.baseLeverage,
+        monitorType: options.monitorType,
+        initialBalance: options.initialBalance,
+      });
+      process.exit(0);
+    } catch (error) {
+      console.error('❌ Wizard failed:', error instanceof Error ? error.message : String(error));
       process.exit(1);
     }
   });

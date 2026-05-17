@@ -279,7 +279,10 @@ export interface EvaluationConfig {
   monitor: MonitorConfig;
   propFirms: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations
   initialBalance?: number; // Starting balance for evaluation (default: 10000)
-  startDate?: string; // ISO date string - when to start evaluation (optional, uses earliest message if not provided)
+  /** Oldest calendar day to include (inclusive). Furthest back in time for messages. */
+  startDate?: string;
+  /** Newest calendar day to include (inclusive, end-of-day). Latest messages; not the "lookback length". */
+  endDate?: string;
   speedMultiplier?: number; // How fast to play back (0 or Infinity = maximum speed, no delays)
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
   tradeObfuscation?: TradeObfuscationConfig; // Same shape as channel tradeObfuscation
