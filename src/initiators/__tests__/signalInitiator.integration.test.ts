@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { processUnparsedMessages } from '../signalInitiator.js';
+import { processMessages, processUnparsedMessages } from '../signalInitiator.js';
 import { registerInitiator } from '../initiatorRegistry.js';
 import { bybitInitiator } from '../bybitInitiator.js';
 import { DatabaseManager } from '../../db/schema.js';
@@ -66,6 +66,45 @@ describe('Signal Initiator Integration Tests', () => {
     
     // Should have inserted a trade
     expect(mockDb.insertTrade).toHaveBeenCalled();
+  });
+
+  it('passes entryPriceStrategy to parseMessage', async () => {
+    const initiatorConfig: InitiatorConfig = {
+      name: 'bybit',
+      riskPercentage: 3,
+      testnet: false,
+    };
+
+    await processMessages(
+      [mockMessage],
+      initiatorConfig,
+      mockMessage.channel,
+      2,
+      mockDb,
+      true,
+      mockPriceProvider,
+      'vip_crypto_signals',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'bybit',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'average'
+    );
+
+    expect(parseMessage).toHaveBeenCalledWith(
+      mockMessage.content,
+      'vip_crypto_signals',
+      { entryPriceStrategy: 'average' }
+    );
   });
 
   it('should skip messages that cannot be parsed', async () => {
@@ -278,7 +317,8 @@ describe('Signal Initiator Integration Tests', () => {
 
     expect(parseMessage).toHaveBeenCalledWith(
       mockMessage.content,
-      'custom_parser'
+      'custom_parser',
+      undefined
     );
   });
 

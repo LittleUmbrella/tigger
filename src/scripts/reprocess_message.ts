@@ -142,6 +142,8 @@ program
 
       const entryTimeoutMinutes =
         channelConfig.entryTimeoutMinutes ?? monitorConfig?.entryTimeoutMinutes ?? 2880;
+      const parserConfig = config.parsers?.find(p => p.name === channelConfig.parser);
+      const entryPriceStrategy = parserConfig?.entryPriceStrategy;
 
       console.log(`\n--- Config ---`);
       console.log(`  Parser:       ${channelConfig.parser}`);
@@ -226,6 +228,7 @@ program
         channelConfig.maxSkippablePastTPs,
         channelConfig.useMarketRangeForEntry,
         channelConfig.maxRisk,
+        entryPriceStrategy,
         !!force
       );
 

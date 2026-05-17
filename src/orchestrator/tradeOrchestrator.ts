@@ -864,7 +864,10 @@ export const startTradeOrchestrator = async (
               continue;
             }
 
-            const parsed = parseMessage(message.content, parser.name);
+            const parserOptions = parser.entryPriceStrategy
+              ? { entryPriceStrategy: parser.entryPriceStrategy }
+              : undefined;
+            const parsed = parseMessage(message.content, parser.name, parserOptions);
             if (parsed) {
               // Check if trade already exists for this message (shouldn't happen, but safety check)
               const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
@@ -1004,6 +1007,8 @@ export const startTradeOrchestrator = async (
         }
         
         const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
+        const channelParser = parserMap.get(channelConfig.parser!);
+        const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
         
         // Process all unparsed messages (they will be sorted chronologically in processUnparsedMessages)
         await processUnparsedMessages(
@@ -1026,7 +1031,9 @@ export const startTradeOrchestrator = async (
           channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
-          channelConfig.maxRisk
+          channelConfig.maxRisk,
+          channelEntryPriceStrategy,
+          undefined // messageEndDate
         );
       }
     };
@@ -1068,6 +1075,8 @@ export const startTradeOrchestrator = async (
         }
         
         const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
+        const channelParser = parserMap.get(channelConfig.parser!);
+        const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
         
         processUnparsedMessages(
           initiator,
@@ -1089,7 +1098,9 @@ export const startTradeOrchestrator = async (
           channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
-          channelConfig.maxRisk
+          channelConfig.maxRisk,
+          channelEntryPriceStrategy,
+          undefined // messageEndDate
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

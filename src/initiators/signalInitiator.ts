@@ -12,6 +12,7 @@ import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import dayjs from 'dayjs';
 import { parseMessage } from '../parsers/signalParser.js';
+import { getParser } from '../parsers/parserRegistry.js';
 import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
@@ -230,7 +231,9 @@ export const processUnparsedMessages = async (
   useLimitOrderForEntry?: boolean, // From channel config; each initiator interprets (not cTrader-specific).
   maxSkippablePastTPs?: number, // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
   useMarketRangeForEntry?: boolean, // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
-  maxRisk?: number
+  maxRisk?: number,
+  entryPriceStrategy?: 'worst' | 'average',
+  messageEndDate?: string
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -262,6 +265,24 @@ export const processUnparsedMessages = async (
         totalMessages: messages.length,
         filteredMessages: filteredMessages.length,
         excludedMessages: messages.length - filteredMessages.length
+      });
+    }
+  }
+
+  if (messageEndDate) {
+    const endDateObj = dayjs(messageEndDate).endOf('day');
+    const beforeEnd = filteredMessages.length;
+    filteredMessages = filteredMessages.filter(msg => {
+      const msgDate = dayjs(msg.date);
+      return !msgDate.isAfter(endDateObj);
+    });
+    if (filteredMessages.length < beforeEnd) {
+      logger.info('Filtered messages by end date', {
+        channel,
+        messageEndDate,
+        totalMessages: beforeEnd,
+        filteredMessages: filteredMessages.length,
+        excludedMessages: beforeEnd - filteredMessages.length
       });
     }
   }
@@ -320,7 +341,8 @@ export const processUnparsedMessages = async (
     useLimitOrderForEntry,
     maxSkippablePastTPs,
     useMarketRangeForEntry,
-    maxRisk
+    maxRisk,
+    entryPriceStrategy
   );
   
   logger.debug('Finished processing messages', {
@@ -356,6 +378,7 @@ export const processMessages = async (
   /** cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2) */
   useMarketRangeForEntry?: boolean,
   maxRisk?: number,
+  entryPriceStrategy?: 'worst' | 'average',
   bypassInitiationLock: boolean = false
 ): Promise<void> => {
   // Get initiator function if not provided
@@ -413,7 +436,14 @@ export const processMessages = async (
         priceProvider.setCurrentTime(messageTime);
       }
 
-      let parsed = parseMessage(message.content, parserName);
+      const parserOptions = entryPriceStrategy ? { entryPriceStrategy } : undefined;
+      let parsed = parseMessage(message.content, parserName, parserOptions);
+      if (!parsed && parserName) {
+        const dynamicParser = await getParser(parserName);
+        if (dynamicParser) {
+          parsed = dynamicParser(message.content, parserOptions);
+        }
+      }
       if (parsed) {
         // Obfuscate before any rounding for exchange constraints (must stay first)
         if (tradeObfuscation) {

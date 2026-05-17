@@ -221,17 +221,22 @@ export const traceMessage = async (messageId: string, channel?: string): Promise
       details: {}
     });
 
-    // Get parser name from config for this channel (ensure channel is string for lookup)
+    // Get parser name and options from config for this channel (ensure channel is string for lookup)
     let parserName: string | undefined;
+    let parserOptions: { entryPriceStrategy?: 'worst' | 'average' } | undefined;
     const channelStr = channel ? String(channel) : undefined;
     if (config && channelStr) {
       const channelConfig = config.channels?.find((ch: { channel: string }) => String(ch.channel) === channelStr);
       if (channelConfig?.parser) {
         parserName = channelConfig.parser;
+        const parserConfig = config.parsers?.find((p: { name: string }) => p.name === channelConfig.parser);
+        if (parserConfig?.entryPriceStrategy) {
+          parserOptions = { entryPriceStrategy: parserConfig.entryPriceStrategy };
+        }
       }
     }
 
-    const parsedOrder = parseMessage(message.content, parserName);
+    const parsedOrder = parseMessage(message.content, parserName, parserOptions);
     if (parsedOrder) {
       steps[1].status = 'success';
       steps[1].details = {
