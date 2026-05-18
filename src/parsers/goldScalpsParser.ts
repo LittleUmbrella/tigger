@@ -49,8 +49,8 @@ export const goldScalpsParser = (content: string, options?: ParserOptions): Pars
   if (!buyMatch && !sellMatch) return null;
   const signalType: 'long' | 'short' = buyMatch ? 'long' : 'short';
 
-  // Entry price - extract from "@5066-5075" format (range with @ symbol)
-  const entryPriceRangeMatch = content.match(/@\s*([\d.]+)\s*-\s*([\d.]+)/i);
+  // Entry price - extract from "4539.8-4549.8" or "@5066-5075" format (range, optional @ symbol)
+  const entryPriceRangeMatch = content.match(/@?\s*([\d.]+)\s*-\s*([\d.]+)/i);
   if (!entryPriceRangeMatch) return null;
   
   const price1 = parseFloat(entryPriceRangeMatch[1]);
