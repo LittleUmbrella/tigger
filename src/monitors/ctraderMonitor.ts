@@ -373,7 +373,8 @@ const sweepScoreMatch = (trade: Trade, c: SweepPosCand): number => {
   return s;
 };
 
-const MIN_CTRADER_SWEEP_SCORE = 4;
+/** Side + strong entry/qty/time combo; side + entry alone is not enough. */
+const MIN_CTRADER_SWEEP_SCORE = 3;
 
 /**
  * When breakeven is due but sibling legs share a wrong position_id, duplicate order_id resolution
@@ -423,12 +424,6 @@ const sweepCtraderPositionsForBreakeven = async (
       client
     );
     if (siblingsHitTp < effectiveBreakevenAfterTPs) continue;
-
-    const pidsAmongNeed = needBe.map((t) => t.position_id).filter(Boolean) as string[];
-    const distinct = new Set(pidsAmongNeed);
-    const hasNull = needBe.some((t) => !t.position_id);
-    const duplicateAssigned = pidsAmongNeed.length > distinct.size;
-    if (!hasNull && !duplicateAssigned && distinct.size === needBe.length) continue;
 
     const sym = normalizeCTraderSymbol(rep.trading_pair);
     const claimedOutside = new Set<string>();
@@ -491,6 +486,22 @@ const sweepCtraderPositionsForBreakeven = async (
       });
     }
     if (candidates.length === 0) continue;
+
+    const pidsAmongNeed = needBe.map((t) => t.position_id).filter(Boolean) as string[];
+    const distinct = new Set(pidsAmongNeed);
+    const hasNull = needBe.some((t) => !t.position_id);
+    const duplicateAssigned = pidsAmongNeed.length > distinct.size;
+    const assignedPids = new Set(pidsAmongNeed.map(String));
+    const stalePositionId = needBe.some(
+      (t) => t.position_id && !candidates.some((c) => c.positionId === String(t.position_id))
+    );
+    const unclaimedOpen = candidates.some((c) => !assignedPids.has(c.positionId));
+    const shouldSweep =
+      hasNull ||
+      duplicateAssigned ||
+      stalePositionId ||
+      (group.length >= 2 && unclaimedOpen);
+    if (!shouldSweep) continue;
 
     const usedPos = new Set<string>();
     const tradesToAssign = [...needBe].sort((a, b) => a.id - b.id);
