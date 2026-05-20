@@ -7,7 +7,7 @@ import { startCSVHarvester } from '../harvesters/csvHarvester.js';
 import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
-import { startCTraderMonitor } from '../monitors/ctraderMonitor.js';
+import { startCTraderMonitor, CTraderMonitorStartExtras } from '../monitors/ctraderMonitor.js';
 import { logger } from '../utils/logger.js';
 import { isTransientInfrastructureError, serializeErrorForLog } from '../utils/errorUtils.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -94,6 +94,11 @@ export const startTradeOrchestrator = async (
       accountMap.set(account.name, account);
     }
   }
+
+  const ctraderAccountNamesFallback =
+    config.accounts?.filter((a) => a.exchange === 'ctrader').map((a) => a.name) ?? [];
+
+  const defaultCtraderOrphanReconcileSeconds = 15;
 
   // Create Bybit client map for managers (keyed by account name)
   const bybitClientMap = new Map<string, RestClientV5>();
@@ -405,6 +410,15 @@ export const startTradeOrchestrator = async (
       // Start monitor for this channel based on monitor type
       let stopMonitor: () => Promise<void>;
       if (monitor.type === 'ctrader') {
+        const ctraderMonitorExtras: CTraderMonitorStartExtras = {
+          ctraderAccountNamesForOrphanReconcile: ctraderAccountNamesFallback,
+          getCtraderOrphanReconcileIntervalSeconds: (name: string): number => {
+            const secs = accountMap.get(name)?.ctraderOrphanPositionReconcileSeconds;
+            if (secs === 0) return 0;
+            if (typeof secs === 'number' && Number.isFinite(secs) && secs > 0) return Math.floor(secs);
+            return defaultCtraderOrphanReconcileSeconds;
+          }
+        };
         stopMonitor = await startCTraderMonitor(
           monitorConfigWithOverride,
           channelConfig.channel,
@@ -412,7 +426,8 @@ export const startTradeOrchestrator = async (
           isSimulation,
           priceProvider,
           speedMultiplier,
-          async (accountName?: string) => await createCTraderClient(accountName)
+          async (accountName?: string) => await createCTraderClient(accountName),
+          ctraderMonitorExtras
         );
       } else {
         // Default to Bybit monitor for 'bybit' and 'dex' types

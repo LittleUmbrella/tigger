@@ -94,6 +94,13 @@ export interface AccountConfig {
    * channel (e.g. one $5k and one $100k account on the same signal source).
    */
   propFirms?: (string | CustomPropFirmConfig)[];
+  /**
+   * cTrader only: interval in seconds for **account-wide** orphan position reconciliation. Scans all
+   * open positions on that account for any symbol or label; matches to recent DB trade rows across all
+   * channels for that account by side/entry/qty/time, relinks rows, reapplies BE. Default 15 when
+   * omitted; set to 0 to disable on this account.
+   */
+  ctraderOrphanPositionReconcileSeconds?: number;
 }
 
 export interface InitiatorConfig {

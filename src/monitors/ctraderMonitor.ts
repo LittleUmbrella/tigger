@@ -46,6 +46,12 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
   return [from, to];
 };
 
+/** Default account-wide orphan position reconcile interval when account omits ctraderOrphanPositionReconcileSeconds */
+const DEFAULT_CTRADER_ORPHAN_RECONCILE_SECONDS = 15;
+
+/** Throttle orphan sweeps per logical cTrader account across all channel monitor instances. */
+const globalCtraderOrphanReconcileLastMs = new Map<string, number>();
+
 /** Statuses we may have written for either TP or SL exits; `stopped` is SL-only when we classified correctly. */
 const CTRADER_TP_SL_CLASSIFY_STATUSES = new Set<Trade['status']>(['closed', 'completed']);
 
@@ -545,6 +551,229 @@ const sweepCtraderPositionsForBreakeven = async (
           exchange: 'ctrader'
         });
       }
+    }
+  }
+};
+
+const ORPHAN_RECONCILE_TRADE_STATUSES = new Set<Trade['status']>(['pending', 'active', 'filled', 'stopped']);
+
+type OrphanSweepItem = {
+  cand: SweepPosCand;
+  normSymbol: string;
+};
+
+/**
+ * Account-wide cTrader sweep: any open position not linked to an active/pending/filled trade row
+ * is matched to recent DB trades for this account (all channels) using the same score as the BE sweep,
+ * then rows are relinked/reactivated and breakeven is re-evaluated.
+ */
+const reconcileOrphanCtraderPositionsForAccount = async (
+  db: DatabaseManager,
+  accountName: string | undefined,
+  ctraderClient: CTraderClient,
+  breakevenAfterTPs: number,
+  dynamicBreakevenAfterTPs: boolean
+): Promise<void> => {
+  const accNorm = accountName ?? '';
+
+  let open: any[];
+  try {
+    open = await ctraderClient.getOpenPositions();
+  } catch (error) {
+    logger.debug('cTrader orphan reconcile: getOpenPositions failed', {
+      accountName: accNorm || '(default)',
+      error: serializeErrorForLog(error),
+      exchange: 'ctrader'
+    });
+    return;
+  }
+
+  const trackedPids = new Set(
+    (await db.getActiveTrades())
+      .filter(
+        (t) =>
+          t.exchange === 'ctrader' &&
+          (t.account_name ?? '') === accNorm &&
+          t.position_id &&
+          ['pending', 'active', 'filled'].includes(t.status)
+      )
+      .map((t) => String(t.position_id))
+  );
+
+  const symbolLotCache = new Map<string, number>();
+  const orphans: OrphanSweepItem[] = [];
+
+  for (const p of open) {
+    const pid = String(p.positionId ?? p.id);
+    if (trackedPids.has(pid)) continue;
+
+    const volApi = ctraderPositionVolumeApi(p);
+    if (volApi <= 0) continue;
+
+    const pSymRaw = (p.symbolName || p.symbol || '').toString();
+    const normSymbol = normalizeCTraderSymbol(pSymRaw);
+    let lotDiv = symbolLotCache.get(normSymbol);
+    if (lotDiv == null) {
+      let symbolInfo: any;
+      try {
+        symbolInfo = await ctraderClient.getSymbolInfo(pSymRaw || normSymbol);
+      } catch {
+        logger.debug('cTrader orphan reconcile: symbol info skipped', {
+          symbol: pSymRaw,
+          exchange: 'ctrader'
+        });
+        continue;
+      }
+      const rawLow =
+        typeof symbolInfo?.lotSize === 'object' && symbolInfo?.lotSize != null ? symbolInfo.lotSize.low : undefined;
+      const lotRaw =
+        typeof rawLow === 'number' && isFinite(rawLow)
+          ? rawLow
+          : typeof symbolInfo?.lotSize === 'number'
+            ? symbolInfo.lotSize
+            : 100;
+      const lotResolved = lotRaw > 0 ? lotRaw : 100;
+      lotDiv = lotResolved;
+      symbolLotCache.set(normSymbol, lotResolved);
+    }
+
+    if (!lotDiv) continue;
+
+    const avg = parseFloat(String(p.avgPrice || p.averagePrice || p.price || '0'));
+    const tradeSide = p.tradeSide || p.side || '';
+    const isLongSide = tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long';
+    const openTs = p.tradeData?.openTimestamp ?? p.openTimestamp;
+    const openMs = protobufLongToNumber(openTs) ?? 0;
+
+    orphans.push({
+      cand: {
+        positionId: pid,
+        avgPrice: avg,
+        volLots: volApi / lotDiv,
+        isLong: isLongSide,
+        openMs
+      },
+      normSymbol
+    });
+  }
+
+  if (orphans.length === 0) return;
+
+  const recentPool = await db.getRecentCtraderTradesForAccount(accNorm, {
+    maxAgeHours: 1,
+    limit: 300,
+  });
+
+  const tradesBySym = new Map<string, Trade[]>();
+  for (const t of recentPool) {
+    const sym = normalizeCTraderSymbol(t.trading_pair);
+    let arr = tradesBySym.get(sym);
+    if (!arr) {
+      arr = [];
+      tradesBySym.set(sym, arr);
+    }
+    arr.push(t);
+  }
+
+  logger.info('cTrader orphan reconcile: open positions missing active DB linkage (account sweep)', {
+    accountName: accNorm || '(default)',
+    orphanCount: orphans.length,
+    positionIds: orphans.map((o) => o.cand.positionId),
+    recentTradeCandidates: recentPool.length,
+    exchange: 'ctrader'
+  });
+
+  const relinkedTrades: Trade[] = [];
+  const usedTradeIds = new Set<number>();
+  let remaining = orphans;
+
+  while (remaining.length > 0) {
+    let bestSc = -1;
+    let bestOrb: OrphanSweepItem | null = null;
+    let bestTrade: Trade | null = null;
+
+    for (const orb of remaining) {
+      const pool = tradesBySym.get(orb.normSymbol) ?? [];
+      for (const t of pool) {
+        if (usedTradeIds.has(t.id)) continue;
+        if ((t.account_name ?? '') !== accNorm) continue;
+        if (!ORPHAN_RECONCILE_TRADE_STATUSES.has(t.status)) continue;
+
+        if (
+          ['active', 'pending', 'filled'].includes(t.status) &&
+          t.position_id &&
+          String(t.position_id) !== orb.cand.positionId
+        ) {
+          continue;
+        }
+
+        let sc = sweepScoreMatch(t, orb.cand);
+        if (String(t.position_id) === orb.cand.positionId) sc += 2;
+        if (sc < MIN_CTRADER_SWEEP_SCORE) continue;
+        if (sc > bestSc) {
+          bestSc = sc;
+          bestOrb = orb;
+          bestTrade = t;
+        }
+      }
+    }
+
+    if (!bestOrb || !bestTrade || bestSc < MIN_CTRADER_SWEEP_SCORE) break;
+
+    const pid = bestOrb.cand.positionId;
+    const wasStopped = bestTrade.status === 'stopped';
+    const entryFill = bestTrade.entry_filled_at ?? dayjs().toISOString();
+
+    await db.updateTrade(bestTrade.id, {
+      position_id: pid,
+      status: 'active',
+      ...(!bestTrade.entry_filled_at ? { entry_filled_at: entryFill } : {}),
+      ...(wasStopped ? { exit_price: null, exit_filled_at: null, pnl: null, pnl_percentage: null } : {})
+    } as Partial<Trade>);
+
+    bestTrade.position_id = pid;
+    bestTrade.status = 'active';
+    bestTrade.entry_filled_at = bestTrade.entry_filled_at ?? entryFill;
+    if (wasStopped) {
+      delete (bestTrade as { exit_price?: unknown }).exit_price;
+      delete (bestTrade as { exit_filled_at?: unknown }).exit_filled_at;
+      delete (bestTrade as { pnl?: unknown }).pnl;
+      delete (bestTrade as { pnl_percentage?: unknown }).pnl_percentage;
+    }
+
+    trackedPids.add(pid);
+    usedTradeIds.add(bestTrade.id);
+    relinkedTrades.push(bestTrade);
+
+    logger.info('cTrader orphan reconcile: linked exchange position to trade row', {
+      tradeId: bestTrade.id,
+      positionId: pid,
+      messageId: bestTrade.message_id,
+      telegramChannel: bestTrade.channel,
+      score: bestSc,
+      exchange: 'ctrader'
+    });
+
+    remaining = remaining.filter((o) => o.cand.positionId !== pid);
+  }
+
+  if (relinkedTrades.length === 0) return;
+
+  for (const trade of relinkedTrades) {
+    try {
+      await checkAndApplyBreakeven(
+        trade,
+        db,
+        ctraderClient,
+        breakevenAfterTPs,
+        dynamicBreakevenAfterTPs
+      );
+    } catch (err) {
+      logger.warn('Breakeven after orphan reconcile failed', {
+        tradeId: trade.id,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(err)
+      });
     }
   }
 };
@@ -2820,6 +3049,16 @@ const monitorTrade = async (
 };
 
 /**
+ * Optional wiring from the trade orchestrator: cTrader accounts to run the account-wide orphan
+ * sweep (`getOpenPositions` vs DB), and per-account interval in seconds (0 = off). Throttle is
+ * global per account across all channel monitors.
+ */
+export type CTraderMonitorStartExtras = {
+  ctraderAccountNamesForOrphanReconcile?: string[];
+  getCtraderOrphanReconcileIntervalSeconds?: (accountName: string) => number;
+};
+
+/**
  * Start cTrader trade monitor
  */
 export const startCTraderMonitor = async (
@@ -2829,7 +3068,8 @@ export const startCTraderMonitor = async (
   isSimulation: boolean = false,
   priceProvider?: HistoricalPriceProvider,
   speedMultiplier?: number,
-  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>
+  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
+  extras?: CTraderMonitorStartExtras
 ): Promise<() => Promise<void>> => {
   logger.info('Starting cTrader trade monitor', { type: monitorConfig.type, channel });
 
@@ -3006,6 +3246,64 @@ export const startCTraderMonitor = async (
             })
           );
           await Promise.allSettled(beTasks);
+        }
+
+        // Periodic (account-wide): open positions not referenced by active DB rows → match recent trades → BE.
+        if (!isSimulation && getCTraderClient && (extras?.ctraderAccountNamesForOrphanReconcile?.length ?? 0) > 0) {
+          const orphanAccounts = extras!.ctraderAccountNamesForOrphanReconcile!;
+          const orphanNow = Date.now();
+          for (const accNm of orphanAccounts) {
+            const intervalSec =
+              extras?.getCtraderOrphanReconcileIntervalSeconds?.(accNm) ??
+              DEFAULT_CTRADER_ORPHAN_RECONCILE_SECONDS;
+            if (!Number.isFinite(intervalSec) || intervalSec <= 0) continue;
+            const rk = accNm;
+            const prev = globalCtraderOrphanReconcileLastMs.get(rk) ?? 0;
+            if (orphanNow - prev < intervalSec * 1000) continue;
+            globalCtraderOrphanReconcileLastMs.set(rk, orphanNow);
+            try {
+              const oc = await getCTraderClient(accNm);
+              if (!oc) continue;
+              await reconcileOrphanCtraderPositionsForAccount(
+                db,
+                accNm,
+                oc,
+                breakevenAfterTPs,
+                dynamicBreakevenAfterTPs
+              );
+            } catch (orphErr) {
+              logger.warn('cTrader orphan position reconcile failed', {
+                channel,
+                accountName: accNm,
+                exchange: 'ctrader',
+                error: serializeErrorForLog(orphErr)
+              });
+            }
+          }
+        } else if (!isSimulation && !getCTraderClient && ctraderClient) {
+          const intervalSec = DEFAULT_CTRADER_ORPHAN_RECONCILE_SECONDS;
+          const rk = '__legacy__';
+          const orphanNow = Date.now();
+          const prev = globalCtraderOrphanReconcileLastMs.get(rk) ?? 0;
+          if (orphanNow - prev >= intervalSec * 1000) {
+            globalCtraderOrphanReconcileLastMs.set(rk, orphanNow);
+            try {
+              await reconcileOrphanCtraderPositionsForAccount(
+                db,
+                undefined,
+                ctraderClient,
+                breakevenAfterTPs,
+                dynamicBreakevenAfterTPs
+              );
+            } catch (orphErr) {
+              logger.warn('cTrader orphan position reconcile failed', {
+                channel,
+                legacyClient: true,
+                exchange: 'ctrader',
+                error: serializeErrorForLog(orphErr)
+              });
+            }
+          }
         }
 
         if (!isMaxSpeed) {

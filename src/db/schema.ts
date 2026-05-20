@@ -139,6 +139,20 @@ interface DatabaseAdapter {
   getClosedTrades(): Promise<Trade[]>;
   getTradesByStatus(status: Trade['status']): Promise<Trade[]>;
   getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]>;
+  /**
+   * Recent cTrader trades on a channel (for orphan position matching). `maxAgeHours` caps by created_at.
+   */
+  getRecentCtraderTradesForChannel(
+    channel: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]>;
+  /**
+   * Recent cTrader trades on an exchange account (`account_name`; empty string = NULL/unset in DB).
+   */
+  getRecentCtraderTradesForAccount(
+    normalizedAccountName: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]>;
   getTradeWithMessage(tradeId: number): Promise<TradeWithMessage | null>;
   getTradesWithMessages(status?: Trade['status']): Promise<TradeWithMessage[]>;
   updateTrade(id: number, updates: Partial<Trade>): Promise<void>;
@@ -793,6 +807,38 @@ class SQLiteAdapter implements DatabaseAdapter {
       'SELECT * FROM trades WHERE message_id = ? AND channel = ? ORDER BY created_at ASC'
     );
     return stmt.all(messageId, channel) as Trade[];
+  }
+
+  async getRecentCtraderTradesForChannel(
+    channel: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    const maxAgeHours = Math.min(Math.max(options?.maxAgeHours ?? 72, 1), 168);
+    const limit = Math.min(Math.max(options?.limit ?? 300, 1), 2000);
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+    const stmt = this.db.prepare(`
+      SELECT * FROM trades
+      WHERE exchange = 'ctrader' AND channel = ? AND datetime(created_at) >= datetime(?)
+      ORDER BY datetime(created_at) DESC
+      LIMIT ?
+    `);
+    return stmt.all(channel, cutoff, limit) as Trade[];
+  }
+
+  async getRecentCtraderTradesForAccount(
+    normalizedAccountName: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    const maxAgeHours = Math.min(Math.max(options?.maxAgeHours ?? 96, 1), 168);
+    const limit = Math.min(Math.max(options?.limit ?? 600, 1), 2000);
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+    const stmt = this.db.prepare(`
+      SELECT * FROM trades
+      WHERE exchange = 'ctrader' AND COALESCE(account_name, '') = ? AND datetime(created_at) >= datetime(?)
+      ORDER BY datetime(created_at) DESC
+      LIMIT ?
+    `);
+    return stmt.all(normalizedAccountName, cutoff, limit) as Trade[];
   }
 
   async getMessageByMessageId(messageId: string, channel: string): Promise<Message | null> {
@@ -2078,6 +2124,40 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return this.normalizeTrades(result.rows);
   }
 
+  async getRecentCtraderTradesForChannel(
+    channel: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    const maxAgeHours = Math.min(Math.max(options?.maxAgeHours ?? 72, 1), 168);
+    const limit = Math.min(Math.max(options?.limit ?? 300, 1), 2000);
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+    const result = await this.pool.query(
+      `SELECT * FROM trades
+       WHERE exchange = 'ctrader' AND channel = $1 AND created_at >= $2::timestamptz
+       ORDER BY created_at DESC
+       LIMIT $3`,
+      [channel, cutoff, limit]
+    );
+    return this.normalizeTrades(result.rows);
+  }
+
+  async getRecentCtraderTradesForAccount(
+    normalizedAccountName: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    const maxAgeHours = Math.min(Math.max(options?.maxAgeHours ?? 96, 1), 168);
+    const limit = Math.min(Math.max(options?.limit ?? 600, 1), 2000);
+    const cutoff = new Date(Date.now() - maxAgeHours * 3600 * 1000).toISOString();
+    const result = await this.pool.query(
+      `SELECT * FROM trades
+       WHERE exchange = 'ctrader' AND COALESCE(account_name, '') = $1 AND created_at >= $2::timestamptz
+       ORDER BY created_at DESC
+       LIMIT $3`,
+      [normalizedAccountName, cutoff, limit]
+    );
+    return this.normalizeTrades(result.rows);
+  }
+
   async acquireTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
     const result = await this.pool.query(
       `
@@ -2507,6 +2587,20 @@ export class DatabaseManager {
 
   getTradesByMessageId(messageId: string, channel: string): Promise<Trade[]> {
     return this.adapter.getTradesByMessageId(messageId, channel);
+  }
+
+  getRecentCtraderTradesForChannel(
+    channel: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    return this.adapter.getRecentCtraderTradesForChannel(channel, options);
+  }
+
+  getRecentCtraderTradesForAccount(
+    normalizedAccountName: string,
+    options?: { maxAgeHours?: number; limit?: number }
+  ): Promise<Trade[]> {
+    return this.adapter.getRecentCtraderTradesForAccount(normalizedAccountName, options);
   }
 
   getTradeWithMessage(tradeId: number): Promise<TradeWithMessage | null> {
