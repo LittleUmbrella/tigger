@@ -13,22 +13,126 @@ export const normalizeCtraderPositionIdField = (raw: unknown): string | null => 
   return String(Math.trunc(n));
 };
 
+export const isCtraderClosingDeal = (d: any): boolean =>
+  (d?.closePositionDetail ?? d?.close_position_detail) != null;
+
+/** Filled deal that opens or adds to a position (not a TP/SL close). */
+export const isCtraderOpeningFilledDeal = (d: any): boolean => {
+  const status = d?.dealStatus ?? d?.deal_status;
+  if (status !== 2 && status !== 'FILLED') return false;
+  return !isCtraderClosingDeal(d);
+};
+
+export const orderDetailsHasOpeningDeal = (deals: any[] | undefined | null): boolean =>
+  (deals ?? []).some(isCtraderOpeningFilledDeal);
+
+export const orderDetailsHasOnlyClosingDeals = (deals: any[] | undefined | null): boolean => {
+  const list = deals ?? [];
+  return list.length > 0 && list.every(isCtraderClosingDeal);
+};
+
+const dealExecutionTimestamp = (d: any): number => {
+  const raw = d?.executionTimestamp ?? d?.execution_timestamp ?? d?.createTimestamp ?? 0;
+  if (typeof raw === 'number' && isFinite(raw)) return raw;
+  const n = protobufLongToNumber(raw);
+  return n != null && isFinite(n) ? n : 0;
+};
+
+const dealMatchesLabel = (d: any, label: string): boolean => {
+  const lb = String(d?.label ?? d?.Label ?? '');
+  return lb === label || (label.length > 0 && lb.includes(label));
+};
+
 /**
  * ProtoOAOrder has optional positionId (field 19); deals also carry positionId.
- * Prefer order-level id — deal list may be empty in OrderDetailsRes while positionId is set on the order.
+ * Uses opening deals only — closing/TP order details must not resolve as entry linkage.
  */
 export const extractPositionIdFromCtraderOrderDetails = (
   order: any,
   deals: any[] | undefined | null
 ): string | null => {
-  if (!order) return null;
-  const fromOrder = normalizeCtraderPositionIdField(order.positionId ?? order.position_id);
-  if (fromOrder) return fromOrder;
   for (const d of deals ?? []) {
+    if (!isCtraderOpeningFilledDeal(d)) continue;
     const pid = normalizeCtraderPositionIdField(d?.positionId ?? d?.position_id);
     if (pid) return pid;
   }
-  return null;
+  if ((deals ?? []).length > 0) return null;
+  if (!order) return null;
+  return normalizeCtraderPositionIdField(order.positionId ?? order.position_id);
+};
+
+/**
+ * After N-trades placement, correct order IDs when cTrader returns a TP-close order id
+ * instead of the entry order (e.g. immediate relative-TP fill).
+ */
+export const resolveCtraderNTradeEntryOrderIds = async (
+  client: CTraderClient,
+  placedOrderIds: string[],
+  options: { label: string; fromTimestamp?: number; toTimestamp?: number }
+): Promise<string[]> => {
+  if (placedOrderIds.length === 0) return [];
+
+  const from = options.fromTimestamp ?? Date.now() - 120_000;
+  const to = options.toTimestamp ?? Date.now() + 15_000;
+  const label = options.label;
+
+  let openingDealsSorted: any[] = [];
+  try {
+    const deals = await client.getDealList(from, to);
+    openingDealsSorted = deals
+      .filter(isCtraderOpeningFilledDeal)
+      .filter((d) => dealMatchesLabel(d, label))
+      .sort((a, b) => dealExecutionTimestamp(a) - dealExecutionTimestamp(b));
+  } catch (error) {
+    logger.warn('resolveCtraderNTradeEntryOrderIds: deal list failed, using placed ids', {
+      label,
+      exchange: 'ctrader',
+      error: serializeErrorForLog(error),
+    });
+    return [...placedOrderIds];
+  }
+
+  const resolved: string[] = [];
+  for (let i = 0; i < placedOrderIds.length; i++) {
+    const placedId = placedOrderIds[i];
+    let usePlaced = true;
+    try {
+      const details = await client.getOrderDetails(placedId);
+      if (orderDetailsHasOnlyClosingDeals(details?.deals)) {
+        usePlaced = false;
+      } else if ((details?.deals ?? []).length > 0 && !orderDetailsHasOpeningDeal(details?.deals)) {
+        usePlaced = false;
+      }
+    } catch {
+      usePlaced = true;
+    }
+
+    if (usePlaced) {
+      resolved.push(placedId);
+    } else {
+      const fallback = openingDealsSorted[i];
+      const entryOid =
+        fallback?.orderId != null
+          ? String(
+              typeof fallback.orderId === 'object' && fallback.orderId?.low != null
+                ? protobufLongToNumber(fallback.orderId)
+                : fallback.orderId
+            )
+          : placedId;
+      resolved.push(entryOid);
+      if (entryOid !== placedId) {
+        logger.warn('N-trade entry order id corrected from deal list', {
+          legIndex: i,
+          placedOrderId: placedId,
+          entryOrderId: entryOid,
+          label,
+          exchange: 'ctrader',
+        });
+      }
+    }
+  }
+
+  return resolved;
 };
 
 export const isCtraderOrderStatusFilled = (order: any): boolean => {
@@ -485,6 +589,74 @@ export class CTraderClient {
 
     result.sort((a, b) => a.timestamp - b.timestamp);
     return result;
+  }
+
+  /**
+   * Subscribe to live trend bars for the given symbol and periods.
+   * Live trend bars are delivered embedded inside subsequent ProtoOASpotEvent messages
+   * (see ProtoOASpotEvent.trendbar in the OpenAPI proto). Requires an active spot subscription.
+   *
+   * Returns a cleanup function that unsubscribes from the requested periods.
+   * Safe to call even if already subscribed (server returns ALREADY_SUBSCRIBED in some cases).
+   *
+   * Example:
+   *   const unsubscribe = await client.subscribeLiveTrendbars('XAUUSD', ['M1', 'M5']);
+   *   // later...
+   *   await unsubscribe();
+   */
+  async subscribeLiveTrendbars(
+    symbol: string,
+    periods: Array<'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1'>
+  ): Promise<() => Promise<void>> {
+    await this.ensureConnected();
+    if (!this.authenticated || !this.connection) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to subscribe to live trendbars');
+    }
+
+    const symbolInfo = await this.getSymbolInfo(symbol);
+    const symbolId = protobufLongToNumber(symbolInfo.symbolId);
+    if (symbolId == null || !Number.isFinite(symbolId)) {
+      throw new Error(`Unable to resolve symbolId for ${symbol}`);
+    }
+
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) {
+      throw new Error('Invalid account ID');
+    }
+
+    for (const period of periods) {
+      try {
+        await this.connection.sendCommand('ProtoOASubscribeLiveTrendbarReq', {
+          ctidTraderAccountId: accountIdNum,
+          period,
+          symbolId,
+        });
+      } catch (error) {
+        // ALREADY_SUBSCRIBED or similar is acceptable
+        const msg = serializeErrorForLog(error);
+        if (!msg.includes('ALREADY_SUBSCRIBED') && !msg.includes('113')) {
+          logger.debug('Live trendbar subscribe warning', { symbol, period, error: msg });
+        }
+      }
+    }
+
+    // Return unsubscribe handle
+    return async () => {
+      for (const period of periods) {
+        try {
+          await this.connection?.sendCommand('ProtoOAUnsubscribeLiveTrendbarReq', {
+            ctidTraderAccountId: accountIdNum,
+            period,
+            symbolId,
+          });
+        } catch {
+          // best effort
+        }
+      }
+    };
   }
 
   /**
@@ -1434,7 +1606,9 @@ export class CTraderClient {
     const to = toTimestamp ?? Date.now();
     const from = fromTimestamp ?? to - 24 * 60 * 60 * 1000;
     const deals = await this.getDealList(from, to);
-    const deal = deals.find((d: any) => String(d.orderId) === String(orderId));
+    const deal = deals.find(
+      (d: any) => String(d.orderId) === String(orderId) && isCtraderOpeningFilledDeal(d)
+    );
     const posId = deal?.positionId;
     return posId != null ? String(posId) : null;
   }

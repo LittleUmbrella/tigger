@@ -7,6 +7,7 @@ import dayjs from 'dayjs';
 import {
   CTraderClient,
   extractPositionIdFromCtraderOrderDetails,
+  isCtraderOpeningFilledDeal,
   getCtraderOrderExecutionPrice,
   isCtraderOrderStatusFilled
 } from '../clients/ctraderClient.js';
@@ -219,12 +220,18 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
  * Extracted from monitorTrade so it can run in a dedicated pass after all close detections
  * are committed — avoids a race where concurrent monitorTrade calls read stale sibling status.
  */
+type CTraderBreakevenContext = {
+  breakevenAfterTPs: number;
+  dynamicBreakevenAfterTPs: boolean;
+};
+
 const checkAndApplyBreakeven = async (
   trade: Trade,
   db: DatabaseManager,
   ctraderClient: CTraderClient | undefined,
   breakevenAfterTPs: number,
-  dynamicBreakevenAfterTPs: boolean
+  dynamicBreakevenAfterTPs: boolean,
+  options?: { extraClosedTpWeight?: number }
 ): Promise<void> => {
   if (trade.stop_loss_breakeven) return;
   if (!ctraderClient || !trade.position_id) {
@@ -248,12 +255,13 @@ const checkAndApplyBreakeven = async (
     breakevenAfterTPs,
     dynamicBreakevenAfterTPs
   });
-  const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(
-    allSiblings,
-    trade.id,
-    trade.account_name,
-    ctraderClient
-  );
+  const siblingsHitTp =
+    (await countCtraderSiblingsClosedAtTakeProfit(
+      allSiblings,
+      trade.id,
+      trade.account_name,
+      ctraderClient
+    )) + (options?.extraClosedTpWeight ?? 0);
 
   if (siblingsHitTp < effectiveBreakevenAfterTPs) return;
 
@@ -571,14 +579,73 @@ const resolveCtraderReconciledCloseReason = async (
   return 'take_profit';
 };
 
+/**
+ * When a leg is about to close at TP, move SL to BE on still-active siblings *before* we mark
+ * this trade closed. The end-of-poll BE pass only sees getActiveTrades(); without this,
+ * siblings can be closed in the same poll and never receive modifyPosition.
+ */
+const applyBreakevenToActiveSiblingsBeforeTpClose = async (
+  closingTrade: Trade,
+  db: DatabaseManager,
+  ctraderClient: CTraderClient | undefined,
+  beContext: CTraderBreakevenContext | undefined
+): Promise<void> => {
+  if (!ctraderClient || !beContext) return;
+
+  const siblings = await db.getTradesByMessageId(closingTrade.message_id, closingTrade.channel);
+  const activeSiblings = siblings.filter(
+    (t) =>
+      t.exchange === 'ctrader' &&
+      t.account_name === closingTrade.account_name &&
+      t.id !== closingTrade.id &&
+      t.status === 'active' &&
+      !t.stop_loss_breakeven
+  );
+  if (activeSiblings.length === 0) return;
+
+  const closingWeight = Math.max(getTakeProfitLevelCount(closingTrade), 1);
+  logger.info('cTrader sibling TP close — applying breakeven to active legs before close commit', {
+    closingTradeId: closingTrade.id,
+    messageId: closingTrade.message_id,
+    channel: closingTrade.channel,
+    activeSiblingIds: activeSiblings.map((t) => t.id),
+    closingTpWeight: closingWeight,
+    exchange: 'ctrader'
+  });
+
+  for (const sib of activeSiblings) {
+    try {
+      await checkAndApplyBreakeven(
+        sib,
+        db,
+        ctraderClient,
+        beContext.breakevenAfterTPs,
+        beContext.dynamicBreakevenAfterTPs,
+        { extraClosedTpWeight: closingWeight }
+      );
+    } catch (err) {
+      logger.warn('Breakeven for active sibling failed (pre-close TP trigger)', {
+        closingTradeId: closingTrade.id,
+        siblingTradeId: sib.id,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(err)
+      });
+    }
+  }
+};
+
 const applyCtraderReconciledClose = async (
   trade: Trade,
   db: DatabaseManager,
   exitPrice: number | undefined,
   pnl: number | undefined,
-  ctraderClient: CTraderClient | undefined
+  ctraderClient: CTraderClient | undefined,
+  beContext?: CTraderBreakevenContext
 ): Promise<void> => {
   const reason = await resolveCtraderReconciledCloseReason(trade, exitPrice, pnl, ctraderClient);
+  if (reason === 'take_profit') {
+    await applyBreakevenToActiveSiblingsBeforeTpClose(trade, db, ctraderClient, beContext);
+  }
   if (reason === 'stop_loss') {
     await updateTradeOnStopLossHit(trade, db, exitPrice, pnl);
   } else {
@@ -593,13 +660,6 @@ const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: 
       setTimeout(() => reject(new Error(`${label} timeout after ${ms}ms`)), ms)
     )
   ]);
-};
-
-const isCtraderOpeningFilledDeal = (d: any): boolean => {
-  const status = d.dealStatus ?? d.deal_status;
-  if (status !== 2 && status !== 'FILLED') return false;
-  const detail = d.closePositionDetail ?? d.close_position_detail;
-  return detail == null;
 };
 
 /**
@@ -2265,7 +2325,8 @@ const applyCtraderPendingEntryFillResult = async (
   db: DatabaseManager,
   entryResult: CTraderEntryFillResult,
   source: 'fast_path' | 'standard',
-  ctraderClient?: CTraderClient
+  ctraderClient?: CTraderClient,
+  beContext?: CTraderBreakevenContext
 ): Promise<'return' | 'continue' | 'noop'> => {
   if (!entryResult.filled) return 'noop';
   const fillPrice = entryResult.filledPrice;
@@ -2291,7 +2352,7 @@ const applyCtraderPendingEntryFillResult = async (
     trade.position_id = entryResult.positionId;
     trade.entry_price = resolvedEntryPrice;
     await updateEntryOrderToFilled(trade, db, fillTime, fillPrice);
-    await applyCtraderReconciledClose(trade, db, entryResult.exitPrice, entryResult.pnl, ctraderClient);
+    await applyCtraderReconciledClose(trade, db, entryResult.exitPrice, entryResult.pnl, ctraderClient, beContext);
     return 'return';
   }
   logger.info('cTrader entry order filled', {
@@ -2336,7 +2397,8 @@ const monitorTrade = async (
   isSimulation: boolean,
   priceProvider: HistoricalPriceProvider | undefined,
   preResolvedPositionByTradeId?: Map<number, string>,
-  pendingMultiLegKeys?: Set<string>
+  pendingMultiLegKeys?: Set<string>,
+  beContext?: CTraderBreakevenContext
 ): Promise<void> => {
   const timings: Record<string, number> = {};
   let t0 = Date.now();
@@ -2396,7 +2458,14 @@ const monitorTrade = async (
             pnl: positionResultEarly.pnl,
             exchange: 'ctrader'
           });
-          await applyCtraderReconciledClose(trade, db, positionResultEarly.exitPrice, positionResultEarly.pnl, ctraderClient);
+          await applyCtraderReconciledClose(
+            trade,
+            db,
+            positionResultEarly.exitPrice,
+            positionResultEarly.pnl,
+            ctraderClient,
+            beContext
+          );
           return;
         }
       }
@@ -2481,7 +2550,14 @@ const monitorTrade = async (
             );
             timings.checkEntryFilledFast = Date.now() - t0;
             pendingEntryFillAttempted = true;
-            const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResultFast, 'fast_path', ctraderClient);
+            const outcome = await applyCtraderPendingEntryFillResult(
+              trade,
+              db,
+              entryResultFast,
+              'fast_path',
+              ctraderClient,
+              beContext
+            );
             if (outcome === 'return') return;
           }
         }
@@ -2528,7 +2604,14 @@ const monitorTrade = async (
         exchange: 'ctrader'
       });
 
-      const outcome = await applyCtraderPendingEntryFillResult(trade, db, entryResult, 'standard', ctraderClient);
+      const outcome = await applyCtraderPendingEntryFillResult(
+        trade,
+        db,
+        entryResult,
+        'standard',
+        ctraderClient,
+        beContext
+      );
       if (outcome === 'return') return;
     }
 
@@ -2662,7 +2745,14 @@ const monitorTrade = async (
           pnl: positionResult.pnl,
           exchange: 'ctrader'
         });
-        await applyCtraderReconciledClose(trade, db, positionResult.exitPrice, positionResult.pnl, ctraderClient);
+        await applyCtraderReconciledClose(
+          trade,
+          db,
+          positionResult.exitPrice,
+          positionResult.pnl,
+          ctraderClient,
+          beContext
+        );
         return;
       }
 
@@ -2696,7 +2786,14 @@ const monitorTrade = async (
           preResolvedPositionByTradeId?.get(trade.id)
         );
         if (stopLossResult.closed) {
-          await applyCtraderReconciledClose(trade, db, stopLossResult.exitPrice, stopLossResult.pnl, ctraderClient);
+          await applyCtraderReconciledClose(
+            trade,
+            db,
+            stopLossResult.exitPrice,
+            stopLossResult.pnl,
+            ctraderClient,
+            beContext
+          );
         } else {
           await db.updateTrade(trade.id, { status: 'stopped' });
         }
@@ -2805,6 +2902,11 @@ export const startCTraderMonitor = async (
           ? await resolvePositionIdsBatch(trades, getCTraderClient, ctraderClient)
           : new Map<number, string>();
 
+        const beContext: CTraderBreakevenContext = {
+          breakevenAfterTPs,
+          dynamicBreakevenAfterTPs
+        };
+
         // Process trades with limited concurrency - avoids bursting cTrader historical API (5 req/sec limit)
         const tradeTasks = trades.map((trade) =>
           limit(async () => {
@@ -2829,7 +2931,8 @@ export const startCTraderMonitor = async (
                 isSimulation,
                 priceProvider,
                 preResolvedPositionByTradeId,
-                pendingMultiLegKeys
+                pendingMultiLegKeys,
+                beContext
               ),
               new Promise<void>((_, reject) =>
                 setTimeout(() => reject(new Error(`Trade ${trade.id} monitor timeout after ${MONITOR_TRADE_TIMEOUT_MS}ms`)), MONITOR_TRADE_TIMEOUT_MS)

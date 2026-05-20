@@ -16,7 +16,12 @@ import {
 } from '../utils/ctraderMarketRange.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
-import { CTraderClient, CTraderClientConfig, ctraderLotsToApiVolumeSimple } from '../clients/ctraderClient.js';
+import {
+  CTraderClient,
+  CTraderClientConfig,
+  ctraderLotsToApiVolumeSimple,
+  resolveCtraderNTradeEntryOrderIds,
+} from '../clients/ctraderClient.js';
 import dayjs from 'dayjs';
 
 /** cTrader: one market/limit order per TP; leg volumes must not exceed risk-sized total (Bybit uses reduce-only trims). */
@@ -1201,6 +1206,7 @@ const executeTradeForAccount = async (
             const label = `tgr-${channel}-${message.message_id}`.slice(0, 100);
             const ids: string[] = [];
             const quantities = validTPOrders.map((tp) => tp.quantity);
+            const nTradePlacementStartedAt = Date.now();
 
             if (useLimitAtTouch) {
               for (const tp of validTPOrders) {
@@ -1455,6 +1461,30 @@ const executeTradeForAccount = async (
               validTPOrders.push(...tpsToPlace);
               quantities.length = 0;
               quantities.push(...tpsToPlace.map(tp => tp.quantity));
+            }
+
+            if (ids.length > 0) {
+              const resolvedEntryOrderIds = await resolveCtraderNTradeEntryOrderIds(
+                ctraderClient,
+                ids,
+                {
+                  label,
+                  fromTimestamp: nTradePlacementStartedAt - 10_000,
+                }
+              );
+              if (resolvedEntryOrderIds.some((id, i) => id !== ids[i])) {
+                logger.warn('N-trade entry order IDs resolved from opening deals', {
+                  channel,
+                  messageId: message.message_id,
+                  symbol,
+                  accountName: accountName || 'default',
+                  placedOrderIds: [...ids],
+                  entryOrderIds: resolvedEntryOrderIds,
+                  exchange: 'ctrader',
+                });
+              }
+              ids.length = 0;
+              ids.push(...resolvedEntryOrderIds);
             }
 
             orderId = ids[0];
