@@ -348,6 +348,8 @@ type SweepPosCand = {
   volLots: number;
   isLong: boolean;
   openMs: number;
+  /** Exchange TP on open position; used to match wrongly-closed DB rows. */
+  takeProfit?: number;
 };
 
 const ctraderPositionVolumeApi = (p: any): number => {
@@ -555,17 +557,52 @@ const sweepCtraderPositionsForBreakeven = async (
   }
 };
 
-const ORPHAN_RECONCILE_TRADE_STATUSES = new Set<Trade['status']>(['pending', 'active', 'filled', 'stopped']);
+const ORPHAN_RECONCILE_TRADE_STATUSES = new Set<Trade['status']>([
+  'pending',
+  'active',
+  'filled',
+  'stopped',
+  'closed'
+]);
+
+/** Extra score when relinking a closed row whose position_id no longer matches this open orphan. */
+const orphanClosedRelinkBonus = (trade: Trade, cand: SweepPosCand): number => {
+  if (trade.status !== 'closed') return 0;
+  let bonus = 0;
+  if (trade.position_id && String(trade.position_id) !== cand.positionId) bonus += 1;
+  if (cand.takeProfit != null && cand.takeProfit > 0) {
+    try {
+      const tps: number[] = JSON.parse(trade.take_profits || '[]');
+      const tp = tps[tps.length - 1] ?? tps[0];
+      if (tp > 0) {
+        const rel = Math.abs(tp - cand.takeProfit) / tp;
+        if (rel < 0.001) bonus += 2;
+        else if (rel < 0.005) bonus += 1;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+  return bonus;
+};
 
 type OrphanSweepItem = {
   cand: SweepPosCand;
   normSymbol: string;
 };
 
+type OrphanRelinkResult = {
+  trade: Trade;
+  positionId: string;
+  priorStatus: Trade['status'];
+  score: number;
+};
+
 /**
  * Account-wide cTrader sweep: any open position not linked to an active/pending/filled trade row
  * is matched to recent DB trades for this account (all channels) using the same score as the BE sweep,
- * then rows are relinked/reactivated and breakeven is re-evaluated.
+ * including wrongly-closed rows with a similar entry (and TP when available), then relinked/reactivated
+ * and breakeven is re-evaluated.
  */
 const reconcileOrphanCtraderPositionsForAccount = async (
   db: DatabaseManager,
@@ -644,6 +681,9 @@ const reconcileOrphanCtraderPositionsForAccount = async (
     const isLongSide = tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long';
     const openTs = p.tradeData?.openTimestamp ?? p.openTimestamp;
     const openMs = protobufLongToNumber(openTs) ?? 0;
+    const tpRaw = p.takeProfit ?? p.tp;
+    const takeProfit = parseFloat(String(tpRaw ?? ''));
+    const takeProfitNum = isFinite(takeProfit) && takeProfit > 0 ? takeProfit : undefined;
 
     orphans.push({
       cand: {
@@ -651,7 +691,8 @@ const reconcileOrphanCtraderPositionsForAccount = async (
         avgPrice: avg,
         volLots: volApi / lotDiv,
         isLong: isLongSide,
-        openMs
+        openMs,
+        takeProfit: takeProfitNum
       },
       normSymbol
     });
@@ -675,15 +716,21 @@ const reconcileOrphanCtraderPositionsForAccount = async (
     arr.push(t);
   }
 
-  logger.info('cTrader orphan reconcile: open positions missing active DB linkage (account sweep)', {
+  logger.warn('cTrader orphan reconcile: open positions missing active DB linkage (account sweep)', {
     accountName: accNorm || '(default)',
     orphanCount: orphans.length,
-    positionIds: orphans.map((o) => o.cand.positionId),
+    orphans: orphans.map((o) => ({
+      positionId: o.cand.positionId,
+      symbol: o.normSymbol,
+      avgPrice: o.cand.avgPrice,
+      volLots: o.cand.volLots,
+      takeProfit: o.cand.takeProfit
+    })),
     recentTradeCandidates: recentPool.length,
     exchange: 'ctrader'
   });
 
-  const relinkedTrades: Trade[] = [];
+  const relinkResults: OrphanRelinkResult[] = [];
   const usedTradeIds = new Set<number>();
   let remaining = orphans;
 
@@ -709,6 +756,7 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
         let sc = sweepScoreMatch(t, orb.cand);
         if (String(t.position_id) === orb.cand.positionId) sc += 2;
+        sc += orphanClosedRelinkBonus(t, orb.cand);
         if (sc < MIN_CTRADER_SWEEP_SCORE) continue;
         if (sc > bestSc) {
           bestSc = sc;
@@ -721,20 +769,23 @@ const reconcileOrphanCtraderPositionsForAccount = async (
     if (!bestOrb || !bestTrade || bestSc < MIN_CTRADER_SWEEP_SCORE) break;
 
     const pid = bestOrb.cand.positionId;
-    const wasStopped = bestTrade.status === 'stopped';
+    const priorStatus = bestTrade.status;
+    const clearExitFields = priorStatus === 'stopped' || priorStatus === 'closed';
     const entryFill = bestTrade.entry_filled_at ?? dayjs().toISOString();
 
     await db.updateTrade(bestTrade.id, {
       position_id: pid,
       status: 'active',
       ...(!bestTrade.entry_filled_at ? { entry_filled_at: entryFill } : {}),
-      ...(wasStopped ? { exit_price: null, exit_filled_at: null, pnl: null, pnl_percentage: null } : {})
+      ...(clearExitFields
+        ? { exit_price: null, exit_filled_at: null, pnl: null, pnl_percentage: null }
+        : {})
     } as Partial<Trade>);
 
     bestTrade.position_id = pid;
     bestTrade.status = 'active';
     bestTrade.entry_filled_at = bestTrade.entry_filled_at ?? entryFill;
-    if (wasStopped) {
+    if (clearExitFields) {
       delete (bestTrade as { exit_price?: unknown }).exit_price;
       delete (bestTrade as { exit_filled_at?: unknown }).exit_filled_at;
       delete (bestTrade as { pnl?: unknown }).pnl;
@@ -743,23 +794,39 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
     trackedPids.add(pid);
     usedTradeIds.add(bestTrade.id);
-    relinkedTrades.push(bestTrade);
-
-    logger.info('cTrader orphan reconcile: linked exchange position to trade row', {
-      tradeId: bestTrade.id,
-      positionId: pid,
-      messageId: bestTrade.message_id,
-      telegramChannel: bestTrade.channel,
-      score: bestSc,
-      exchange: 'ctrader'
-    });
+    relinkResults.push({ trade: bestTrade, positionId: pid, priorStatus, score: bestSc });
 
     remaining = remaining.filter((o) => o.cand.positionId !== pid);
   }
 
-  if (relinkedTrades.length === 0) return;
+  const unmatchedOrphans = remaining.map((o) => ({
+    positionId: o.cand.positionId,
+    symbol: o.normSymbol,
+    avgPrice: o.cand.avgPrice,
+    volLots: o.cand.volLots,
+    takeProfit: o.cand.takeProfit
+  }));
 
-  for (const trade of relinkedTrades) {
+  logger.info('cTrader orphan reconcile: matching results (account sweep)', {
+    accountName: accNorm || '(default)',
+    orphanCount: orphans.length,
+    matchedCount: relinkResults.length,
+    unmatchedCount: unmatchedOrphans.length,
+    links: relinkResults.map((r) => ({
+      tradeId: r.trade.id,
+      positionId: r.positionId,
+      messageId: r.trade.message_id,
+      telegramChannel: r.trade.channel,
+      priorStatus: r.priorStatus,
+      score: r.score
+    })),
+    unmatchedOrphans: unmatchedOrphans.length > 0 ? unmatchedOrphans : undefined,
+    exchange: 'ctrader'
+  });
+
+  if (relinkResults.length === 0) return;
+
+  for (const { trade } of relinkResults) {
     try {
       await checkAndApplyBreakeven(
         trade,
@@ -769,7 +836,7 @@ const reconcileOrphanCtraderPositionsForAccount = async (
         dynamicBreakevenAfterTPs
       );
     } catch (err) {
-      logger.warn('Breakeven after orphan reconcile failed', {
+      logger.warn('cTrader orphan reconcile: breakeven after relink failed', {
         tradeId: trade.id,
         exchange: 'ctrader',
         error: serializeErrorForLog(err)
