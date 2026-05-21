@@ -264,6 +264,19 @@
         "accountId": "CTRADER_ACCOUNT_ID_2_100"
       },
       "propFirms": [{"name": "the5ers", "initialBalance": 100000}]
+    },
+    {
+      "name": "ctrader_demo_2_25",
+      "exchange": "ctrader",
+      "demo": false,
+      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_demo_2; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
+      "envVarNames": {
+        "apiKey": "CTRADER_CLIENT_ID",
+        "apiSecret": "CTRADER_CLIENT_SECRET",
+        "accessToken": "CTRADER_ACCESS_TOKEN",
+        "accountId": "CTRADER_ACCOUNT_ID_2_25"
+      },
+      "propFirms": [{"name": "the5ers", "initialBalance": 100000}]
     }
   ],
   "initiators": [
@@ -363,7 +376,7 @@
       "useMarketRangeForEntry": true,
       "accountFilters": [
         {
-          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100"],
+          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
           "rules": {}
         }
       ]
@@ -429,7 +442,7 @@
       "useMarketRangeForEntry": true,
       "accountFilters": [
         {
-          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100"],
+          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
           "rules": {}
         }
       ]
