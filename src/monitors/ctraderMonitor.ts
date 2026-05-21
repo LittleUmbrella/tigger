@@ -49,6 +49,9 @@ const capDealHistoryWindow = (fromTs: number, toTs: number): [number, number] =>
 /** Default account-wide orphan position reconcile interval when account omits ctraderOrphanPositionReconcileSeconds */
 const DEFAULT_CTRADER_ORPHAN_RECONCILE_SECONDS = 15;
 
+/** How far back to search DB rows when matching open orphans (by created_at). */
+const CTRADER_ORPHAN_RECONCILE_MAX_AGE_HOURS = 6;
+
 /** Throttle orphan sweeps per logical cTrader account across all channel monitor instances. */
 const globalCtraderOrphanReconcileLastMs = new Map<string, number>();
 
@@ -701,7 +704,7 @@ const reconcileOrphanCtraderPositionsForAccount = async (
   if (orphans.length === 0) return;
 
   const recentPool = await db.getRecentCtraderTradesForAccount(accNorm, {
-    maxAgeHours: 1,
+    maxAgeHours: CTRADER_ORPHAN_RECONCILE_MAX_AGE_HOURS,
     limit: 300,
   });
 
