@@ -22,6 +22,7 @@ import {
   ctraderLotsToApiVolumeSimple,
   resolveCtraderNTradeEntryOrderIds,
 } from '../clients/ctraderClient.js';
+import { resolveCtraderAccountCredentials } from '../utils/ctraderAccountCredentials.js';
 import dayjs from 'dayjs';
 
 /** cTrader: one market/limit order per TP; leg volumes must not exceed risk-sized total (Bybit uses reduce-only trims). */
@@ -58,44 +59,6 @@ export interface CTraderInitiatorConfig {
   accountId?: string;
   environment?: 'demo' | 'live';
 }
-
-/**
- * Get account credentials from account config or environment variables
- */
-const getAccountCredentials = (account: AccountConfig | null): { 
-  clientId: string | undefined; 
-  clientSecret: string | undefined; 
-  accessToken: string | undefined;
-  refreshToken: string | undefined;
-  accountId: string | undefined;
-  environment: 'demo' | 'live';
-} => {
-  if (account) {
-    const envVarNameForClientId = account.envVarNames?.apiKey; // Reuse apiKey field for clientId
-    const envVarNameForSecret = account.envVarNames?.apiSecret;
-    const envVarNameForAccessToken = account.envVarNames?.accessToken;
-    const envVarNameForRefreshToken = account.envVarNames?.refreshToken;
-    const envVarNameForAccountId = account.envVarNames?.accountId;
-    
-    return {
-      clientId: envVarNameForClientId ? process.env[envVarNameForClientId] : process.env.CTRADER_CLIENT_ID,
-      clientSecret: envVarNameForSecret ? process.env[envVarNameForSecret] : process.env.CTRADER_CLIENT_SECRET,
-      accessToken: envVarNameForAccessToken ? process.env[envVarNameForAccessToken] : process.env.CTRADER_ACCESS_TOKEN,
-      refreshToken: envVarNameForRefreshToken ? process.env[envVarNameForRefreshToken] : process.env.CTRADER_REFRESH_TOKEN,
-      accountId: envVarNameForAccountId ? process.env[envVarNameForAccountId] : process.env.CTRADER_ACCOUNT_ID,
-      environment: account.demo ? 'demo' : 'live'
-    };
-  } else {
-    return {
-      clientId: process.env.CTRADER_CLIENT_ID,
-      clientSecret: process.env.CTRADER_CLIENT_SECRET,
-      accessToken: process.env.CTRADER_ACCESS_TOKEN,
-      refreshToken: process.env.CTRADER_REFRESH_TOKEN,
-      accountId: process.env.CTRADER_ACCOUNT_ID,
-      environment: 'demo'
-    };
-  }
-};
 
 /**
  * Get list of accounts to use for this trade
@@ -213,7 +176,8 @@ const executeTradeForAccount = async (
     });
 
     // Get API credentials for this account
-    const { clientId, clientSecret, accessToken, refreshToken, accountId, environment } = getAccountCredentials(account);
+    const { clientId, clientSecret, accessToken, refreshToken, accountId, environment } =
+      resolveCtraderAccountCredentials(account);
     
     if (!isSimulation && (!accessToken || !accountId)) {
       logger.error('cTrader credentials not found', {

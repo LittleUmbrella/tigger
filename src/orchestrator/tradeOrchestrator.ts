@@ -39,6 +39,7 @@ import { fxcmChartParser } from '../parsers/fxcmChartParser.js';
 import '../strategies/index.js';
 import { getStrategy, getRegisteredStrategyNames } from '../strategies/strategyRegistry.js';
 import { initiateFromStrategy } from '../initiators/signalInitiator.js';
+import { verifyAllCtraderAccountsAtStartup } from '../utils/ctraderStartupAuth.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -80,6 +81,11 @@ export const startTradeOrchestrator = async (
     url: config.database?.url
   });
   await db.initialize();
+
+  if (!isSimulation && config.accounts?.length) {
+    await verifyAllCtraderAccountsAtStartup(config.accounts);
+  }
+
   const state: OrchestratorState = {
     stopHarvesters: [],
     stopStrategies: [],
