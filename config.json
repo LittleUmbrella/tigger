@@ -276,7 +276,7 @@
         "accessToken": "CTRADER_ACCESS_TOKEN",
         "accountId": "CTRADER_ACCOUNT_ID_2_25"
       },
-      "propFirms": [{"name": "the5ers", "initialBalance": 100000}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 25000}]
     }
   ],
   "initiators": [
