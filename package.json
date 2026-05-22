@@ -38,6 +38,7 @@
     "query-loggly": "tsx src/scripts/query_loggly.ts",
     "loggly-diagnose": "tsx src/scripts/loggly_diagnose.ts",
     "loggly-query-message": "tsx src/scripts/loggly_query_message.ts",
+    "check-ctrader-startup-auth": "tsx src/scripts/check_ctrader_startup_auth_logs.ts",
     "backfill-trade-skip-events": "tsx src/scripts/backfill_trade_skip_events.ts",
     "search-private-chats": "tsx src/scripts/search_private_chats.ts",
     "mcp:loggly": "tsx src/mcp/logglyServer.ts",
