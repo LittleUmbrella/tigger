@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { meanNumericGap, resolveTpTokensWithOpen } from '../tpOpenResolve.js';
+import { meanNumericGap, parseTpTokens, resolveTpTokensWithOpen } from '../tpOpenResolve.js';
 
 describe('meanNumericGap', () => {
   it('returns 0 for fewer than two numbers', () => {
@@ -9,6 +9,19 @@ describe('meanNumericGap', () => {
 
   it('averages consecutive gaps', () => {
     expect(meanNumericGap([10, 12, 16])).toBe(3);
+  });
+});
+
+describe('parseTpTokens', () => {
+  it('recognizes TP 4 : Open without capturing index as price', () => {
+    const msg =
+      'TP1:4565 TP2:4575 TP3:4585 TP 4 : Open';
+    expect(parseTpTokens(msg)).toEqual([
+      { kind: 'number', value: 4565 },
+      { kind: 'number', value: 4575 },
+      { kind: 'number', value: 4585 },
+      { kind: 'open' },
+    ]);
   });
 });
 

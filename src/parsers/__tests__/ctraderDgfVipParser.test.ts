@@ -129,6 +129,19 @@ Use proper money management. Consistency is 🔑`;
     expect(order!.takeProfits).toEqual([4810, 4815, 4820]);
   });
 
+  it('parses Format 6 single-line BTCUSD BUY with spaced dash entry and STOP LOSS (message 14564)', () => {
+    const msg =
+      '🛡 BTCUSD BUY 76300- 76000 💣STOP LOSS:75600 TP1:76900 TP2: 77500 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('BTCUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.marketExecution).toBe(true);
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(75600);
+    expect(order!.takeProfits).toEqual([76900, 77500]);
+  });
+
   it('parses Format 7: pipe before side, TP arrow lines, Tp N — price', () => {
     const msg = `🛡XAUUSD | BUY  4713-4718
 
@@ -185,6 +198,17 @@ TP : 4800.00
     expect(order!.signalType).toBe('long');
     expect(order!.stopLoss).toBe(4730);
     expect(order!.takeProfits).toEqual([4765, 4770, 4775]);
+  });
+
+  it('parses TP 4 : Open as extrapolated level from prior numeric TPs (message 14579)', () => {
+    const msg =
+      '🛡XAUUSD BUY 4555-4550 💣 Stop Loss :4545 TP1:4565 TP2:4575 TP3:4585 TP 4 : Open Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('long');
+    expect(order!.stopLoss).toBe(4545);
+    expect(order!.takeProfits).toEqual([4565, 4575, 4585, 4595]);
   });
 
   it('parses Format 9 as limit: emoji, XAUUSD | SELL SIGNAL, Entry range, TP arrows', () => {

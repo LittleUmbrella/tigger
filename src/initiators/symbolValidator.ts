@@ -278,7 +278,14 @@ export async function validateBybitSymbol(
 ): Promise<{ valid: boolean; error?: string; actualSymbol?: string }> {
   try {
     let normalizedSymbol = symbol.replace('/', '').toUpperCase();
-    
+    if (
+      normalizedSymbol.endsWith('USD') &&
+      !normalizedSymbol.endsWith('USDT') &&
+      !normalizedSymbol.endsWith('USDC')
+    ) {
+      normalizedSymbol = normalizedSymbol.replace(/USD$/, 'USDT');
+    }
+
     // Log validation attempt - critical for investigations
     logger.debug('Starting symbol validation', {
       symbol: normalizedSymbol,

@@ -4,60 +4,7 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
 import { logger } from '../utils/logger.js';
-import { TpToken, meanNumericGap, resolveTpTokensWithOpen } from './tpOpenResolve.js';
-
-/**
- * Unicode superscript ordinals after "TP" (e.g. TP¹ TP² …) are not matched by `\d*`.
- * Normalize to ASCII digits so the existing TP regex applies.
- */
-const SUPERSCRIPT_DIGIT_MAP: Record<string, string> = {
-  '\u00B9': '1',
-  '\u00B2': '2',
-  '\u00B3': '3',
-  '\u2070': '0',
-  '\u2074': '4',
-  '\u2075': '5',
-  '\u2076': '6',
-  '\u2077': '7',
-  '\u2078': '8',
-  '\u2079': '9',
-};
-
-const normalizeTpSuperscriptLabels = (content: string): string =>
-  content.replace(/(T[Pp])([\u00B9\u00B2\u00B3\u2070\u2074-\u2079]+)/gi, (_full, tp: string, subs: string) => {
-    const digits = [...subs].map((ch) => SUPERSCRIPT_DIGIT_MAP[ch] ?? '').join('');
-    return digits ? `${tp}${digits}` : _full;
-  });
-
-/** Tp 4 — 4738; TP1 ➝ 4723 → TPn: price for the main TP regex. */
-const normalizeTpArrowAndEmDashLabels = (content: string): string => {
-  let s = content;
-  s = s.replace(/T[Pp]\s+(\d+)\s*[\u2014\u2013\-]\s*([\d.]+)/gi, 'TP$1: $2');
-  s = s.replace(/T[Pp](\d*)\s+[^\d.\r\n:]{1,40}?\s+([\d.]+)/gi, (_full, idx: string, price: string) =>
-    `TP${idx}: ${price}`,
-  );
-  return s;
-};
-
-/** Ordered TP lines: numeric price or the word "open" (case-insensitive). */
-const parseTpTokens = (content: string): TpToken[] => {
-  const normalized = normalizeTpArrowAndEmDashLabels(normalizeTpSuperscriptLabels(content));
-  const re = /T[Pp]\d*[\s:]*@?\s*([\d.]+|open)\b/gi;
-  const out: TpToken[] = [];
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(normalized)) !== null) {
-    const raw = m[1].trim().toLowerCase();
-    if (raw === 'open') {
-      out.push({ kind: 'open' });
-      continue;
-    }
-    const n = parseFloat(raw);
-    if (!isNaN(n) && n > 0) {
-      out.push({ kind: 'number', value: n });
-    }
-  }
-  return out;
-};
+import { meanNumericGap, parseTpTokens, resolveTpTokensWithOpen } from './tpOpenResolve.js';
 
 /** Parse SL from text starting at SL label through end of line (avoids conflating entry `@` with SL `@`). */
 const parseStopLossFromSlClause = (slClause: string): number | undefined => {
@@ -91,10 +38,20 @@ const resolveStopLossFromDgfContent = (normalizedContent: string): number | unde
   return stopLoss;
 };
 
-/** Skip leading emoji / junk so `^`-anchored patterns and symbol-first lines match (e.g. 🛡XAUUSD …). */
+/** Gold aliases and generic cTrader symbols (e.g. BTCUSD, EURNZD) — same permissiveness as Format 5 hashNowPair. */
+const DGF_GOLD_TOKEN = 'gold|XAU|XAUT|XAUUSD';
+const DGF_PAIR_TOKEN = `${DGF_GOLD_TOKEN}|[A-Z][A-Z0-9]{2,11}`;
+
+/** Skip leading emoji / junk so symbol-first lines match (e.g. 🛡XAUUSD …, 🛡 BTCUSD BUY …). */
 const stripToFirstDgfSymbol = (s: string): string => {
-  const m = /\b(gold|XAU|XAUT|XAUUSD)\b/i.exec(s);
-  return m?.index !== undefined ? s.slice(m.index) : s;
+  const goldM = new RegExp(`\\b(${DGF_GOLD_TOKEN})\\b`, 'i').exec(s);
+  if (goldM?.index !== undefined) return s.slice(goldM.index);
+  const pairM = new RegExp(
+    `\\b([A-Z][A-Z0-9]{2,11})\\b(?=\\s*[|:]?\\s*(?:buy|sell)\\b)`,
+    'i',
+  ).exec(s);
+  if (pairM?.index !== undefined) return s.slice(pairM.index);
+  return s;
 };
 
 /**
@@ -248,9 +205,12 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       /^\s*(buy|sell)\s+(gold|XAU|XAUT|XAUUSD)\s+([\d.]+)/i,
     );
 
-    /** XAUUSD SELL 4782, XAUUSD : BUY …, XAUUSD | BUY 4713-4718, XAUUSD BUY NOW 4650-4646, etc. — symbol before buy/sell (optional | or : ; optional NOW; leading emoji ok). */
+    /** SYMBOL SELL 4782, BTCUSD BUY 76300- 76000, XAUUSD | BUY … — symbol before buy/sell (optional | or : ; optional NOW; leading emoji ok). */
     const symbolSideEntry = firstLineForDgf.match(
-      /(gold|XAU|XAUT|XAUUSD)(?:\s+\|\s+|\s*:?\s*)(buy|sell)\s+(?:now\s+)?([\d.]+)(?:\/([\d.]+)|-([\d.]+))?/i,
+      new RegExp(
+        `(${DGF_PAIR_TOKEN})(?:\\s+\\|\\s+|\\s*:?\\s*)(buy|sell)\\s+(?:now\\s+)?([\\d.]+)(?:\\/([\\d.]+)|-\\s*([\\d.]+))?`,
+        'i',
+      ),
     );
 
     let tradingPair: string;
@@ -276,7 +236,9 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       const secondEntry = symbolSideEntry[4] ?? symbolSideEntry[5];
       if (secondEntry !== undefined && !validatePositivePrice(secondEntry)) return null;
     } else {
-      const tradingPairMatch = contentFromAsset.match(/^(gold|XAU|XAUT|XAUUSD)\s+/i);
+      const tradingPairMatch = contentFromAsset.match(
+        new RegExp(`^(${DGF_PAIR_TOKEN})\\s+`, 'i'),
+      );
       if (!tradingPairMatch) return null;
 
       tradingPair = normalizeAssetAliasToCTraderPair(tradingPairMatch[1]);
