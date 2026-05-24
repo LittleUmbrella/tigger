@@ -30,6 +30,7 @@
     "test-ctrader-tp": "tsx src/scripts/test_ctrader_tp_placement.ts",
     "cancel-ctrader-order": "tsx src/scripts/cancel_ctrader_order.ts",
     "open-ctrader-trade": "tsx src/scripts/open_ctrader_trade.ts",
+    "generate-signal-templates": "tsx src/scripts/generate_signal_templates.ts",
     "troubleshoot-trade": "tsx src/scripts/troubleshoot_trade.ts",
     "debug-ctrader-closures": "tsx src/scripts/debug_ctrader_trade_closures.ts",
     "trace-message": "tsx src/scripts/trace_message.ts",

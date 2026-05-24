@@ -155,6 +155,8 @@ interface DatabaseAdapter {
   ): Promise<Trade[]>;
   getTradeWithMessage(tradeId: number): Promise<TradeWithMessage | null>;
   getTradesWithMessages(status?: Trade['status']): Promise<TradeWithMessage[]>;
+  /** Latest message content for a channel from a trade-linked message (excludes manual trades). */
+  getSampleSignalContentByChannel(channel: string): Promise<string | null>;
   updateTrade(id: number, updates: Partial<Trade>): Promise<void>;
   insertEvaluationResult(result: Omit<EvaluationResultRecord, 'id' | 'created_at'>): Promise<number>;
   getEvaluationResults(channel?: string, propFirmName?: string): Promise<EvaluationResultRecord[]>;
@@ -935,6 +937,23 @@ class SQLiteAdapter implements DatabaseAdapter {
     }
 
     return result;
+  }
+
+  async getSampleSignalContentByChannel(channel: string): Promise<string | null> {
+    const row = this.db
+      .prepare(
+        `SELECT m.content AS content
+         FROM trades t
+         INNER JOIN messages m ON m.message_id = t.message_id AND m.channel = t.channel
+         WHERE t.channel = ?
+           AND TRIM(m.content) != ''
+           AND t.message_id NOT LIKE 'manual-%'
+           AND m.content NOT LIKE '[Manual Trade]%'
+         ORDER BY t.created_at DESC
+         LIMIT 1`
+      )
+      .get(channel) as { content: string } | undefined;
+    return row?.content?.trim() || null;
   }
 
   async updateTrade(id: number, updates: Partial<Trade>): Promise<void> {
@@ -2050,6 +2069,23 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     return tradeWithMessages;
   }
 
+  async getSampleSignalContentByChannel(channel: string): Promise<string | null> {
+    const result = await this.pool.query(
+      `SELECT m.content AS content
+       FROM trades t
+       INNER JOIN messages m ON m.message_id = t.message_id AND m.channel = t.channel
+       WHERE t.channel = $1
+         AND TRIM(m.content) != ''
+         AND t.message_id NOT LIKE 'manual-%'
+         AND m.content NOT LIKE '[Manual Trade]%'
+       ORDER BY t.created_at DESC
+       LIMIT 1`,
+      [channel]
+    );
+    const content = result.rows[0]?.content;
+    return typeof content === 'string' && content.trim() ? content.trim() : null;
+  }
+
   async insertTrade(trade: Omit<Trade, 'id' | 'created_at' | 'updated_at'> & { created_at?: string }): Promise<number> {
     const created_at = trade.created_at;
     const result = await this.pool.query(`
@@ -2609,6 +2645,10 @@ export class DatabaseManager {
 
   getTradesWithMessages(status?: Trade['status']): Promise<TradeWithMessage[]> {
     return this.adapter.getTradesWithMessages(status);
+  }
+
+  getSampleSignalContentByChannel(channel: string): Promise<string | null> {
+    return this.adapter.getSampleSignalContentByChannel(channel);
   }
 
   updateTrade(id: number, updates: Partial<Trade>): Promise<void> {
