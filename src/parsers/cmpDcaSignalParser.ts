@@ -1,5 +1,5 @@
 import { ParsedOrder } from '../types/order.js';
-import { validateParsedOrder } from '../utils/tradeValidation.js';
+import { validateCmpSignalPrices } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 
@@ -11,6 +11,7 @@ import { ParserOptions } from './parserRegistry.js';
  * Long: ID/USDT
  * Entry at CMP: 0.03155   (informative reference only — not used as limit price)
  * Entry: 0.02 - 0.03 (CMP)   — range + (CMP) same as above; cmpRef is midpoint for recognition only
+ * Entry: 0.03670 (CMP)       — single price + (CMP); cmpRef is reference only (no entryPrice)
  * Entry: 0.02 - 0.03 CMP DCA: …   — bare CMP before DCA (same midpoint rule)
  * TP ➊: ...
  * SL: ...
@@ -29,6 +30,7 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
   const cmpColon = content.match(/\bCMP\s*:\s*([\d.]+)/i);
   const entryRangeCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
   const entryRangeBareCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s+CMP\b/i);
+  const entrySingleCmp = content.match(/Entry\s*:\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
 
   let cmpRef: number;
   if (entryAtCmp) {
@@ -43,6 +45,8 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
     const lo = parseFloat(entryRangeBareCmp[1]);
     const hi = parseFloat(entryRangeBareCmp[2]);
     cmpRef = (lo + hi) / 2;
+  } else if (entrySingleCmp) {
+    cmpRef = parseFloat(entrySingleCmp[1]);
   } else {
     return null;
   }
@@ -109,7 +113,9 @@ export const cmpDcaSignalParser = (content: string, _options?: ParserOptions): P
     // Omit entryPrice: initiator treats as market-at-touch (Bybit → limit @ last traded price).
   };
 
-  if (!validateParsedOrder(parsed, { message: content })) return null;
+  if (!validateCmpSignalPrices(signalType, cmpRef, stopLoss, takeProfits, { message: content })) {
+    return null;
+  }
 
   return parsed;
 };

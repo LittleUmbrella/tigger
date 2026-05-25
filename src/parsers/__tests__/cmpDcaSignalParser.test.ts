@@ -61,6 +61,25 @@ SL: H4 candle close below 0.02975
     expect(order!.leverage).toBe(20);
   });
 
+  it('parses Entry: price (CMP) single-line short (PROMPT-style)', () => {
+    const content =
+      'Short: PROMPT/USDT Entry: 0.03670 (CMP) DCA: 0.03900 ------------- TP ➊: 0.03510 TP ➋: 0.03290 TP ➌: 0.03044 ------------- SL: H4 candle close above 0.04044';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('PROMPTUSDT');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.takeProfits).toEqual([0.0351, 0.0329, 0.03044]);
+    expect(order!.stopLoss).toBe(0.04044);
+    expect(order!.leverage).toBe(20);
+  });
+
+  it('rejects Entry: price (CMP) when TPs are order-of-magnitude typos (message 1506948389177397329)', () => {
+    const content =
+      'Short: PROMPT/USDT Entry: 0.03670 (CMP) DCA: 0.03900 ------------- TP ➊: 0.003510 TP ➋: 0.003290 TP ➌: 0.003044 ------------- SL: H4 candle close above 0.04044';
+    expect(cmpDcaSignalParser(content)).toBeNull();
+  });
+
   it('parses short with numeric SL and TP1 numbering', () => {
     const content = `Short: BTC/USDT
 (5x Leverage)

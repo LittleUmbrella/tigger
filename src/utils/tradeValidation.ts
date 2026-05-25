@@ -1,6 +1,19 @@
 import { ParsedOrder } from '../types/order.js';
 import { logger } from './logger.js';
 
+/** Reject CMP parse when SL/TP and cmpRef differ by more than this ratio (catches dropped-digit typos). */
+export const CMP_REFERENCE_MAX_PRICE_RATIO = 10;
+
+export const priceRatioExceedsSanity = (
+  a: number,
+  b: number,
+  maxRatio: number = CMP_REFERENCE_MAX_PRICE_RATIO
+): boolean => {
+  if (!Number.isFinite(a) || !Number.isFinite(b) || a <= 0 || b <= 0) return true;
+  const ratio = a >= b ? a / b : b / a;
+  return ratio > maxRatio;
+};
+
 /**
  * Validate trade prices based on position type
  * For long: all TPs must be > entry, stop loss must be < entry
@@ -58,6 +71,55 @@ export const validateTradePrices = (
       ...context,
       signalType,
       entryPrice,
+      stopLoss,
+      takeProfits,
+      errors
+    });
+    return false;
+  }
+
+  return true;
+};
+
+/**
+ * Validate CMP-style signals using the message's CMP reference price (entry omitted on ParsedOrder).
+ */
+export const validateCmpSignalPrices = (
+  signalType: 'long' | 'short',
+  cmpRef: number,
+  stopLoss: number | undefined,
+  takeProfits: number[] | undefined,
+  context?: { channel?: string; symbol?: string; messageId?: string; message?: string }
+): boolean => {
+  if (!Number.isFinite(cmpRef) || cmpRef <= 0) {
+    return false;
+  }
+
+  if (!validateTradePrices(signalType, cmpRef, stopLoss, takeProfits, context)) {
+    return false;
+  }
+
+  const errors: string[] = [];
+  if (stopLoss && stopLoss > 0 && priceRatioExceedsSanity(cmpRef, stopLoss)) {
+    errors.push(
+      `Stop loss (${stopLoss}) is implausible vs CMP reference (${cmpRef}); ratio exceeds ${CMP_REFERENCE_MAX_PRICE_RATIO}x`
+    );
+  }
+  if (takeProfits && takeProfits.length > 0) {
+    takeProfits.forEach((tp, index) => {
+      if (priceRatioExceedsSanity(cmpRef, tp)) {
+        errors.push(
+          `Take profit ${index + 1} (${tp}) is implausible vs CMP reference (${cmpRef}); ratio exceeds ${CMP_REFERENCE_MAX_PRICE_RATIO}x`
+        );
+      }
+    });
+  }
+
+  if (errors.length > 0) {
+    logger.error('CMP signal validation failed: price sanity check', {
+      ...context,
+      signalType,
+      cmpRef,
       stopLoss,
       takeProfits,
       errors
