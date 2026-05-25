@@ -136,6 +136,7 @@ export const initiateFromStrategy = async (options: {
     logger.warn('initiateFromStrategy: order failed validation, skipping', { channel, strategyName });
     return;
   }
+  const signalStopLoss = inputOrder.stopLoss;
   let order = inputOrder;
   if (channelConfig.tradeObfuscation) {
     order = applyTradeObfuscation(order, channelConfig.tradeObfuscation);
@@ -176,6 +177,8 @@ export const initiateFromStrategy = async (options: {
     accounts,
     accountFilters: channelConfig.accountFilters,
     propFirms: channelConfig.propFirms,
+    tradeObfuscation: channelConfig.tradeObfuscation,
+    signalStopLoss,
     maxRisk: channelConfig.maxRisk,
     slAdjustmentTolerancePercent: channelConfig.slAdjustmentTolerancePercent,
     useLimitOrderForEntry: channelConfig.useLimitOrderForEntry,
@@ -445,6 +448,7 @@ export const processMessages = async (
         }
       }
       if (parsed) {
+        const signalStopLoss = parsed.stopLoss;
         // Obfuscate before any rounding for exchange constraints (must stay first)
         if (tradeObfuscation) {
           parsed = applyTradeObfuscation(parsed, tradeObfuscation);
@@ -499,6 +503,8 @@ export const processMessages = async (
           accounts,
           accountFilters,
           propFirms,
+          tradeObfuscation,
+          signalStopLoss,
           maxRisk,
           slAdjustmentTolerancePercent,
           useLimitOrderForEntry,

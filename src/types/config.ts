@@ -162,8 +162,8 @@ export interface PercentRange {
 export interface TradeObfuscationConfig {
   /**
    * Single percent offset moving SL toward a worse outcome for the trade (sign ignored; magnitude only):
-   * - long: SL is reduced (tighter adverse exit)
-   * - short: SL is increased
+   * - long: SL is reduced (farther below entry)
+   * - short: SL is increased (farther above entry)
    */
   sl?: number;
   entry?: PercentRange;

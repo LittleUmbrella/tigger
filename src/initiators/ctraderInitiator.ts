@@ -6,6 +6,7 @@ import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuant
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
+import { resolveObfuscatedStopLossAbsolute } from '../utils/tradeObfuscation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import {
@@ -147,6 +148,68 @@ const toRelativeSlTp = (priceDiff: number, pricePrecision: number): number => {
   return Math.round(rounded * 100000);
 };
 
+/**
+ * Market N-trades attach relative SL at placement (distance from quote at order time).
+ * When price is near the signal SL, that distance collapses and the broker sets SL just above/below fill.
+ * Obfuscate from parser SL (worse/farther), then amend position with that absolute price.
+ */
+const reconcileCtraderNTradeAbsoluteStopLoss = async (
+  ctraderClient: CTraderClient,
+  opts: {
+    orderIds: string[];
+    tpPricesPerLeg: number[][];
+    obfuscatedAbsoluteStopLoss: number;
+    channel: string;
+    symbol: string;
+    accountName: string;
+    messageId: string;
+  }
+): Promise<void> => {
+  const seenPositionIds = new Set<string>();
+  for (let i = 0; i < opts.orderIds.length; i++) {
+    const orderId = opts.orderIds[i];
+    const legTp = opts.tpPricesPerLeg[i]?.[0];
+    try {
+      const positionId = await ctraderClient.getPositionIdByEntryOrderId(orderId);
+      if (!positionId) continue;
+      const pid = String(positionId);
+      if (seenPositionIds.has(pid)) continue;
+      seenPositionIds.add(pid);
+
+      const knownTp = legTp != null && isFinite(legTp) && legTp > 0 ? legTp : undefined;
+      await ctraderClient.modifyPosition({
+        positionId: pid,
+        stopLoss: opts.obfuscatedAbsoluteStopLoss,
+        knownStopLoss: opts.obfuscatedAbsoluteStopLoss,
+        knownTakeProfit: knownTp,
+      });
+
+      logger.info('cTrader N-trade: set obfuscated absolute stop loss after market fill', {
+        channel: opts.channel,
+        messageId: opts.messageId,
+        symbol: opts.symbol,
+        accountName: opts.accountName,
+        orderId,
+        positionId: pid,
+        stopLoss: opts.obfuscatedAbsoluteStopLoss,
+        legTakeProfit: knownTp,
+        exchange: 'ctrader',
+      });
+    } catch (error) {
+      logger.warn('cTrader N-trade: failed to set obfuscated absolute stop loss after market fill', {
+        channel: opts.channel,
+        messageId: opts.messageId,
+        symbol: opts.symbol,
+        accountName: opts.accountName,
+        orderId,
+        stopLoss: opts.obfuscatedAbsoluteStopLoss,
+        exchange: 'ctrader',
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+};
+
 const TRADE_SKIP_PRICE_BEYOND_TP_EVENT = 'trade_skipped_price_beyond_tp';
 
 const executeTradeForAccount = async (
@@ -154,7 +217,24 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, useLimitOrderForEntry, maxSkippablePastTPs, useMarketRangeForEntry, maxRisk } = context;
+  const {
+    channel,
+    riskPercentage,
+    entryTimeoutMinutes,
+    message,
+    order,
+    db,
+    isSimulation,
+    priceProvider,
+    config,
+    slAdjustmentTolerancePercent,
+    useLimitOrderForEntry,
+    maxSkippablePastTPs,
+    useMarketRangeForEntry,
+    maxRisk,
+    tradeObfuscation,
+    signalStopLoss,
+  } = context;
 
   /** Channel `useLimitOrderForEntry` (defaults true when omitted): false → MARKET + relative SL/TP; true → limit-at-touch. `order.marketExecution` forces the MARKET path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
@@ -1046,6 +1126,14 @@ const executeTradeForAccount = async (
       }
     }
 
+    const roundSlForExchange = (p: number) => roundPrice(p, pricePrecision, tickSize);
+    const obfuscatedAbsoluteStopLoss = resolveObfuscatedStopLossAbsolute(
+      signalStopLoss ?? order.stopLoss,
+      order.signalType,
+      tradeObfuscation,
+      roundSlForExchange
+    );
+
     // Note: cTrader doesn't support per-symbol leverage setting via API (unlike Bybit)
     // Leverage is set at the account level and configured by the broker
     // Also, cTrader doesn't have position limit error codes that require retry logic with leverage reduction
@@ -1732,6 +1820,24 @@ const executeTradeForAccount = async (
           nTradeData.tradeIds.push(tid);
         }
         tradeId = nTradeData.tradeIds[0];
+
+        if (
+          isMarketOrder &&
+          !useLimitAtTouch &&
+          obfuscatedAbsoluteStopLoss > 0 &&
+          !isSimulation &&
+          ctraderClient
+        ) {
+          await reconcileCtraderNTradeAbsoluteStopLoss(ctraderClient, {
+            orderIds: nTradeData.orderIds,
+            tpPricesPerLeg: nTradeData.tpPrices,
+            obfuscatedAbsoluteStopLoss,
+            channel,
+            symbol,
+            accountName: accountName || 'default',
+            messageId: String(message.message_id),
+          });
+        }
       } catch (error) {
         logger.error('Failed to insert N-trade records - cannot proceed', {
           channel,
@@ -1775,7 +1881,7 @@ const executeTradeForAccount = async (
     }
 
     // Verify stop loss was set, or set it separately if initial order didn't support it (Gap #7)
-    // Skip for N-trades - SL is already on each order
+    // N-trades: relative SL on market orders is reconciled to absolute above after insert
     if (!nTradeData && order.stopLoss && order.stopLoss > 0 && !isSimulation && ctraderClient) {
       // Check if entry order has already filled (market orders or fast-filling limit orders)
       // Resolve position by orderId via deals (exact match) - avoids wrong position when multiple exist per symbol
@@ -1813,16 +1919,17 @@ const executeTradeForAccount = async (
               symbol,
               accountName: accountName || 'default',
               positionId,
+              obfuscatedAbsoluteStopLoss,
+              signalStopLoss: signalStopLoss ?? order.stopLoss,
               roundedStopLoss,
-              originalStopLoss: order.stopLoss
             });
             
-            // Set stop loss using modifyPosition
+            // Set obfuscated absolute SL (parser level → worse/farther, then amend)
             const bestTpFallback = roundedTPPrices?.[roundedTPPrices.length - 1];
             await ctraderClient.modifyPosition({
               positionId,
-              stopLoss: roundedStopLoss,
-              knownStopLoss: order.stopLoss > 0 ? order.stopLoss : undefined,
+              stopLoss: obfuscatedAbsoluteStopLoss,
+              knownStopLoss: obfuscatedAbsoluteStopLoss,
               knownTakeProfit: bestTpFallback != null && bestTpFallback > 0 ? bestTpFallback : undefined
             });
             

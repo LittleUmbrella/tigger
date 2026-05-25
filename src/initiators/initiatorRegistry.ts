@@ -1,4 +1,4 @@
-import { InitiatorConfig, AccountConfig, AccountFilter } from '../types/config.js';
+import { InitiatorConfig, AccountConfig, AccountFilter, TradeObfuscationConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -36,6 +36,10 @@ export interface InitiatorContext {
   maxSkippablePastTPs?: number;
   /** cTrader: MARKET_RANGE entry; boundary TP index follows maxSkippablePastTPs */
   useMarketRangeForEntry?: boolean;
+  /** Channel trade obfuscation (SL amend uses signalStopLoss + sl config, not double-applied). */
+  tradeObfuscation?: TradeObfuscationConfig;
+  /** Parser stop loss before tradeObfuscation (for absolute SL reconcile on exchange). */
+  signalStopLoss?: number;
 }
 
 /**

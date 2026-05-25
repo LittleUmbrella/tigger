@@ -32,6 +32,11 @@ import {
 import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { resolveBreakevenAfterTPs, getTakeProfitLevelCount } from '../utils/breakevenAfterTPs.js';
+import {
+  classifyCtraderCloseFromDb,
+  classifyCtraderCloseFromExitAndPnl,
+  collectSignalTakeProfitLevels,
+} from './ctraderCloseClassification.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -54,95 +59,6 @@ const CTRADER_ORPHAN_RECONCILE_MAX_AGE_HOURS = 6;
 
 /** Throttle orphan sweeps per logical cTrader account across all channel monitor instances. */
 const globalCtraderOrphanReconcileLastMs = new Map<string, number>();
-
-/** Statuses we may have written for either TP or SL exits; `stopped` is SL-only when we classified correctly. */
-const CTRADER_TP_SL_CLASSIFY_STATUSES = new Set<Trade['status']>(['closed', 'completed']);
-
-/**
- * Classify TP vs SL from exit price / PnL vs trade levels (no status check).
- * Used for reconcile closes and for persisted sibling rows.
- */
-const classifyCtraderCloseFromExitAndPnl = (
-  trade: Trade,
-  exitPrice: number | undefined,
-  pnl: number | undefined
-): 'take_profit' | 'stop_loss' | null => {
-  const merged: Trade =
-    exitPrice != null && exitPrice > 0
-      ? { ...trade, exit_price: exitPrice, ...(pnl !== undefined ? { pnl } : {}) }
-      : { ...trade, ...(pnl !== undefined ? { pnl } : {}) };
-
-  if (exitPrice != null && isFinite(exitPrice) && exitPrice > 0) {
-    const r = classifyCtraderExitPriceVsLevels(merged, exitPrice);
-    if (r != null) return r;
-  }
-
-  const p = pnl ?? merged.pnl;
-  if (p != null && isFinite(p)) {
-    if (p > 1e-8) return 'take_profit';
-    if (p < -1e-8) return 'stop_loss';
-  }
-
-  return null;
-};
-
-/**
- * Classify a closed cTrader sibling as TP vs SL using DB fields.
- * Our monitor often sets `closed` for both exchange TP and SL exits; use exit_price vs TP/SL/entry when present.
- */
-const classifyCtraderCloseFromDb = (sibling: Trade): 'take_profit' | 'stop_loss' | null => {
-  if (sibling.status === 'stopped') return 'stop_loss';
-  if (!CTRADER_TP_SL_CLASSIFY_STATUSES.has(sibling.status)) return null;
-  return classifyCtraderCloseFromExitAndPnl(sibling, sibling.exit_price, sibling.pnl);
-};
-
-const classifyCtraderExitPriceVsLevels = (sibling: Trade, exitPx: number): 'take_profit' | 'stop_loss' | null => {
-  let tps: number[];
-  try {
-    tps = JSON.parse(sibling.take_profits || '[]') as number[];
-  } catch {
-    tps = [];
-  }
-  const tpPrice = tps.length > 0 ? tps[0] : 0;
-  const sl = sibling.stop_loss;
-  const entry = sibling.entry_price;
-  const isLong = getIsLong(sibling);
-
-  const tol = Math.max(Math.abs(entry) * 1e-5, 1e-9);
-
-  if (tpPrice > 0 && sl > 0) {
-    if (isLong) {
-      if (exitPx >= tpPrice - tol) return 'take_profit';
-      if (exitPx <= sl + tol) return 'stop_loss';
-      const distTp = Math.abs(exitPx - tpPrice);
-      const distSl = Math.abs(exitPx - sl);
-      if (distTp + tol < distSl) return 'take_profit';
-      if (distSl + tol < distTp) return 'stop_loss';
-    } else {
-      if (exitPx <= tpPrice + tol) return 'take_profit';
-      if (exitPx >= sl - tol) return 'stop_loss';
-      const distTp = Math.abs(exitPx - tpPrice);
-      const distSl = Math.abs(exitPx - sl);
-      if (distTp + tol < distSl) return 'take_profit';
-      if (distSl + tol < distTp) return 'stop_loss';
-    }
-  } else {
-    if (isLong) {
-      if (exitPx > entry + tol) return 'take_profit';
-      if (exitPx < entry - tol) return 'stop_loss';
-    } else {
-      if (exitPx < entry - tol) return 'take_profit';
-      if (exitPx > entry + tol) return 'stop_loss';
-    }
-  }
-
-  if (sibling.pnl != null && isFinite(sibling.pnl)) {
-    if (sibling.pnl > 1e-8) return 'take_profit';
-    if (sibling.pnl < -1e-8) return 'stop_loss';
-  }
-
-  return null;
-};
 
 /**
  * When DB cannot classify, use closing deals' realized gross profit (cTrader ProtoOAClosePositionDetail).
@@ -204,14 +120,16 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
   const relevant = siblings.filter(
     (t) => t.exchange === 'ctrader' && t.account_name === accountName && t.id !== currentTradeId
   );
+  const signalTpLevels = collectSignalTakeProfitLevels(relevant);
 
   const tasks = relevant.map(async (sib) => {
-    if (sib.status === 'stopped') return 0;
-    if (sib.status !== 'closed' && sib.status !== 'completed') return 0;
+    if (sib.status !== 'closed' && sib.status !== 'completed' && sib.status !== 'stopped') {
+      return 0;
+    }
 
     const weight = Math.max(getTakeProfitLevelCount(sib), 1);
 
-    const fromDb = classifyCtraderCloseFromDb(sib);
+    const fromDb = classifyCtraderCloseFromDb(sib, signalTpLevels);
     if (fromDb === 'take_profit') return weight;
     if (fromDb === 'stop_loss') return 0;
 
@@ -855,9 +773,10 @@ const resolveCtraderReconciledCloseReason = async (
   trade: Trade,
   exitPrice: number | undefined,
   pnl: number | undefined,
-  ctraderClient: CTraderClient | undefined
+  ctraderClient: CTraderClient | undefined,
+  signalTpLevels: number[] = []
 ): Promise<'take_profit' | 'stop_loss'> => {
-  let r = classifyCtraderCloseFromExitAndPnl(trade, exitPrice, pnl);
+  let r = classifyCtraderCloseFromExitAndPnl(trade, exitPrice, pnl, signalTpLevels);
   if (r != null) return r;
   if (ctraderClient && trade.position_id) {
     const fromDeals = await classifyCtraderCloseFromDeals(trade, ctraderClient);
@@ -941,7 +860,17 @@ const applyCtraderReconciledClose = async (
   ctraderClient: CTraderClient | undefined,
   beContext?: CTraderBreakevenContext
 ): Promise<void> => {
-  const reason = await resolveCtraderReconciledCloseReason(trade, exitPrice, pnl, ctraderClient);
+  const accountSiblings = (await db.getTradesByMessageId(trade.message_id, trade.channel)).filter(
+    (t) => t.exchange === 'ctrader' && t.account_name === trade.account_name
+  );
+  const signalTpLevels = collectSignalTakeProfitLevels(accountSiblings);
+  const reason = await resolveCtraderReconciledCloseReason(
+    trade,
+    exitPrice,
+    pnl,
+    ctraderClient,
+    signalTpLevels
+  );
   if (reason === 'take_profit') {
     await applyBreakevenToActiveSiblingsBeforeTpClose(trade, db, ctraderClient, beContext);
   }

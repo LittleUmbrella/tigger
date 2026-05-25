@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { applyTradeObfuscation } from '../tradeObfuscation.js';
+import { applyTradeObfuscation, resolveObfuscatedStopLossAbsolute } from '../tradeObfuscation.js';
 import type { ParsedOrder } from '../../types/order.js';
 import type { TradeObfuscationConfig } from '../../types/config.js';
 
@@ -40,6 +40,15 @@ describe('applyTradeObfuscation', () => {
     };
     const result = applyTradeObfuscation(shortOrder, config);
     expect(result.stopLoss).toBeCloseTo(51510, 0); // 51000 * (1 + 0.01)
+  });
+
+  it('resolveObfuscatedStopLossAbsolute applies sl obfuscation from signal SL', () => {
+    const sl = resolveObfuscatedStopLossAbsolute(4580, 'short', { sl: 1 });
+    expect(sl).toBeCloseTo(4625.8, 1); // 4580 * 1.01
+  });
+
+  it('resolveObfuscatedStopLossAbsolute returns signal SL when no sl config', () => {
+    expect(resolveObfuscatedStopLossAbsolute(4580, 'short', { tp: 0.02 })).toBe(4580);
   });
 
   it('treats negative sl offset as absolute value', () => {

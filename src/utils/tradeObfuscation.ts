@@ -86,3 +86,31 @@ export const applyTradeObfuscation = (
 
   return result;
 };
+
+/**
+ * SL for absolute exchange amend (e.g. cTrader modifyPosition after market fill).
+ * Applies SL obfuscation from the parser signal level, then optional rounding.
+ * Uses signalStopLoss (pre-obfuscation), not order.stopLoss, so SL is not double-obfuscated
+ * when the parsed order was already obfuscated upstream for sizing/TP.
+ */
+export const resolveObfuscatedStopLossAbsolute = (
+  signalStopLoss: number,
+  signalType: ParsedOrder['signalType'],
+  tradeObfuscation?: TradeObfuscationConfig,
+  roundPriceFn?: (price: number) => number
+): number => {
+  let sl = signalStopLoss;
+  if (tradeObfuscation?.sl != null) {
+    sl = applyTradeObfuscation(
+      {
+        tradingPair: '',
+        leverage: 1,
+        stopLoss: signalStopLoss,
+        takeProfits: [],
+        signalType,
+      },
+      { sl: tradeObfuscation.sl }
+    ).stopLoss;
+  }
+  return roundPriceFn ? roundPriceFn(sl) : sl;
+};
