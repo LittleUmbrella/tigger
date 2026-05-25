@@ -103,6 +103,19 @@ Use proper money management. Consistency is 🔑`;
     expect(order!.takeProfits).toEqual([4728, 4738, 4748, 4768]);
   });
 
+  it('parses XAUUSD SELL with en-dash entry, SL =, and bare T1/T2 labels (message 14654)', () => {
+    const msg =
+      '🛡XAUUSD SELL 4572– 4577 💣 SL = 4580 T1 :4565 T2 : 4550 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.marketExecution).toBe(true);
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.stopLoss).toBe(4580);
+    expect(order!.takeProfits).toEqual([4565, 4550]);
+  });
+
   it('parses single-line XAUUSD BUY NOW with dash entry range and Tp labels', () => {
     const msg =
       '🛡XAUUSD BUY NOW 4650-4646 💣 Sl: 4642 Tp1: 4660 Tp2: 4670 Tp3: 4680 Tp4: 4700 Use proper money management. Consistency is 🔑';

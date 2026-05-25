@@ -13,6 +13,13 @@ describe('meanNumericGap', () => {
 });
 
 describe('parseTpTokens', () => {
+  it('recognizes bare T1/T2 labels without P', () => {
+    expect(parseTpTokens('T1 :4565 T2 : 4550')).toEqual([
+      { kind: 'number', value: 4565 },
+      { kind: 'number', value: 4550 },
+    ]);
+  });
+
   it('recognizes TP 4 : Open without capturing index as price', () => {
     const msg =
       'TP1:4565 TP2:4575 TP3:4585 TP 4 : Open';

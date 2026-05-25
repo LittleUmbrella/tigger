@@ -97,10 +97,16 @@ const normalizeTpArrowAndEmDashLabels = (content: string): string => {
 const normalizeTpIndexedOpenLabels = (content: string): string =>
   content.replace(/T[Pp]\s*(\d+)\s*:\s*open\b/gi, 'TP$1: open');
 
+/** T1 :4565 / T2 : 4550 (no P) → TP1: for the main TP regex. */
+const normalizeBareTTakeProfitLabels = (content: string): string =>
+  content.replace(/(?<![Pp])T(\d+)\s*:/gi, 'TP$1:');
+
 /** Ordered TP lines: numeric price or the word "open" (case-insensitive). */
 export const parseTpTokens = (content: string): TpToken[] => {
   const normalized = normalizeTpIndexedOpenLabels(
-    normalizeTpArrowAndEmDashLabels(normalizeTpSuperscriptLabels(content)),
+    normalizeTpArrowAndEmDashLabels(
+      normalizeBareTTakeProfitLabels(normalizeTpSuperscriptLabels(content)),
+    ),
   );
   const re = /T[Pp]\d*[\s:]*@?\s*([\d.]+|open)\b/gi;
   const out: TpToken[] = [];

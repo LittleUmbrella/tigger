@@ -18,7 +18,7 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
     const v = parseFloat(solidBreak[1]);
     if (!isNaN(v) && v > 0) return v;
   }
-  const slPlain = slClause.match(/(?:SL|Stop\s*Loss)\s*:?\s*([\d.]+)/i);
+  const slPlain = slClause.match(/(?:SL|Stop\s*Loss)\s*[=:]?\s*([\d.]+)/i);
   if (slPlain) {
     const v = parseFloat(slPlain[1]);
     if (!isNaN(v) && v > 0) return v;
@@ -28,7 +28,7 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
 
 /** Prefer first SL label clause on a line; if parsing fails, scan full message (single-line layouts). */
 const resolveStopLossFromDgfContent = (normalizedContent: string): number | undefined => {
-  const slClauseMatch = normalizedContent.match(/\b(?:SL|Stop\s*Loss)\b\s*:?\s*[^\n]*/i);
+  const slClauseMatch = normalizedContent.match(/\b(?:SL|Stop\s*Loss)\b\s*[=:]?\s*[^\n]*/i);
   const slClause = slClauseMatch?.[0] ?? '';
   let stopLoss = slClause ? parseStopLossFromSlClause(slClause) : undefined;
   if (stopLoss === undefined || isNaN(stopLoss) || stopLoss <= 0) {
@@ -41,6 +41,10 @@ const resolveStopLossFromDgfContent = (normalizedContent: string): number | unde
 /** Gold aliases and generic cTrader symbols (e.g. BTCUSD, EURNZD) — same permissiveness as Format 5 hashNowPair. */
 const DGF_GOLD_TOKEN = 'gold|XAU|XAUT|XAUUSD';
 const DGF_PAIR_TOKEN = `${DGF_GOLD_TOKEN}|[A-Z][A-Z0-9]{2,11}`;
+
+/** En-dash / em-dash entry ranges (e.g. 4572– 4577) → ASCII hyphen for range regexes. */
+const normalizeUnicodeEntryRangeDashes = (content: string): string =>
+  content.replace(/([\d.]+)\s*[\u2013\u2014\u2012\u2212]\s*([\d.]+)/g, '$1-$2');
 
 /** Skip leading emoji / junk so symbol-first lines match (e.g. 🛡XAUUSD …, 🛡 BTCUSD BUY …). */
 const stripToFirstDgfSymbol = (s: string): string => {
@@ -63,7 +67,7 @@ const stripToFirstDgfSymbol = (s: string): string => {
  */
 export const ctraderDgfVipParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
-    const normalizedContent = content.trim();
+    const normalizedContent = normalizeUnicodeEntryRangeDashes(content.trim());
     const lines = normalizedContent.split(/\r?\n/);
     const rawFirstLine = lines[0] ?? '';
     const firstLineForDgf = stripToFirstDgfSymbol(rawFirstLine);
