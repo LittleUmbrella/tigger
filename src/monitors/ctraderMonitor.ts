@@ -29,7 +29,6 @@ import {
   CTRADER_RECONCILE_TIMEOUT_MS,
   CTRADER_DEAL_CLOSE_INFO_TIMEOUT_MS
 } from './shared.js';
-import { getEntryFillPrice } from '../utils/entryFillPrice.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { resolveBreakevenAfterTPs, getTakeProfitLevelCount } from '../utils/breakevenAfterTPs.js';
 import {
@@ -37,6 +36,12 @@ import {
   classifyCtraderCloseFromExitAndPnl,
   collectSignalTakeProfitLevels,
 } from './ctraderCloseClassification.js';
+import {
+  computeCtraderBreakevenSlPlan,
+  isValidBreakevenStopLoss,
+  readExchangePositionStopLoss,
+  stopLossMatchesTarget,
+} from './ctraderBreakeven.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -117,10 +122,12 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
   accountName: string | undefined,
   ctraderClient: CTraderClient | undefined
 ): Promise<number> => {
-  const relevant = siblings.filter(
-    (t) => t.exchange === 'ctrader' && t.account_name === accountName && t.id !== currentTradeId
+  const accountSiblings = siblings.filter(
+    (t) => t.exchange === 'ctrader' && t.account_name === accountName
   );
-  const signalTpLevels = collectSignalTakeProfitLevels(relevant);
+  const signalTpLevels = collectSignalTakeProfitLevels(accountSiblings);
+
+  const relevant = accountSiblings.filter((t) => t.id !== currentTradeId);
 
   const tasks = relevant.map(async (sib) => {
     if (sib.status !== 'closed' && sib.status !== 'completed' && sib.status !== 'stopped') {
@@ -160,7 +167,6 @@ const checkAndApplyBreakeven = async (
   dynamicBreakevenAfterTPs: boolean,
   options?: { extraClosedTpWeight?: number }
 ): Promise<void> => {
-  if (trade.stop_loss_breakeven) return;
   if (!ctraderClient || !trade.position_id) {
     logger.debug('Skipping cTrader breakeven — need client and position_id', {
       tradeId: trade.id,
@@ -192,45 +198,95 @@ const checkAndApplyBreakeven = async (
 
   if (siblingsHitTp < effectiveBreakevenAfterTPs) return;
 
+  let plan: Awaited<ReturnType<typeof computeCtraderBreakevenSlPlan>>;
   try {
-    const bePrice = await getEntryFillPrice(trade, db, { ctraderClient });
-    const symbol = normalizeCTraderSymbol(trade.trading_pair);
-    const symbolInfo = await ctraderClient.getSymbolInfo(symbol);
+    plan = await computeCtraderBreakevenSlPlan(trade, db, ctraderClient);
+  } catch (planError) {
+    logger.error('Failed to compute cTrader breakeven SL plan', {
+      tradeId: trade.id,
+      channel: trade.channel,
+      exchange: 'ctrader',
+      error: serializeErrorForLog(planError)
+    });
+    return;
+  }
 
-    const rawDigits = symbolInfo?.digits;
-    const digits = typeof rawDigits === 'number' ? rawDigits : (typeof rawDigits === 'object' && rawDigits?.low != null ? rawDigits.low : 2);
-    const tickSize = Math.pow(10, -digits);
+  const { bePrice, slPrice, tickSize, isLong, knownTakeProfit } = plan;
 
-    const rawSl = symbolInfo?.slDistance;
-    const slDistance = typeof rawSl === 'number' ? rawSl : (typeof rawSl === 'object' && rawSl != null ? (protobufLongToNumber(rawSl) ?? 0) : 0);
-    let minNudge = tickSize;
-    if (slDistance > 0) {
-      const rawDistType = symbolInfo?.distanceSetIn ?? (symbolInfo as any)?.distance_set_in;
-      const distType = typeof rawDistType === 'number' ? rawDistType : (typeof rawDistType === 'object' && rawDistType?.low != null ? rawDistType.low : 1);
-      if (distType === 2) {
-        minNudge = Math.max(tickSize, bePrice * (slDistance / 10000));
-      } else {
-        minNudge = Math.max(tickSize, slDistance * Math.pow(10, -digits));
-      }
-    }
+  if (!isValidBreakevenStopLoss(isLong, bePrice, slPrice, tickSize)) {
+    logger.error('Refusing cTrader breakeven — computed SL on wrong side of entry', {
+      tradeId: trade.id,
+      direction: trade.direction,
+      isLong,
+      bePrice,
+      slPrice,
+      entryPrice: trade.entry_price,
+      exchange: 'ctrader'
+    });
+    return;
+  }
 
-    const isLong = getIsLong(trade);
-    const rawSlPrice = isLong ? bePrice - minNudge : bePrice + minNudge;
-    const slPrice = Math.round(rawSlPrice * Math.pow(10, digits)) / Math.pow(10, digits);
+  let exchangeSl: number | undefined;
+  try {
+    exchangeSl = await readExchangePositionStopLoss(ctraderClient, trade.position_id);
+  } catch (readErr) {
+    logger.warn('Could not read exchange SL before breakeven amend', {
+      tradeId: trade.id,
+      positionId: trade.position_id,
+      exchange: 'ctrader',
+      error: serializeErrorForLog(readErr)
+    });
+  }
 
-    let knownTakeProfit: number | undefined;
-    try {
-      const tps: number[] = JSON.parse(trade.take_profits || '[]');
-      const last = tps[tps.length - 1];
-      if (isFinite(last) && last > 0) knownTakeProfit = last;
-    } catch { /* ignore parse errors */ }
+  if (
+    trade.stop_loss_breakeven &&
+    stopLossMatchesTarget(exchangeSl, slPrice, tickSize)
+  ) {
+    return;
+  }
 
+  if (trade.stop_loss_breakeven && !stopLossMatchesTarget(exchangeSl, slPrice, tickSize)) {
+    logger.warn('cTrader breakeven flagged in DB but exchange SL mismatch — re-applying amend', {
+      tradeId: trade.id,
+      positionId: trade.position_id,
+      dbStopLoss: trade.stop_loss,
+      targetBreakevenSl: slPrice,
+      exchangeStopLoss: exchangeSl,
+      exchange: 'ctrader'
+    });
+  }
+
+  try {
     await ctraderClient.modifyPosition({
       positionId: trade.position_id,
       stopLoss: slPrice,
       knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
       knownTakeProfit
     });
+
+    let exchangeSlAfter: number | undefined;
+    try {
+      exchangeSlAfter = await readExchangePositionStopLoss(ctraderClient, trade.position_id);
+    } catch (readAfterErr) {
+      logger.warn('Could not verify exchange SL after breakeven amend', {
+        tradeId: trade.id,
+        positionId: trade.position_id,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(readAfterErr)
+      });
+    }
+
+    if (!stopLossMatchesTarget(exchangeSlAfter, slPrice, tickSize)) {
+      logger.error('cTrader breakeven amend did not match exchange SL — leaving DB unchanged', {
+        tradeId: trade.id,
+        positionId: trade.position_id,
+        targetBreakevenSl: slPrice,
+        exchangeStopLossAfter: exchangeSlAfter,
+        exchangeStopLossBefore: exchangeSl,
+        exchange: 'ctrader'
+      });
+      return;
+    }
 
     await db.updateTrade(trade.id, {
       stop_loss: slPrice,
@@ -247,6 +303,7 @@ const checkAndApplyBreakeven = async (
       dynamicBreakevenAfterTPs,
       bePrice,
       slPrice,
+      exchangeStopLoss: exchangeSlAfter,
       exchange: 'ctrader'
     });
   } catch (beError) {
@@ -257,6 +314,8 @@ const checkAndApplyBreakeven = async (
       totalTpLevels,
       dynamicBreakevenAfterTPs,
       channel: trade.channel,
+      targetBreakevenSl: slPrice,
+      exchangeStopLoss: exchangeSl,
       exchange: 'ctrader',
       error: serializeErrorForLog(beError)
     });
