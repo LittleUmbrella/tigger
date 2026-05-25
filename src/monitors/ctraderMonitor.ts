@@ -37,6 +37,7 @@ import {
   collectSignalTakeProfitLevels,
 } from './ctraderCloseClassification.js';
 import {
+  clampBreakevenStopLossToMarket,
   computeCtraderBreakevenSlPlan,
   isValidBreakevenStopLoss,
   readExchangePositionStopLoss,
@@ -116,18 +117,20 @@ const classifyCtraderCloseFromDeals = async (
   return null;
 };
 
+/**
+ * Count closed legs on this signal that exited at take profit.
+ * Uses all cTrader accounts on the message — when TP1 fills on one prop account,
+ * open legs on other accounts should still move SL to breakeven.
+ */
 const countCtraderSiblingsClosedAtTakeProfit = async (
   siblings: Trade[],
   currentTradeId: number,
-  accountName: string | undefined,
   ctraderClient: CTraderClient | undefined
 ): Promise<number> => {
-  const accountSiblings = siblings.filter(
-    (t) => t.exchange === 'ctrader' && t.account_name === accountName
-  );
-  const signalTpLevels = collectSignalTakeProfitLevels(accountSiblings);
+  const messageCtraderSiblings = siblings.filter((t) => t.exchange === 'ctrader');
+  const signalTpLevels = collectSignalTakeProfitLevels(messageCtraderSiblings);
 
-  const relevant = accountSiblings.filter((t) => t.id !== currentTradeId);
+  const relevant = messageCtraderSiblings.filter((t) => t.id !== currentTradeId);
 
   const tasks = relevant.map(async (sib) => {
     if (sib.status !== 'closed' && sib.status !== 'completed' && sib.status !== 'stopped') {
@@ -189,12 +192,8 @@ const checkAndApplyBreakeven = async (
     dynamicBreakevenAfterTPs
   });
   const siblingsHitTp =
-    (await countCtraderSiblingsClosedAtTakeProfit(
-      allSiblings,
-      trade.id,
-      trade.account_name,
-      ctraderClient
-    )) + (options?.extraClosedTpWeight ?? 0);
+    (await countCtraderSiblingsClosedAtTakeProfit(allSiblings, trade.id, ctraderClient)) +
+    (options?.extraClosedTpWeight ?? 0);
 
   if (siblingsHitTp < effectiveBreakevenAfterTPs) return;
 
@@ -211,7 +210,40 @@ const checkAndApplyBreakeven = async (
     return;
   }
 
-  const { bePrice, slPrice, tickSize, isLong, knownTakeProfit } = plan;
+  let { bePrice, slPrice, tickSize, isLong, knownTakeProfit } = plan;
+
+  const symbol = normalizeCTraderSymbol(trade.trading_pair);
+  const priceSide: 'buy' | 'sell' = isLong ? 'buy' : 'sell';
+  try {
+    const marketPrice = await ctraderClient.getCurrentPrice(symbol, priceSide);
+    if (marketPrice != null && marketPrice > 0) {
+      const clamped = clampBreakevenStopLossToMarket(
+        isLong,
+        slPrice,
+        marketPrice,
+        tickSize,
+        plan.digits
+      );
+      if (clamped.clamped) {
+        logger.info('Clamped cTrader breakeven SL to valid level vs current market', {
+          tradeId: trade.id,
+          computedSl: slPrice,
+          clampedSl: clamped.slPrice,
+          marketPrice,
+          priceSide,
+          exchange: 'ctrader'
+        });
+        slPrice = clamped.slPrice;
+      }
+    }
+  } catch (clampErr) {
+    logger.warn('Could not fetch market price to clamp breakeven SL', {
+      tradeId: trade.id,
+      symbol,
+      exchange: 'ctrader',
+      error: serializeErrorForLog(clampErr)
+    });
+  }
 
   if (!isValidBreakevenStopLoss(isLong, bePrice, slPrice, tickSize)) {
     logger.error('Refusing cTrader breakeven — computed SL on wrong side of entry', {
@@ -413,12 +445,7 @@ const sweepCtraderPositionsForBreakeven = async (
       breakevenAfterTPs,
       dynamicBreakevenAfterTPs
     });
-    const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(
-      allSiblings,
-      rep.id,
-      rep.account_name,
-      client
-    );
+    const siblingsHitTp = await countCtraderSiblingsClosedAtTakeProfit(allSiblings, rep.id, client);
     if (siblingsHitTp < effectiveBreakevenAfterTPs) continue;
 
     const sym = normalizeCTraderSymbol(rep.trading_pair);

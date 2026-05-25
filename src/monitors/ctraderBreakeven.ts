@@ -64,6 +64,37 @@ export const readExchangePositionStopLoss = async (
   return parseCtraderPositionStopLoss(match as Record<string, unknown>);
 };
 
+/**
+ * cTrader rejects SL that is on the wrong side of spot (e.g. long SL above BID).
+ * When price has moved past entry before BE runs, clamp to the nearest valid protective level.
+ */
+export const clampBreakevenStopLossToMarket = (
+  isLong: boolean,
+  computedSl: number,
+  marketPrice: number,
+  tickSize: number,
+  digits: number
+): { slPrice: number; clamped: boolean } => {
+  if (!isFinite(marketPrice) || marketPrice <= 0) {
+    return { slPrice: computedSl, clamped: false };
+  }
+  const buffer = tickSize;
+  if (isLong) {
+    const maxSl = marketPrice - buffer;
+    if (computedSl > maxSl + buffer * 0.5) {
+      const sl = Math.round(maxSl * Math.pow(10, digits)) / Math.pow(10, digits);
+      return { slPrice: sl, clamped: true };
+    }
+  } else {
+    const minSl = marketPrice + buffer;
+    if (computedSl < minSl - buffer * 0.5) {
+      const sl = Math.round(minSl * Math.pow(10, digits)) / Math.pow(10, digits);
+      return { slPrice: sl, clamped: true };
+    }
+  }
+  return { slPrice: computedSl, clamped: false };
+};
+
 export const computeCtraderBreakevenSlPlan = async (
   trade: Trade,
   db: DatabaseManager,
