@@ -80,6 +80,29 @@ SL: H4 candle close below 0.02975
     expect(cmpDcaSignalParser(content)).toBeNull();
   });
 
+  it('parses Limit Entry range as limit signal with entryPrice (message 1506307353723666494)', () => {
+    const content =
+      'Short: EPIC/USDT — 20x/50x Lev Limit Entry: 0.3144 - 0.3272 DCA: 0.3434 ------------- TP ➊: 0.2890 TP ➋: 0.2664 TP ➌: 0.2452 SL: H4 candle close above 0.3575 ------------- Confluences: TL breakdown confirmed, daily FVG resistance, & weekly pin bar reversal.';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('EPICUSDT');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBe(0.3144);
+    expect(order!.entryTargets).toEqual([0.3144, 0.3272]);
+    expect(order!.takeProfits).toEqual([0.289, 0.2664, 0.2452]);
+    expect(order!.stopLoss).toBe(0.3575);
+    expect(order!.leverage).toBe(20);
+  });
+
+  it('parses Limit Entry single price', () => {
+    const content =
+      'Long: FOO/USDT Limit Entry: 1.25 DCA: 1.20 ------------- TP ➊: 1.35 SL: below 1.10';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.entryPrice).toBe(1.25);
+    expect(order!.entryTargets).toBeUndefined();
+  });
+
   it('parses short with numeric SL and TP1 numbering', () => {
     const content = `Short: BTC/USDT
 (5x Leverage)
