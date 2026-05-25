@@ -3276,8 +3276,13 @@ export const startCTraderMonitor = async (
         // Second pass: breakeven check runs after ALL close detections are committed.
         // This avoids a race where concurrent monitorTrade calls read stale sibling
         // status (e.g. sibling closed at TP not yet committed when another trade checks).
+        // Include trades already marked stop_loss_breakeven in DB so we can verify/retry exchange SL
+        // (a prior run may have updated DB without a successful ProtoOAAmendPositionSLTPReq).
         const tradesForBE = (await db.getActiveTrades()).filter(
-          t => t.channel === channel && t.exchange === 'ctrader' && !t.stop_loss_breakeven
+          (t) =>
+            t.channel === channel &&
+            t.exchange === 'ctrader' &&
+            (t.status === 'active' || t.status === 'filled')
         );
         if (tradesForBE.length > 0) {
           const beTasks = tradesForBE.map((trade) =>
