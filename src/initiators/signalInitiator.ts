@@ -183,7 +183,8 @@ export const initiateFromStrategy = async (options: {
     slAdjustmentTolerancePercent: channelConfig.slAdjustmentTolerancePercent,
     useLimitOrderForEntry: channelConfig.useLimitOrderForEntry,
     maxSkippablePastTPs: channelConfig.maxSkippablePastTPs,
-    useMarketRangeForEntry: channelConfig.useMarketRangeForEntry
+    useMarketRangeForEntry: channelConfig.useMarketRangeForEntry,
+    allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades
   };
   try {
     logger.info('initiateFromStrategy: running initiator', {
@@ -236,7 +237,8 @@ export const processUnparsedMessages = async (
   useMarketRangeForEntry?: boolean, // cTrader: MARKET_RANGE; boundary TP index = maxSkippablePastTPs (0=TP1, 1=TP2)
   maxRisk?: number,
   entryPriceStrategy?: 'worst' | 'average',
-  messageEndDate?: string
+  messageEndDate?: string,
+  allowConcurrentSymbolTrades?: boolean
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -345,7 +347,9 @@ export const processUnparsedMessages = async (
     maxSkippablePastTPs,
     useMarketRangeForEntry,
     maxRisk,
-    entryPriceStrategy
+    entryPriceStrategy,
+    false,
+    allowConcurrentSymbolTrades
   );
   
   logger.debug('Finished processing messages', {
@@ -382,7 +386,8 @@ export const processMessages = async (
   useMarketRangeForEntry?: boolean,
   maxRisk?: number,
   entryPriceStrategy?: 'worst' | 'average',
-  bypassInitiationLock: boolean = false
+  bypassInitiationLock: boolean = false,
+  allowConcurrentSymbolTrades?: boolean
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -509,7 +514,8 @@ export const processMessages = async (
           slAdjustmentTolerancePercent,
           useLimitOrderForEntry,
           maxSkippablePastTPs,
-          useMarketRangeForEntry
+          useMarketRangeForEntry,
+          allowConcurrentSymbolTrades
         };
 
         try {

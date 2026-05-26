@@ -17,6 +17,7 @@ import {
 } from '../utils/ctraderMarketRange.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
+import { resolveAllowConcurrentSymbolTrades } from '../utils/allowConcurrentSymbolTrades.js';
 import {
   CTraderClient,
   CTraderClientConfig,
@@ -423,9 +424,12 @@ const executeTradeForAccount = async (
       }
     }
     
-    // Check for existing open cTrader position on this channel for the same symbol (skip if forcePlaceTrade)
-    // Other channels may hold the same symbol; Bybit/evaluation still use global per-symbol dedup.
-    if (!context.forcePlaceTrade) {
+    // Per-channel symbol dedup (skip if forcePlaceTrade or allowConcurrentSymbolTrades).
+    const allowConcurrentSymbolTrades = resolveAllowConcurrentSymbolTrades(
+      context.allowConcurrentSymbolTrades,
+      account
+    );
+    if (!context.forcePlaceTrade && !allowConcurrentSymbolTrades) {
       const existingTrades = await db.getActiveTrades();
       const existingTradeForSymbol = existingTrades.find(
         (t) =>
@@ -443,9 +447,41 @@ const executeTradeForAccount = async (
           tradingPair: order.tradingPair,
           signalType: order.signalType,
           accountName: accountName || 'default',
+          allowConcurrentSymbolTrades,
           existingTradeId: existingTradeForSymbol.id,
           existingTradeStatus: existingTradeForSymbol.status,
           existingTradeChannel: existingTradeForSymbol.channel
+        });
+        await db.markMessageParsed(message.id);
+        return;
+      }
+    }
+
+    // Duplicate-signal dedup: always runs regardless of allowConcurrentSymbolTrades.
+    // Reposted signals (different message IDs) match on symbol + direction + parsed SL.
+    if (!context.forcePlaceTrade && order.stopLoss && order.stopLoss > 0) {
+      const activeTrades = await db.getActiveTrades();
+      const duplicateTrade = activeTrades.find(
+        (t) =>
+          t.exchange === 'ctrader' &&
+          t.channel === channel &&
+          t.trading_pair === order.tradingPair &&
+          t.direction === order.signalType &&
+          t.stop_loss === order.stopLoss &&
+          (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
+      );
+
+      if (duplicateTrade) {
+        logger.info('Skipping trade - duplicate signal (same symbol/direction/SL already active on this channel)', {
+          channel,
+          messageId: message.message_id,
+          symbol,
+          tradingPair: order.tradingPair,
+          signalType: order.signalType,
+          stopLoss: order.stopLoss,
+          accountName: accountName || 'default',
+          existingTradeId: duplicateTrade.id,
+          existingTradeStatus: duplicateTrade.status
         });
         await db.markMessageParsed(message.id);
         return;

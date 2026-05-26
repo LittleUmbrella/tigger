@@ -101,6 +101,11 @@ export interface AccountConfig {
    * omitted; set to 0 to disable on this account.
    */
   ctraderOrphanPositionReconcileSeconds?: number;
+  /**
+   * cTrader only: when true, allow a new trade for a symbol even if this channel already has an
+   * active cTrader trade row for that symbol. Overridden by channel `allowConcurrentSymbolTrades`.
+   */
+  allowConcurrentSymbolTrades?: boolean;
 }
 
 export interface InitiatorConfig {
@@ -224,6 +229,11 @@ export interface ChannelSetConfig {
   maxSkippablePastTPs?: number;
   /** cTrader only: when true, use MARKET_RANGE instead of MARKET for entries (base = current price, slippage capped to boundary TP chosen by maxSkippablePastTPs index). Validate on demo broker. */
   useMarketRangeForEntry?: boolean;
+  /**
+   * cTrader only: when true, allow stacked signals on the same symbol (skip per-channel symbol dedup).
+   * Overrides account-level `allowConcurrentSymbolTrades` for this channel.
+   */
+  allowConcurrentSymbolTrades?: boolean;
 }
 
 export interface SimulationConfig {

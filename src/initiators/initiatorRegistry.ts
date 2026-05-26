@@ -40,6 +40,11 @@ export interface InitiatorContext {
   tradeObfuscation?: TradeObfuscationConfig;
   /** Parser stop loss before tradeObfuscation (for absolute SL reconcile on exchange). */
   signalStopLoss?: number;
+  /**
+   * Channel-level override for stacked same-symbol trades (cTrader). Resolved with account via
+   * `resolveAllowConcurrentSymbolTrades`; default false.
+   */
+  allowConcurrentSymbolTrades?: boolean;
 }
 
 /**

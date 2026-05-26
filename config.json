@@ -410,6 +410,7 @@
       },
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true,
+      "allowConcurrentSymbolTrades": true,
       "accountFilters": [
         {
           "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25", "hyrotrader_challenge1"],

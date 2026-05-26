@@ -1054,7 +1054,8 @@ export const startTradeOrchestrator = async (
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
           channelConfig.maxRisk,
           channelEntryPriceStrategy,
-          undefined // messageEndDate
+          undefined, // messageEndDate
+          channelConfig.allowConcurrentSymbolTrades
         );
       }
     };
@@ -1121,7 +1122,8 @@ export const startTradeOrchestrator = async (
           channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
           channelConfig.maxRisk,
           channelEntryPriceStrategy,
-          undefined // messageEndDate
+          undefined, // messageEndDate
+          channelConfig.allowConcurrentSymbolTrades
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

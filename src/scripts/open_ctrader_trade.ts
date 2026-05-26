@@ -213,6 +213,7 @@ program
     let maxSkippablePastTPs: number | undefined;
     let useMarketRangeForEntry: boolean | undefined;
     let maxRisk: number | undefined;
+    let allowConcurrentSymbolTrades: boolean | undefined;
     let messageContent: string;
 
     if (contentMode) {
@@ -246,6 +247,7 @@ program
       maxSkippablePastTPs = channelConfig.maxSkippablePastTPs;
       useMarketRangeForEntry = channelConfig.useMarketRangeForEntry;
       maxRisk = channelConfig.maxRisk;
+      allowConcurrentSymbolTrades = channelConfig.allowConcurrentSymbolTrades;
 
       if (opts.account) {
         const account = contextAccounts.find(a => a.name === opts.account && a.exchange === 'ctrader');
@@ -331,6 +333,7 @@ program
       useLimitOrderForEntry,
       maxSkippablePastTPs,
       useMarketRangeForEntry,
+      allowConcurrentSymbolTrades,
       forcePlaceTrade: opts.force ?? false
     };
 

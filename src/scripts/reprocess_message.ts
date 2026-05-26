@@ -229,7 +229,8 @@ program
         channelConfig.useMarketRangeForEntry,
         channelConfig.maxRisk,
         entryPriceStrategy,
-        !!force
+        !!force,
+        channelConfig.allowConcurrentSymbolTrades
       );
 
       // --- Show result ---
