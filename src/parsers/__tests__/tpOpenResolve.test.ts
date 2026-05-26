@@ -20,6 +20,15 @@ describe('parseTpTokens', () => {
     ]);
   });
 
+  it('recognizes mathematical italic TP labels (dgfvip message 14813)', () => {
+    const msg =
+      '🛡XAUUSD BUY@4506~4502 𝑇𝑃1: 4520 𝑇𝑃2: 4530 💣SL 4495';
+    expect(parseTpTokens(msg)).toEqual([
+      { kind: 'number', value: 4520 },
+      { kind: 'number', value: 4530 },
+    ]);
+  });
+
   it('recognizes TP 4 : Open without capturing index as price', () => {
     const msg =
       'TP1:4565 TP2:4575 TP3:4585 TP 4 : Open';

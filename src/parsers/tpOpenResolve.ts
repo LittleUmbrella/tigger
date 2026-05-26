@@ -64,6 +64,63 @@ export const resolveTpTokensWithOpen = (tokens: TpToken[], avgStep: number): num
   return result;
 };
 
+/** Mathematical Alphanumeric Symbols: map stylized Latin letters to ASCII (dgfvip 𝑇𝑃 labels). */
+const MATHEMATICAL_LATIN_CAPITAL_BASES = [
+  0x1d400, 0x1d434, 0x1d468, 0x1d5a0, 0x1d5d4, 0x1d608,
+] as const;
+const MATHEMATICAL_LATIN_SMALL_BASES = [
+  0x1d41a, 0x1d44e, 0x1d482, 0x1d5ba, 0x1d5ee, 0x1d622,
+] as const;
+
+const decodeMathematicalLatinLetter = (codePoint: number): string | null => {
+  for (const base of MATHEMATICAL_LATIN_CAPITAL_BASES) {
+    if (codePoint >= base && codePoint < base + 26) {
+      return String.fromCharCode(0x41 + (codePoint - base));
+    }
+  }
+  for (const base of MATHEMATICAL_LATIN_SMALL_BASES) {
+    if (codePoint >= base && codePoint < base + 26) {
+      return String.fromCharCode(0x61 + (codePoint - base));
+    }
+  }
+  return null;
+};
+
+const decodeTpLetter = (codePoint: number): string | null => {
+  if (codePoint === 0x54 || codePoint === 0x74) {
+    return codePoint === 0x74 ? 't' : 'T';
+  }
+  if (codePoint === 0x50 || codePoint === 0x70) {
+    return codePoint === 0x70 ? 'p' : 'P';
+  }
+  return decodeMathematicalLatinLetter(codePoint);
+};
+
+/** 𝑇𝑃1: → TP1: before other TP normalizers run. */
+const normalizeMathematicalTpLabels = (content: string): string => {
+  let result = '';
+  let i = 0;
+  while (i < content.length) {
+    const cp = content.codePointAt(i);
+    if (cp === undefined) break;
+    const charLen = cp > 0xffff ? 2 : 1;
+    const nextIdx = i + charLen;
+    const nextCp = content.codePointAt(nextIdx);
+    const nextLen = nextCp !== undefined && nextCp > 0xffff ? 2 : 1;
+
+    const t = decodeTpLetter(cp);
+    const p = nextCp !== undefined ? decodeTpLetter(nextCp) : null;
+    if (t && p && t.toUpperCase() === 'T' && p.toUpperCase() === 'P') {
+      result += 'TP';
+      i = nextIdx + nextLen;
+      continue;
+    }
+    result += String.fromCodePoint(cp);
+    i += charLen;
+  }
+  return result;
+};
+
 const SUPERSCRIPT_DIGIT_MAP: Record<string, string> = {
   '\u00B9': '1',
   '\u00B2': '2',
@@ -105,7 +162,9 @@ const normalizeBareTTakeProfitLabels = (content: string): string =>
 export const parseTpTokens = (content: string): TpToken[] => {
   const normalized = normalizeTpIndexedOpenLabels(
     normalizeTpArrowAndEmDashLabels(
-      normalizeBareTTakeProfitLabels(normalizeTpSuperscriptLabels(content)),
+      normalizeBareTTakeProfitLabels(
+        normalizeTpSuperscriptLabels(normalizeMathematicalTpLabels(content)),
+      ),
     ),
   );
   const re = /T[Pp]\d*[\s:]*@?\s*([\d.]+|open)\b/gi;
