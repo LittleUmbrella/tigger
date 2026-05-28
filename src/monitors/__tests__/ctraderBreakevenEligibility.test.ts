@@ -78,4 +78,38 @@ describe('cTrader breakeven eligibility (message 14695 pattern)', () => {
     expect(effectiveBreakevenAfterTPs).toBe(1);
     expect(siblingsHitTp >= effectiveBreakevenAfterTPs).toBe(true);
   });
+
+  it('triggers BE when other legs closed at SL (N-trade scale-out)', () => {
+    const openLeg = leg({
+      id: 1251,
+      account_name: 'ctrader_demo_2',
+      status: 'active',
+      take_profits: '[4462.11]',
+    });
+    const all = [
+      openLeg,
+      leg({
+        id: 1254,
+        account_name: 'ctrader_demo_2_100',
+        status: 'stopped',
+        exit_price: 4430.95,
+        pnl: -419,
+        take_profits: '[4462.11]',
+      }),
+      leg({
+        id: 1253,
+        account_name: 'ctrader_demo_2_25',
+        status: 'stopped',
+        exit_price: 4430.97,
+        pnl: -66,
+        take_profits: '[4478.1]',
+      }),
+    ];
+    const { siblingsHitTp, effectiveBreakevenAfterTPs } = evaluateBreakevenEligibility(openLeg, all);
+    expect(siblingsHitTp).toBe(0);
+    const closedCount = all.filter(
+      (s) => s.id !== openLeg.id && ['closed', 'stopped', 'completed'].includes(s.status)
+    ).length;
+    expect(closedCount).toBeGreaterThanOrEqual(effectiveBreakevenAfterTPs);
+  });
 });

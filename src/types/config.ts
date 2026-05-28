@@ -96,11 +96,15 @@ export interface AccountConfig {
   propFirms?: (string | CustomPropFirmConfig)[];
   /**
    * cTrader only: interval in seconds for **account-wide** orphan position reconciliation. Scans all
-   * open positions on that account for any symbol or label; matches to recent DB trade rows across all
-   * channels for that account by side/entry/qty/time, relinks rows, reapplies BE. Default 15 when
-   * omitted; set to 0 to disable on this account.
+   * open positions on that account; relinks only when exchange entry label matches the trade row
+   * (`tgr-{channel}-{message_id}`). Default 15 when omitted; set to 0 to disable on this account.
    */
   ctraderOrphanPositionReconcileSeconds?: number;
+  /**
+   * cTrader only: interval in seconds for a slow label-vs-DB audit (open positions → entry labels →
+   * fix mismatched active rows, log cross-message linkage). Default 0 (off); typical value 300–900.
+   */
+  ctraderLabelAuditSweepSeconds?: number;
   /**
    * cTrader only: when true, allow a new trade for a symbol even if this channel already has an
    * active cTrader trade row for that symbol. Overridden by channel `allowConcurrentSymbolTrades`.
@@ -137,6 +141,11 @@ export interface MonitorConfig {
   ctraderSpotPriceMaxRetries?: number;
   /** cTrader only: max concurrent trades to monitor per poll (default 2). Limits historical API burst to stay under 5 req/sec. */
   ctraderMonitorConcurrency?: number;
+  /**
+   * cTrader only: default interval (seconds) for label-vs-DB audit per account when the account does
+   * not set `ctraderLabelAuditSweepSeconds`. 0 = disabled (default).
+   */
+  ctraderLabelAuditSweepSeconds?: number;
 }
 
 export interface AccountFilterRule {

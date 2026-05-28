@@ -11,11 +11,12 @@ export type CtraderBreakevenSlPlan = {
   slPrice: number;
   digits: number;
   tickSize: number;
+  minStopDistance: number;
   isLong: boolean;
   knownTakeProfit?: number;
 };
 
-/** How many ticks of slack when comparing exchange SL to target BE SL. */
+/** How many ticks of slack when comparing exchange price to target. */
 export const CTRADER_BE_SL_MATCH_TOLERANCE_TICKS = 2;
 
 export const parseCtraderPositionStopLoss = (position: Record<string, unknown>): number | undefined => {
@@ -46,12 +47,36 @@ export const isValidBreakevenStopLoss = (
   return isLong ? slPrice < bePrice - tol : slPrice > bePrice + tol;
 };
 
+export type CtraderOpenPositionsSnapshot = {
+  byPositionId: Map<string, Record<string, unknown>>;
+};
+
+export const buildCtraderOpenPositionsSnapshot = (
+  positions: Record<string, unknown>[]
+): CtraderOpenPositionsSnapshot => {
+  const byPositionId = new Map<string, Record<string, unknown>>();
+  for (const p of positions) {
+    const raw = p.positionId ?? p.id;
+    const pid =
+      typeof raw === 'object' && raw != null && 'low' in (raw as object)
+        ? String(protobufLongToNumber(raw as { low: number }) ?? (raw as { low: number }).low)
+        : String(raw ?? '');
+    if (pid) byPositionId.set(pid, p);
+  }
+  return { byPositionId };
+};
+
 export const readExchangePositionStopLoss = async (
   ctraderClient: CTraderClient,
-  positionId: string
+  positionId: string,
+  openSnapshot?: CtraderOpenPositionsSnapshot
 ): Promise<number | undefined> => {
-  const positions = await ctraderClient.getOpenPositions();
   const want = String(positionId);
+  if (openSnapshot) {
+    const match = openSnapshot.byPositionId.get(want);
+    return match ? parseCtraderPositionStopLoss(match) : undefined;
+  }
+  const positions = await ctraderClient.getOpenPositions();
   const match = positions.find((p: Record<string, unknown>) => {
     const raw = p.positionId ?? p.id;
     const pid =
@@ -73,21 +98,23 @@ export const clampBreakevenStopLossToMarket = (
   computedSl: number,
   marketPrice: number,
   tickSize: number,
-  digits: number
+  digits: number,
+  minStopDistance: number = tickSize,
+  bufferMultiplier: number = 1
 ): { slPrice: number; clamped: boolean } => {
   if (!isFinite(marketPrice) || marketPrice <= 0) {
     return { slPrice: computedSl, clamped: false };
   }
-  const buffer = tickSize;
+  const buffer = Math.max(tickSize, minStopDistance) * bufferMultiplier;
   if (isLong) {
     const maxSl = marketPrice - buffer;
-    if (computedSl > maxSl + buffer * 0.5) {
+    if (computedSl > maxSl + tickSize * 0.5) {
       const sl = Math.round(maxSl * Math.pow(10, digits)) / Math.pow(10, digits);
       return { slPrice: sl, clamped: true };
     }
   } else {
     const minSl = marketPrice + buffer;
-    if (computedSl < minSl - buffer * 0.5) {
+    if (computedSl < minSl - tickSize * 0.5) {
       const sl = Math.round(minSl * Math.pow(10, digits)) / Math.pow(10, digits);
       return { slPrice: sl, clamped: true };
     }
@@ -149,5 +176,89 @@ export const computeCtraderBreakevenSlPlan = async (
     /* ignore */
   }
 
-  return { bePrice, slPrice, digits, tickSize, isLong, knownTakeProfit };
+  return { bePrice, slPrice, digits, tickSize, minStopDistance: minNudge, isLong, knownTakeProfit };
+};
+
+export const isCtraderBadStopsError = (err: unknown): boolean => {
+  const msg = err instanceof Error ? err.message : String(err);
+  return /TRADING_BAD_STOPS|invalid range/i.test(msg);
+};
+
+export type CtraderBreakevenAmendResult = {
+  slPrice: number;
+  exchangeSl?: number;
+  amended: boolean;
+};
+
+/** Amend SL toward breakeven; retries with tighter market clamp on TRADING_BAD_STOPS. */
+export const attemptCtraderBreakevenAmend = async (
+  ctraderClient: CTraderClient,
+  trade: Trade,
+  plan: CtraderBreakevenSlPlan,
+  slPrice: number,
+  openSnapshot?: CtraderOpenPositionsSnapshot
+): Promise<CtraderBreakevenAmendResult> => {
+  if (!trade.position_id) return { slPrice, amended: false };
+
+  const symbol = normalizeCTraderSymbol(trade.trading_pair);
+  const priceSide: 'buy' | 'sell' = plan.isLong ? 'buy' : 'sell';
+  let targetSl = slPrice;
+  const maxAttempts = 4;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      try {
+        const marketPrice = await ctraderClient.getCurrentPrice(symbol, priceSide);
+        if (marketPrice != null && marketPrice > 0) {
+          const clamped = clampBreakevenStopLossToMarket(
+            plan.isLong,
+            targetSl,
+            marketPrice,
+            plan.tickSize,
+            plan.digits,
+            plan.minStopDistance,
+            attempt + 1
+          );
+          targetSl = clamped.slPrice;
+        }
+      } catch {
+        /* use last targetSl */
+      }
+    }
+
+    if (!isValidBreakevenStopLoss(plan.isLong, plan.bePrice, targetSl, plan.tickSize)) {
+      return { slPrice: targetSl, amended: false };
+    }
+
+    try {
+      await ctraderClient.modifyPosition({
+        positionId: trade.position_id,
+        stopLoss: targetSl,
+        knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
+        knownTakeProfit: plan.knownTakeProfit,
+      });
+    } catch (err) {
+      if (!isCtraderBadStopsError(err) || attempt >= maxAttempts - 1) throw err;
+      continue;
+    }
+
+    let exchangeSl: number | undefined;
+    try {
+      exchangeSl = await readExchangePositionStopLoss(
+        ctraderClient,
+        trade.position_id,
+        openSnapshot
+      );
+    } catch {
+      /* verify optional */
+    }
+    if (stopLossMatchesTarget(exchangeSl, targetSl, plan.tickSize)) {
+      return { slPrice: targetSl, exchangeSl, amended: true };
+    }
+    if (attempt >= maxAttempts - 1) {
+      return { slPrice: targetSl, exchangeSl, amended: false };
+    }
+  }
+
+  return { slPrice: targetSl, amended: false };
 };

@@ -113,6 +113,9 @@ export const startTradeOrchestrator = async (
 
   // Merge cTrader monitor options from all ctrader monitors (symbol map, timeout, retries)
   const ctraderMonitors = config.monitors?.filter((m: { type?: string }) => m.type === 'ctrader') ?? [];
+  const defaultCtraderLabelAuditSweepSeconds =
+    (ctraderMonitors[0] as { ctraderLabelAuditSweepSeconds?: number } | undefined)
+      ?.ctraderLabelAuditSweepSeconds ?? 0;
   const ctraderSymbolMap = Object.assign({}, ...ctraderMonitors.map((m: { ctraderSymbolMap?: Record<string, string> }) => m.ctraderSymbolMap ?? {}));
   const ctraderSpotPriceTimeoutMs = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceTimeoutMs?: number }).ctraderSpotPriceTimeoutMs : undefined;
   const ctraderSpotPriceMaxRetries = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceMaxRetries?: number }).ctraderSpotPriceMaxRetries : undefined;
@@ -423,6 +426,12 @@ export const startTradeOrchestrator = async (
             if (secs === 0) return 0;
             if (typeof secs === 'number' && Number.isFinite(secs) && secs > 0) return Math.floor(secs);
             return defaultCtraderOrphanReconcileSeconds;
+          },
+          getCtraderLabelAuditSweepSeconds: (name: string): number => {
+            const secs = accountMap.get(name)?.ctraderLabelAuditSweepSeconds;
+            if (secs === 0) return 0;
+            if (typeof secs === 'number' && Number.isFinite(secs) && secs > 0) return Math.floor(secs);
+            return defaultCtraderLabelAuditSweepSeconds;
           }
         };
         stopMonitor = await startCTraderMonitor(

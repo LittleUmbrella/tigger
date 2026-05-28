@@ -23,6 +23,13 @@ describe('clampBreakevenStopLossToMarket', () => {
     expect(r.clamped).toBe(true);
     expect(r.slPrice).toBeLessThanOrEqual(4568.17);
   });
+
+  it('uses larger buffer when multiplier > 1', () => {
+    const base = clampBreakevenStopLossToMarket(true, 4574.21, 4568.17, 0.01, 2, 0.5);
+    const wider = clampBreakevenStopLossToMarket(true, 4574.21, 4568.17, 0.01, 2, 0.5, 3);
+    expect(wider.clamped).toBe(true);
+    expect(wider.slPrice).toBeLessThan(base.slPrice);
+  });
 });
 
 describe('stopLossMatchesTarget', () => {

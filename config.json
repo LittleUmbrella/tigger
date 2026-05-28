@@ -306,6 +306,7 @@
       "type": "ctrader",
       "pollInterval": 4000,
       "dynamicBreakevenAfterTPs": true,
+      "ctraderLabelAuditSweepSeconds": 120,
       "_comment": "Optional: ctraderSymbolMap {\"XAUUSD\":\"GOLD\"}, ctraderSpotPriceTimeoutMs (default 8000), ctraderSpotPriceMaxRetries (default 3). useMarketRangeForEntry + maxSkippablePastTPs index the boundary TP for MARKET_RANGE — validate on demo."
     }
   ],

@@ -10,6 +10,10 @@ import { resolveObfuscatedStopLossAbsolute } from '../utils/tradeObfuscation.js'
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import {
+  buildCtraderOrderLabel,
+  verifyCtraderEntryOrderLabel,
+} from '../utils/ctraderOrderLabel.js';
+import {
   getRangeBoundaryTpIndex,
   getRangeBoundaryTpPrice,
   computeSlippagePointsForBoundaryTp,
@@ -1291,7 +1295,7 @@ const executeTradeForAccount = async (
             CTRADER_TP_SPLIT_OPTIONS
           );
           if (validTPOrders.length > 0) {
-            const label = `tgr-${channel}-${message.message_id}`.slice(0, 100);
+            const label = buildCtraderOrderLabel(channel, String(message.message_id));
             const ids: string[] = [];
             const quantities = validTPOrders.map((tp) => tp.quantity);
             const nTradePlacementStartedAt = Date.now();
@@ -2416,11 +2420,31 @@ const executeTradeForAccount = async (
                   });
                 }
               }
-              await db.updateTrade(tradeId, {
-                status: 'active',
-                entry_filled_at: dayjs().toISOString(),
-                position_id: positionIdStr
-              });
+              const labelCheck = await verifyCtraderEntryOrderLabel(
+                ctraderClient,
+                orderId,
+                channel,
+                String(message.message_id)
+              );
+              if (!labelCheck.ok) {
+                logger.error('Refusing to persist position_id — entry order label does not match signal', {
+                  tradeId,
+                  orderId,
+                  positionId: positionIdStr,
+                  expectedLabel: labelCheck.expected,
+                  actualLabel: labelCheck.actual,
+                  channel,
+                  messageId: message.message_id,
+                  accountName: accountName || 'default',
+                  exchange: 'ctrader'
+                });
+              } else {
+                await db.updateTrade(tradeId, {
+                  status: 'active',
+                  entry_filled_at: dayjs().toISOString(),
+                  position_id: positionIdStr
+                });
+              }
             }
             }
           }

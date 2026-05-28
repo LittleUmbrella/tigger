@@ -37,12 +37,21 @@ import {
   collectSignalTakeProfitLevels,
 } from './ctraderCloseClassification.js';
 import {
+  attemptCtraderBreakevenAmend,
+  buildCtraderOpenPositionsSnapshot,
   clampBreakevenStopLossToMarket,
   computeCtraderBreakevenSlPlan,
+  type CtraderOpenPositionsSnapshot,
   isValidBreakevenStopLoss,
   readExchangePositionStopLoss,
   stopLossMatchesTarget,
 } from './ctraderBreakeven.js';
+import {
+  parseCtraderOrderLabel,
+  resolveCtraderPositionEntryLabel,
+  tradeMatchesCtraderOrderLabel,
+  verifyCtraderEntryOrderLabel,
+} from '../utils/ctraderOrderLabel.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -65,6 +74,9 @@ const CTRADER_ORPHAN_RECONCILE_MAX_AGE_HOURS = 6;
 
 /** Throttle orphan sweeps per logical cTrader account across all channel monitor instances. */
 const globalCtraderOrphanReconcileLastMs = new Map<string, number>();
+
+/** Throttle label-vs-DB audit sweeps per cTrader account. */
+const globalCtraderLabelAuditLastMs = new Map<string, number>();
 
 /**
  * When DB cannot classify, use closing deals' realized gross profit (cTrader ProtoOAClosePositionDetail).
@@ -168,7 +180,7 @@ const checkAndApplyBreakeven = async (
   ctraderClient: CTraderClient | undefined,
   breakevenAfterTPs: number,
   dynamicBreakevenAfterTPs: boolean,
-  options?: { extraClosedTpWeight?: number }
+  options?: { extraClosedTpWeight?: number; openSnapshot?: CtraderOpenPositionsSnapshot }
 ): Promise<void> => {
   if (!ctraderClient || !trade.position_id) {
     logger.debug('Skipping cTrader breakeven — need client and position_id', {
@@ -195,7 +207,16 @@ const checkAndApplyBreakeven = async (
     (await countCtraderSiblingsClosedAtTakeProfit(allSiblings, trade.id, ctraderClient)) +
     (options?.extraClosedTpWeight ?? 0);
 
-  if (siblingsHitTp < effectiveBreakevenAfterTPs) return;
+  const messageCtraderSiblings = allSiblings.filter((t) => t.exchange === 'ctrader');
+  const closedSiblingCount = messageCtraderSiblings.filter(
+    (s) =>
+      s.id !== trade.id &&
+      (s.status === 'closed' || s.status === 'stopped' || s.status === 'completed')
+  ).length;
+
+  const tpGateMet = siblingsHitTp >= effectiveBreakevenAfterTPs;
+  const siblingCloseGateMet = closedSiblingCount >= effectiveBreakevenAfterTPs;
+  if (!tpGateMet && !siblingCloseGateMet) return;
 
   let plan: Awaited<ReturnType<typeof computeCtraderBreakevenSlPlan>>;
   try {
@@ -210,7 +231,7 @@ const checkAndApplyBreakeven = async (
     return;
   }
 
-  let { bePrice, slPrice, tickSize, isLong, knownTakeProfit } = plan;
+  let { bePrice, slPrice, tickSize, isLong } = plan;
 
   const symbol = normalizeCTraderSymbol(trade.trading_pair);
   const priceSide: 'buy' | 'sell' = isLong ? 'buy' : 'sell';
@@ -222,7 +243,8 @@ const checkAndApplyBreakeven = async (
         slPrice,
         marketPrice,
         tickSize,
-        plan.digits
+        plan.digits,
+        plan.minStopDistance
       );
       if (clamped.clamped) {
         logger.info('Clamped cTrader breakeven SL to valid level vs current market', {
@@ -260,7 +282,11 @@ const checkAndApplyBreakeven = async (
 
   let exchangeSl: number | undefined;
   try {
-    exchangeSl = await readExchangePositionStopLoss(ctraderClient, trade.position_id);
+    exchangeSl = await readExchangePositionStopLoss(
+      ctraderClient,
+      trade.position_id,
+      options?.openSnapshot
+    );
   } catch (readErr) {
     logger.warn('Could not read exchange SL before breakeven amend', {
       tradeId: trade.id,
@@ -289,31 +315,21 @@ const checkAndApplyBreakeven = async (
   }
 
   try {
-    await ctraderClient.modifyPosition({
-      positionId: trade.position_id,
-      stopLoss: slPrice,
-      knownStopLoss: trade.stop_loss > 0 ? trade.stop_loss : undefined,
-      knownTakeProfit
-    });
+    const amendResult = await attemptCtraderBreakevenAmend(
+      ctraderClient,
+      trade,
+      plan,
+      slPrice,
+      options?.openSnapshot
+    );
+    slPrice = amendResult.slPrice;
 
-    let exchangeSlAfter: number | undefined;
-    try {
-      exchangeSlAfter = await readExchangePositionStopLoss(ctraderClient, trade.position_id);
-    } catch (readAfterErr) {
-      logger.warn('Could not verify exchange SL after breakeven amend', {
-        tradeId: trade.id,
-        positionId: trade.position_id,
-        exchange: 'ctrader',
-        error: serializeErrorForLog(readAfterErr)
-      });
-    }
-
-    if (!stopLossMatchesTarget(exchangeSlAfter, slPrice, tickSize)) {
+    if (!amendResult.amended) {
       logger.error('cTrader breakeven amend did not match exchange SL — leaving DB unchanged', {
         tradeId: trade.id,
         positionId: trade.position_id,
         targetBreakevenSl: slPrice,
-        exchangeStopLossAfter: exchangeSlAfter,
+        exchangeStopLossAfter: amendResult.exchangeSl,
         exchangeStopLossBefore: exchangeSl,
         exchange: 'ctrader'
       });
@@ -330,12 +346,15 @@ const checkAndApplyBreakeven = async (
     logger.info('Required take profits hit - moved cTrader stop loss to breakeven', {
       tradeId: trade.id,
       siblingsHitTp,
+      closedSiblingCount,
+      tpGateMet,
+      siblingCloseGateMet,
       breakevenAfterTPs: effectiveBreakevenAfterTPs,
       totalTpLevels,
       dynamicBreakevenAfterTPs,
       bePrice,
       slPrice,
-      exchangeStopLoss: exchangeSlAfter,
+      exchangeStopLoss: amendResult.exchangeSl,
       exchange: 'ctrader'
     });
   } catch (beError) {
@@ -487,7 +506,8 @@ const sweepCtraderPositionsForBreakeven = async (
       continue;
     }
 
-    const candidates: SweepPosCand[] = [];
+    const orderDetailsCache = new Map<string, { order: any; deals: any[] } | null>();
+    const candidates: Array<SweepPosCand & { entryLabel?: string }> = [];
     for (const p of positions) {
       const pSym = (p.symbolName || p.symbol || '').toString();
       if (pSym !== sym) continue;
@@ -495,6 +515,20 @@ const sweepCtraderPositionsForBreakeven = async (
       if (volApi <= 0) continue;
       const positionId = String(p.positionId ?? p.id);
       if (claimedOutside.has(positionId)) continue;
+      let entryLabel: string | undefined;
+      try {
+        entryLabel = await resolveCtraderPositionEntryLabel(client, positionId, { orderDetailsCache });
+      } catch {
+        /* optional */
+      }
+      const parsed = parseCtraderOrderLabel(entryLabel);
+      if (
+        !parsed ||
+        parsed.channel !== String(channel) ||
+        parsed.messageId !== String(rep.message_id)
+      ) {
+        continue;
+      }
       const avg = parseFloat(String(p.avgPrice || p.averagePrice || p.price || '0'));
       const tradeSide = p.tradeSide || p.side || '';
       const isLong = tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long';
@@ -505,7 +539,8 @@ const sweepCtraderPositionsForBreakeven = async (
         avgPrice: avg,
         volLots: volApi / lotDiv,
         isLong,
-        openMs
+        openMs,
+        entryLabel
       });
     }
     if (candidates.length === 0) continue;
@@ -596,6 +631,8 @@ const orphanClosedRelinkBonus = (trade: Trade, cand: SweepPosCand): number => {
 type OrphanSweepItem = {
   cand: SweepPosCand;
   normSymbol: string;
+  /** Entry order label from exchange; required for relink. */
+  entryLabel?: string;
 };
 
 type OrphanRelinkResult = {
@@ -707,6 +744,22 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
   if (orphans.length === 0) return;
 
+  const orderDetailsCache = new Map<string, { order: Record<string, unknown>; deals: unknown[] } | null>();
+  for (const orb of orphans) {
+    try {
+      orb.entryLabel = await resolveCtraderPositionEntryLabel(ctraderClient, orb.cand.positionId, {
+        orderDetailsCache
+      });
+    } catch (labelErr) {
+      logger.debug('cTrader orphan reconcile: could not resolve position label', {
+        positionId: orb.cand.positionId,
+        accountName: accNorm || '(default)',
+        error: serializeErrorForLog(labelErr),
+        exchange: 'ctrader'
+      });
+    }
+  }
+
   const recentPool = await db.getRecentCtraderTradesForAccount(accNorm, {
     maxAgeHours: CTRADER_ORPHAN_RECONCILE_MAX_AGE_HOURS,
     limit: 300,
@@ -748,10 +801,18 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
     for (const orb of remaining) {
       const pool = tradesBySym.get(orb.normSymbol) ?? [];
+      const parsedLabel = parseCtraderOrderLabel(orb.entryLabel);
+      if (!orb.entryLabel || !parsedLabel) {
+        continue;
+      }
       for (const t of pool) {
         if (usedTradeIds.has(t.id)) continue;
         if ((t.account_name ?? '') !== accNorm) continue;
         if (!ORPHAN_RECONCILE_TRADE_STATUSES.has(t.status)) continue;
+        if (!tradeMatchesCtraderOrderLabel(t, orb.entryLabel)) continue;
+        if (String(t.channel) !== parsedLabel.channel || String(t.message_id) !== parsedLabel.messageId) {
+          continue;
+        }
 
         if (
           ['active', 'pending', 'filled'].includes(t.status) &&
@@ -809,6 +870,7 @@ const reconcileOrphanCtraderPositionsForAccount = async (
   const unmatchedOrphans = remaining.map((o) => ({
     positionId: o.cand.positionId,
     symbol: o.normSymbol,
+    entryLabel: o.entryLabel,
     avgPrice: o.cand.avgPrice,
     volLots: o.cand.volLots,
     takeProfit: o.cand.takeProfit
@@ -835,13 +897,7 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
   for (const { trade } of relinkResults) {
     try {
-      await checkAndApplyBreakeven(
-        trade,
-        db,
-        ctraderClient,
-        breakevenAfterTPs,
-        dynamicBreakevenAfterTPs
-      );
+      await checkAndApplyBreakeven(trade, db, ctraderClient, breakevenAfterTPs, dynamicBreakevenAfterTPs);
     } catch (err) {
       logger.warn('cTrader orphan reconcile: breakeven after relink failed', {
         tradeId: trade.id,
@@ -849,6 +905,169 @@ const reconcileOrphanCtraderPositionsForAccount = async (
         error: serializeErrorForLog(err)
       });
     }
+  }
+};
+
+/**
+ * Slow, account-wide audit: compare exchange entry labels on open positions to DB trade rows.
+ * Relinks active legs when label matches but position_id is wrong/missing. Logs mismatches when
+ * a trade row points at a position whose exchange label belongs to another message.
+ */
+const runCtraderLabelAuditSweepForAccount = async (
+  db: DatabaseManager,
+  accountName: string | undefined,
+  ctraderClient: CTraderClient,
+  breakevenAfterTPs: number,
+  dynamicBreakevenAfterTPs: boolean
+): Promise<void> => {
+  const accNorm = accountName ?? '';
+  let open: any[];
+  try {
+    open = await ctraderClient.getOpenPositions();
+  } catch (error) {
+    logger.debug('cTrader label audit: getOpenPositions failed', {
+      accountName: accNorm || '(default)',
+      error: serializeErrorForLog(error),
+      exchange: 'ctrader'
+    });
+    return;
+  }
+
+  const orderDetailsCache = new Map<string, { order: any; deals: any[] } | null>();
+  const openSnapshot = buildCtraderOpenPositionsSnapshot(open);
+  const relinked: Array<{ tradeId: number; positionId: string; label: string }> = [];
+
+  for (const p of open) {
+    const pid = String(p.positionId ?? p.id);
+    let entryLabel: string | undefined;
+    try {
+      entryLabel = await resolveCtraderPositionEntryLabel(ctraderClient, pid, { orderDetailsCache });
+    } catch {
+      continue;
+    }
+    const parsed = parseCtraderOrderLabel(entryLabel);
+    if (!parsed || !entryLabel) continue;
+
+    const legs = await db.getTradesByMessageId(parsed.messageId, parsed.channel);
+    const accountLegs = legs.filter(
+      (t) => t.exchange === 'ctrader' && (t.account_name ?? '') === accNorm
+    );
+    const activeLegs = accountLegs.filter((t) =>
+      ['active', 'filled', 'pending'].includes(t.status)
+    );
+
+    if (activeLegs.some((t) => String(t.position_id) === pid)) continue;
+
+    let bestTrade: Trade | null = null;
+    let bestSc = -1;
+    const volApi = ctraderPositionVolumeApi(p);
+    const avg = parseFloat(String(p.avgPrice || p.averagePrice || p.price || '0'));
+    const tradeSide = p.tradeSide || p.side || '';
+    const isLong = tradeSide === 'BUY' || tradeSide === 'buy' || tradeSide === 'long';
+    const openTs = p.tradeData?.openTimestamp ?? p.openTimestamp;
+    const openMs = protobufLongToNumber(openTs) ?? 0;
+    const sym = normalizeCTraderSymbol((p.symbolName || p.symbol || '').toString());
+    let lotDiv = 100;
+    try {
+      const symbolInfo = await ctraderClient.getSymbolInfo(sym);
+      const rawLow =
+        typeof symbolInfo?.lotSize === 'object' && symbolInfo?.lotSize != null
+          ? symbolInfo.lotSize.low
+          : undefined;
+      const lotRaw =
+        typeof rawLow === 'number' && isFinite(rawLow)
+          ? rawLow
+          : typeof symbolInfo?.lotSize === 'number'
+            ? symbolInfo.lotSize
+            : 100;
+      lotDiv = lotRaw > 0 ? lotRaw : 100;
+    } catch {
+      /* use default lotDiv */
+    }
+    const cand: SweepPosCand = {
+      positionId: pid,
+      avgPrice: avg,
+      volLots: volApi / lotDiv,
+      isLong,
+      openMs
+    };
+
+    for (const t of activeLegs) {
+      if (!tradeMatchesCtraderOrderLabel(t, entryLabel)) continue;
+      if (normalizeCTraderSymbol(t.trading_pair) !== sym) continue;
+      const sc = sweepScoreMatch(t, cand);
+      if (sc < MIN_CTRADER_SWEEP_SCORE) continue;
+      if (sc > bestSc) {
+        bestSc = sc;
+        bestTrade = t;
+      }
+    }
+
+    if (!bestTrade) continue;
+
+    await db.updateTrade(bestTrade.id, {
+      position_id: pid,
+      status: 'active'
+    });
+    bestTrade.position_id = pid;
+    bestTrade.status = 'active';
+    relinked.push({ tradeId: bestTrade.id, positionId: pid, label: entryLabel });
+
+    try {
+      await checkAndApplyBreakeven(
+        bestTrade,
+        db,
+        ctraderClient,
+        breakevenAfterTPs,
+        dynamicBreakevenAfterTPs,
+        { openSnapshot }
+      );
+    } catch (beErr) {
+      logger.warn('cTrader label audit: breakeven after relink failed', {
+        tradeId: bestTrade.id,
+        positionId: pid,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(beErr)
+      });
+    }
+  }
+
+  const activeWithPos = (await db.getActiveTrades()).filter(
+    (t) =>
+      t.exchange === 'ctrader' &&
+      (t.account_name ?? '') === accNorm &&
+      t.position_id &&
+      ['active', 'filled', 'pending'].includes(t.status)
+  );
+
+  for (const t of activeWithPos) {
+    const pid = String(t.position_id);
+    if (!openSnapshot.byPositionId.has(pid)) continue;
+    let entryLabel: string | undefined;
+    try {
+      entryLabel = await resolveCtraderPositionEntryLabel(ctraderClient, pid, { orderDetailsCache });
+    } catch {
+      continue;
+    }
+    if (entryLabel && !tradeMatchesCtraderOrderLabel(t, entryLabel)) {
+      logger.error('cTrader label audit: active trade row disagrees with exchange position label', {
+        tradeId: t.id,
+        positionId: pid,
+        dbChannel: t.channel,
+        dbMessageId: t.message_id,
+        exchangeLabel: entryLabel,
+        accountName: accNorm || '(default)',
+        exchange: 'ctrader'
+      });
+    }
+  }
+
+  if (relinked.length > 0) {
+    logger.info('cTrader label audit: relinked trades from exchange labels', {
+      accountName: accNorm || '(default)',
+      relinked,
+      exchange: 'ctrader'
+    });
   }
 };
 
@@ -900,7 +1119,6 @@ const applyBreakevenToActiveSiblingsBeforeTpClose = async (
   const activeSiblings = siblings.filter(
     (t) =>
       t.exchange === 'ctrader' &&
-      t.account_name === closingTrade.account_name &&
       t.id !== closingTrade.id &&
       t.status === 'active' &&
       !t.stop_loss_breakeven
@@ -1078,6 +1296,24 @@ const resolvePositionIdsBatch = async (
         const idx = consumeByOrderScope.get(scopeKey) ?? 0;
         if (list && idx < list.length) {
           const pid = list[idx]!;
+          const labelCheck = await verifyCtraderEntryOrderLabel(
+            client,
+            orderIdStr,
+            t.channel,
+            String(t.message_id)
+          );
+          if (!labelCheck.ok) {
+            logger.warn('Skipping batch position link — entry order label mismatch', {
+              tradeId: t.id,
+              orderId: orderIdStr,
+              positionId: pid,
+              expectedLabel: labelCheck.expected,
+              actualLabel: labelCheck.actual,
+              exchange: 'ctrader'
+            });
+            consumeByOrderScope.set(scopeKey, idx + 1);
+            continue;
+          }
           consumeByOrderScope.set(scopeKey, idx + 1);
           result.set(t.id, pid);
           logger.debug('Resolved position from batch deal list (per-trade, netting-aware)', {
@@ -1093,6 +1329,23 @@ const resolvePositionIdsBatch = async (
           allowDealListFallback: false
         });
         if (posId) {
+          const labelCheck = await verifyCtraderEntryOrderLabel(
+            client,
+            orderIdStr,
+            t.channel,
+            String(t.message_id)
+          );
+          if (!labelCheck.ok) {
+            logger.warn('Skipping position link — entry order label does not match trade message', {
+              tradeId: t.id,
+              orderId: orderIdStr,
+              positionId: posId,
+              expectedLabel: labelCheck.expected,
+              actualLabel: labelCheck.actual,
+              exchange: 'ctrader'
+            });
+            continue;
+          }
           result.set(t.id, posId);
           logger.debug('Resolved position from order details', {
             tradeId: t.id,
@@ -1107,6 +1360,23 @@ const resolvePositionIdsBatch = async (
             allowDealListFallback: true
           });
           if (posIdDeal) {
+            const labelCheck = await verifyCtraderEntryOrderLabel(
+              client,
+              orderIdStr,
+              t.channel,
+              String(t.message_id)
+            );
+            if (!labelCheck.ok) {
+              logger.warn('Skipping position link — entry order label does not match trade message', {
+                tradeId: t.id,
+                orderId: orderIdStr,
+                positionId: posIdDeal,
+                expectedLabel: labelCheck.expected,
+                actualLabel: labelCheck.actual,
+                exchange: 'ctrader'
+              });
+              continue;
+            }
             result.set(t.id, posIdDeal);
             logger.debug('Resolved position after empty batch deal list', {
               tradeId: t.id,
@@ -3141,6 +3411,8 @@ const monitorTrade = async (
 export type CTraderMonitorStartExtras = {
   ctraderAccountNamesForOrphanReconcile?: string[];
   getCtraderOrphanReconcileIntervalSeconds?: (accountName: string) => number;
+  /** Interval in seconds for label-vs-DB audit sweep per account (0 = disabled). */
+  getCtraderLabelAuditSweepSeconds?: (accountName: string) => number;
 };
 
 /**
@@ -3312,18 +3584,28 @@ export const startCTraderMonitor = async (
             (t.status === 'active' || t.status === 'filled')
         );
         if (tradesForBE.length > 0) {
+          const openSnapshotByAccount = new Map<string, CtraderOpenPositionsSnapshot>();
           const beTasks = tradesForBE.map((trade) =>
             limit(async () => {
               try {
                 const accountCTraderClient = getCTraderClient
                   ? await getCTraderClient(trade.account_name)
                   : ctraderClient;
+                if (!accountCTraderClient) return;
+                const accKey = trade.account_name ?? '';
+                let openSnapshot = openSnapshotByAccount.get(accKey);
+                if (!openSnapshot) {
+                  const openPos = await accountCTraderClient.getOpenPositions();
+                  openSnapshot = buildCtraderOpenPositionsSnapshot(openPos);
+                  openSnapshotByAccount.set(accKey, openSnapshot);
+                }
                 await checkAndApplyBreakeven(
                   trade,
                   db,
                   accountCTraderClient,
                   breakevenAfterTPs,
-                  dynamicBreakevenAfterTPs
+                  dynamicBreakevenAfterTPs,
+                  { openSnapshot }
                 );
               } catch (err) {
                 logger.warn('Breakeven check failed for trade', {
@@ -3361,6 +3643,21 @@ export const startCTraderMonitor = async (
                 breakevenAfterTPs,
                 dynamicBreakevenAfterTPs
               );
+              const labelAuditSec = extras?.getCtraderLabelAuditSweepSeconds?.(accNm) ?? 0;
+              if (Number.isFinite(labelAuditSec) && labelAuditSec > 0) {
+                const auditKey = `label:${accNm}`;
+                const auditPrev = globalCtraderLabelAuditLastMs.get(auditKey) ?? 0;
+                if (orphanNow - auditPrev >= labelAuditSec * 1000) {
+                  globalCtraderLabelAuditLastMs.set(auditKey, orphanNow);
+                  await runCtraderLabelAuditSweepForAccount(
+                    db,
+                    accNm,
+                    oc,
+                    breakevenAfterTPs,
+                    dynamicBreakevenAfterTPs
+                  );
+                }
+              }
             } catch (orphErr) {
               logger.warn('cTrader orphan position reconcile failed', {
                 channel,
