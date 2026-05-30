@@ -17,6 +17,11 @@ import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
+import {
+  exchangeForInitiator,
+  initiatorLockScope,
+  maybeMarkMessageFullyProcessed,
+} from '../utils/multiInitiatorChannel.js';
 
 /**
  * Determine if an error is retryable (should not mark message as parsed)
@@ -242,13 +247,30 @@ export const processUnparsedMessages = async (
   entryPriceStrategy?: 'worst' | 'average',
   messageEndDate?: string,
   allowConcurrentSymbolTrades?: boolean,
-  minRiskReward?: number
+  minRiskReward?: number,
+  multiInitiator?: boolean,
+  allInitiatorScopes?: string[],
 ): Promise<void> => {
+  const initiatorNameForScope = initiatorConfig.name || initiatorConfig.type;
+  if (!initiatorNameForScope) {
+    logger.error('Initiator name not specified in config', { channel });
+    return;
+  }
+  const lockScope = initiatorLockScope(initiatorNameForScope);
+  const initiatorExchange = exchangeForInitiator(initiatorNameForScope);
+
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
-  const messages = isSimulation 
+  const messages = isSimulation
     ? await db.getMessagesByChannel(channel)
-    : await db.getUnparsedMessages(channel, maxStalenessMinutes);
+    : multiInitiator
+      ? await db.getMessagesPendingForInitiator(
+          channel,
+          lockScope,
+          initiatorExchange,
+          maxStalenessMinutes,
+        )
+      : await db.getUnparsedMessages(channel, maxStalenessMinutes);
   
   logger.debug('Retrieved messages for processing', {
     channel,
@@ -354,7 +376,9 @@ export const processUnparsedMessages = async (
     entryPriceStrategy,
     false,
     allowConcurrentSymbolTrades,
-    minRiskReward
+    minRiskReward,
+    multiInitiator,
+    allInitiatorScopes,
   );
   
   logger.debug('Finished processing messages', {
@@ -393,7 +417,9 @@ export const processMessages = async (
   entryPriceStrategy?: 'worst' | 'average',
   bypassInitiationLock: boolean = false,
   allowConcurrentSymbolTrades?: boolean,
-  minRiskReward?: number
+  minRiskReward?: number,
+  multiInitiator: boolean = false,
+  allInitiatorScopes?: string[],
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -416,9 +442,20 @@ export const processMessages = async (
   }
 
   const processMessage = async (message: Message): Promise<void> => {
-    const lockScope = `trade:${initiatorName || initiatorConfig.name || initiatorConfig.type || 'unknown'}`;
+    const resolvedInitiatorName =
+      initiatorName || initiatorConfig.name || initiatorConfig.type || 'unknown';
+    const lockScope = initiatorLockScope(resolvedInitiatorName);
+    const initiatorExchange = exchangeForInitiator(resolvedInitiatorName);
     const shouldUseInitiationLock = !isSimulation && !bypassInitiationLock;
     let initiationLockAcquired = false;
+
+    const markMessageDoneForInitiator = async (): Promise<void> => {
+      if (multiInitiator && allInitiatorScopes?.length) {
+        await maybeMarkMessageFullyProcessed(db, message, allInitiatorScopes);
+      } else {
+        await db.markMessageParsed(message.id);
+      }
+    };
 
     try {
       // Log message processing start - critical for tracing flow in Loggly
@@ -485,15 +522,18 @@ export const processMessages = async (
         const riskPercentage = channelRiskPercentage ?? initiatorConfig.riskPercentage;
 
         if (shouldUseInitiationLock) {
-          const existingTrades = await db.getTradesByMessageId(message.message_id, channel);
+          const existingTrades = (await db.getTradesByMessageId(message.message_id, channel)).filter(
+            (t) => t.exchange === initiatorExchange,
+          );
           if (existingTrades.length > 0) {
-            await db.markMessageParsed(message.id);
+            await markMessageDoneForInitiator();
             logger.warn('Skipping trade initiation - trades already exist for message', {
               channel,
               messageId: message.message_id,
-              initiatorName,
+              initiatorName: resolvedInitiatorName,
+              exchange: initiatorExchange,
               existingTradeCount: existingTrades.length,
-              existingTradeIds: existingTrades.map(t => t.id).slice(0, 20)
+              existingTradeIds: existingTrades.map((t) => t.id).slice(0, 20),
             });
             return;
           }
@@ -539,17 +579,17 @@ export const processMessages = async (
 
           // Call the registered initiator function
           await initiatorFunction(context);
-          
-          // Mark message as parsed after successful initiation
-          await db.markMessageParsed(message.id);
-          
+
+          await markMessageDoneForInitiator();
+
           // Log successful completion - critical for investigations
           logger.info('Trade initiated successfully, message marked as parsed', {
             channel,
             messageId: message.message_id,
             tradingPair: parsed.tradingPair,
             signalType: parsed.signalType,
-            initiatorName
+            initiatorName: resolvedInitiatorName,
+            multiInitiator,
           });
         } catch (initiatorError) {
           const isRetryable = isRetryableError(initiatorError);
@@ -567,13 +607,13 @@ export const processMessages = async (
           // Mark message as parsed for non-retryable errors to prevent infinite retries
           // (e.g., unsupported symbols, validation failures, configuration errors)
           if (!isRetryable) {
-            await db.markMessageParsed(message.id);
+            await markMessageDoneForInitiator();
             logger.info('Marked message as parsed due to non-retryable error', {
               channel,
               messageId: message.message_id,
               tradingPair: parsed.tradingPair,
               signalType: parsed.signalType,
-              initiatorName,
+              initiatorName: resolvedInitiatorName,
               error: serializeErrorForLog(initiatorError),
               errorType: 'non-retryable',
               reason: 'Permanent failure - will not succeed on retry'
@@ -606,7 +646,7 @@ export const processMessages = async (
           parserName: parserName || 'default',
           reason: 'Parse returned null - message format not recognized'
         });
-        await db.markMessageParsed(message.id);
+        await markMessageDoneForInitiator();
       }
     } catch (error) {
       if (initiationLockAcquired) {

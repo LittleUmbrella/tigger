@@ -1,4 +1,4 @@
-import { BotConfig, AccountConfig, MonitorConfig } from '../types/config.js';
+import { BotConfig, AccountConfig, MonitorConfig, ChannelSetConfig } from '../types/config.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { startSignalHarvester } from '../harvesters/signalHarvester.js';
 import { startDiscordHarvester } from '../harvesters/discordHarvester.js';
@@ -40,6 +40,10 @@ import '../strategies/index.js';
 import { getStrategy, getRegisteredStrategyNames } from '../strategies/strategyRegistry.js';
 import { initiateFromStrategy } from '../initiators/signalInitiator.js';
 import { verifyAllCtraderAccountsAtStartup } from '../utils/ctraderStartupAuth.js';
+import {
+  buildChannelInitiatorScopeMap,
+  isMultiInitiatorTelegramChannel,
+} from '../utils/multiInitiatorChannel.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -282,6 +286,9 @@ export const startTradeOrchestrator = async (
   const parserMap = new Map(config.parsers.map(p => [p.name, p]));
   const initiatorMap = new Map(config.initiators.map(i => [i.name || i.type || '', i]));
   const monitorMap = new Map(config.monitors.map(m => [m.type, m]));
+  const channelInitiatorScopes = buildChannelInitiatorScopeMap(config.channels);
+  const startedHarvesterNames = new Set<string>();
+  const parserChannelsProcessed = new Set<string>();
 
   // Start all channel sets
   for (const channelConfig of config.channels) {
@@ -391,20 +398,30 @@ export const startTradeOrchestrator = async (
         });
         state.stopStrategies.push(stopStrategy);
       } else {
-        let stopHarvester: () => Promise<void>;
-        if (isSimulation && config.simulation?.messagesFile) {
-          stopHarvester = await startCSVHarvester(config.simulation.messagesFile, channelConfig.channel, db);
-        } else {
-          const platform = harvester!.platform || 'telegram';
-          if (platform === 'discord') {
-            stopHarvester = await startDiscordHarvester(harvester!, db);
-          } else if (platform === 'discord-selfbot') {
-            stopHarvester = await startDiscordSelfBotHarvester(harvester!, db);
+        const harvesterName = channelConfig.harvester!;
+        if (!startedHarvesterNames.has(harvesterName)) {
+          startedHarvesterNames.add(harvesterName);
+          let stopHarvester: () => Promise<void>;
+          if (isSimulation && config.simulation?.messagesFile) {
+            stopHarvester = await startCSVHarvester(config.simulation.messagesFile, channelConfig.channel, db);
           } else {
-            stopHarvester = await startSignalHarvester(harvester!, db);
+            const platform = harvester!.platform || 'telegram';
+            if (platform === 'discord') {
+              stopHarvester = await startDiscordHarvester(harvester!, db);
+            } else if (platform === 'discord-selfbot') {
+              stopHarvester = await startDiscordSelfBotHarvester(harvester!, db);
+            } else {
+              stopHarvester = await startSignalHarvester(harvester!, db);
+            }
           }
+          state.stopHarvesters.push(stopHarvester);
+        } else {
+          logger.info('Skipping duplicate harvester startup (shared across channel configs)', {
+            channel: channelConfig.channel,
+            harvester: harvesterName,
+            initiator: channelConfig.initiator,
+          });
         }
-        state.stopHarvesters.push(stopHarvester);
       }
 
       // Merge channel-specific breakevenAfterTPs, dynamicBreakevenAfterTPs, entryTimeoutMinutes, and useLimitOrderForBreakeven overrides with monitor config
@@ -475,13 +492,17 @@ export const startTradeOrchestrator = async (
   }
 
 
+  const tradeExchangeForChannelConfig = (channelConfig: ChannelSetConfig): 'bybit' | 'ctrader' =>
+    channelConfig.monitor === 'ctrader' ? 'ctrader' : 'bybit';
+
   // Process edited messages (both trade signals and management commands)
   const processEditedMessages = async (
-    channel: string,
-    monitorType: string,
+    channelConfig: ChannelSetConfig,
     parserName: string,
-    maxStalenessMinutes?: number
   ): Promise<void> => {
+    const channel = channelConfig.channel;
+    const tradeExchange = tradeExchangeForChannelConfig(channelConfig);
+    const maxStalenessMinutes = channelConfig.maxMessageStalenessMinutes;
     // Get edited messages directly (they may already be parsed, so we can't use getUnparsedMessages)
     const editedMessages = await db.getEditedMessages(channel, maxStalenessMinutes);
     
@@ -490,9 +511,7 @@ export const startTradeOrchestrator = async (
     }
 
     // Get parser config for LLM fallback if configured
-    const channelConfig = config.channels.find(c => c.channel === channel);
-    const parserNameForChannel = channelConfig?.parser;
-    const parserConfig = parserNameForChannel ? parserMap.get(parserNameForChannel) : undefined;
+    const parserConfig = parserMap.get(parserName);
     const ollamaConfig = parserConfig?.ollama ? {
       ...parserConfig.ollama,
       channel: channel
@@ -552,8 +571,10 @@ export const startTradeOrchestrator = async (
           continue;
         }
 
-        // Check if there are existing trades for this message
-        const existingTrades = await db.getTradesByMessageId(message.message_id, channel);
+        // Check if there are existing trades for this message (this initiator's exchange only)
+        const existingTrades = (await db.getTradesByMessageId(message.message_id, channel)).filter(
+          (t) => t.exchange === tradeExchange,
+        );
         if (existingTrades.length === 0) {
           // No existing trades, this is a new signal (shouldn't happen if message was edited)
           // But handle it anyway - will be processed by normal flow
@@ -643,15 +664,13 @@ export const startTradeOrchestrator = async (
 
   // Process management messages
   const processManagementMessages = async (
-    channel: string,
-    monitorType: string,
-    maxStalenessMinutes?: number
+    channelConfig: ChannelSetConfig,
   ): Promise<void> => {
+    const channel = channelConfig.channel;
+    const maxStalenessMinutes = channelConfig.maxMessageStalenessMinutes;
     const messages = await db.getUnparsedMessages(channel, maxStalenessMinutes);
     
-    // Get parser config for this channel to check for LLM fallback
-    const channelConfig = config.channels.find(c => c.channel === channel);
-    const managementParserName = channelConfig?.parser;
+    const managementParserName = channelConfig.parser;
     const parserConfig = managementParserName ? parserMap.get(managementParserName) : undefined;
     const ollamaConfig = parserConfig?.ollama ? {
       ...parserConfig.ollama,
@@ -956,46 +975,39 @@ export const startTradeOrchestrator = async (
         }
         const parser = parserMap.get(channelConfig.parser!);
         if (parser) {
-          // First check for management messages
-          processManagementMessages(
-            channelConfig.channel,
-            channelConfig.monitor,
-            channelConfig.maxMessageStalenessMinutes
-          ).catch(error => {
+          processManagementMessages(channelConfig).catch(error => {
             logger.error('Manager error', {
               channel: channelConfig.channel,
+              initiator: channelConfig.initiator,
               error: serializeErrorForLog(error)
             });
           });
 
-          // Then process edited messages (both management commands and trade signals)
-          processEditedMessages(
-            channelConfig.channel,
-            channelConfig.monitor,
-            parser.name,
-            channelConfig.maxMessageStalenessMinutes
-          ).catch(error => {
+          processEditedMessages(channelConfig, parser.name).catch(error => {
             logger.error('Edited message processing error', {
               channel: channelConfig.channel,
+              initiator: channelConfig.initiator,
               error: serializeErrorForLog(error)
             });
           });
 
-          // Then parse signal messages
-          parseUnparsedMessages(parser, db, channelConfig.maxMessageStalenessMinutes).catch(error => {
-            const recoverable = isTransientInfrastructureError(error);
-            const payload = {
-              channel: channelConfig.channel,
-              parserName: parser.name,
-              error: serializeErrorForLog(error),
-              recoverable
-            };
-            if (recoverable) {
-              logger.warn('Parser error (recoverable)', payload);
-            } else {
-              logger.error('Parser error', payload);
-            }
-          });
+          if (!parserChannelsProcessed.has(parser.channel)) {
+            parserChannelsProcessed.add(parser.channel);
+            parseUnparsedMessages(parser, db, channelConfig.maxMessageStalenessMinutes).catch(error => {
+              const recoverable = isTransientInfrastructureError(error);
+              const payload = {
+                channel: channelConfig.channel,
+                parserName: parser.name,
+                error: serializeErrorForLog(error),
+                recoverable
+              };
+              if (recoverable) {
+                logger.warn('Parser error (recoverable)', payload);
+              } else {
+                logger.error('Parser error', payload);
+              }
+            });
+          }
         }
       }
     }, 5000); // Parse every 5 seconds
@@ -1039,8 +1051,12 @@ export const startTradeOrchestrator = async (
         const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
         const channelParser = parserMap.get(channelConfig.parser!);
         const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
-        
-        // Process all unparsed messages (they will be sorted chronologically in processUnparsedMessages)
+        const allInitiatorScopes = channelInitiatorScopes.get(channelConfig.channel) ?? [];
+        const multiInitiator = isMultiInitiatorTelegramChannel(
+          channelConfig.channel,
+          channelInitiatorScopes,
+        );
+
         await processUnparsedMessages(
           initiator,
           channelConfig.channel,
@@ -1065,7 +1081,9 @@ export const startTradeOrchestrator = async (
           channelEntryPriceStrategy,
           undefined, // messageEndDate
           channelConfig.allowConcurrentSymbolTrades,
-          channelConfig.minRiskReward
+          channelConfig.minRiskReward,
+          multiInitiator,
+          allInitiatorScopes,
         );
       }
     };
@@ -1109,7 +1127,12 @@ export const startTradeOrchestrator = async (
         const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
         const channelParser = parserMap.get(channelConfig.parser!);
         const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
-        
+        const allInitiatorScopes = channelInitiatorScopes.get(channelConfig.channel) ?? [];
+        const multiInitiator = isMultiInitiatorTelegramChannel(
+          channelConfig.channel,
+          channelInitiatorScopes,
+        );
+
         processUnparsedMessages(
           initiator,
           channelConfig.channel,
@@ -1134,7 +1157,9 @@ export const startTradeOrchestrator = async (
           channelEntryPriceStrategy,
           undefined, // messageEndDate
           channelConfig.allowConcurrentSymbolTrades,
-          channelConfig.minRiskReward
+          channelConfig.minRiskReward,
+          multiInitiator,
+          allInitiatorScopes,
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,

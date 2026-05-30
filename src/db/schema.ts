@@ -121,6 +121,17 @@ interface DatabaseAdapter {
   initializeSchema(): Promise<void>;
   insertMessage(message: Omit<Message, 'id' | 'created_at' | 'parsed' | 'analyzed'>): Promise<number>;
   getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]>;
+  /**
+   * Messages not yet handled by a specific initiator scope (no lock, no trades on that exchange).
+   * Used when multiple initiators share one Telegram channel id.
+   */
+  getMessagesPendingForInitiator(
+    channel: string,
+    scope: string,
+    exchange: Trade['exchange'],
+    maxStalenessMinutes?: number,
+  ): Promise<Message[]>;
+  hasTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean>;
   getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]>;
   getUnanalyzedMessages(channel?: string): Promise<Message[]>;
   getMessagesByChannel(channel: string, limit?: number): Promise<Message[]>;
@@ -601,6 +612,43 @@ class SQLiteAdapter implements DatabaseAdapter {
 
     const stmt = this.db.prepare(query);
     return (params.length > 0 ? stmt.all(...params) : stmt.all()) as Message[];
+  }
+
+  async getMessagesPendingForInitiator(
+    channel: string,
+    scope: string,
+    exchange: Trade['exchange'],
+    maxStalenessMinutes?: number,
+  ): Promise<Message[]> {
+    const cutoffTime =
+      maxStalenessMinutes !== undefined && maxStalenessMinutes > 0
+        ? new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString()
+        : null;
+
+    const stmt = this.db.prepare(`
+      SELECT m.* FROM messages m
+      WHERE m.channel = ?
+        AND (? IS NULL OR m.date >= ?)
+        AND NOT EXISTS (
+          SELECT 1 FROM trade_initiation_locks l
+          WHERE l.message_id = m.message_id AND l.channel = m.channel AND l.scope = ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM trades t
+          WHERE t.message_id = m.message_id AND t.channel = m.channel AND t.exchange = ?
+        )
+      ORDER BY m.id ASC
+    `);
+    return stmt.all(channel, cutoffTime, cutoffTime, scope, exchange) as Message[];
+  }
+
+  async hasTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    const stmt = this.db.prepare(`
+      SELECT 1 FROM trade_initiation_locks
+      WHERE message_id = ? AND channel = ? AND scope = ?
+      LIMIT 1
+    `);
+    return stmt.get(messageId, channel, scope) !== undefined;
   }
 
   async getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
@@ -1814,6 +1862,55 @@ class PostgreSQLAdapter implements DatabaseAdapter {
     })) as Message[];
   }
 
+  async getMessagesPendingForInitiator(
+    channel: string,
+    scope: string,
+    exchange: Trade['exchange'],
+    maxStalenessMinutes?: number,
+  ): Promise<Message[]> {
+    const cutoffTime =
+      maxStalenessMinutes !== undefined && maxStalenessMinutes > 0
+        ? new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString()
+        : null;
+
+    const result = await this.pool.query(
+      `
+        SELECT m.* FROM messages m
+        WHERE m.channel = $1
+          AND ($2::timestamptz IS NULL OR m.date >= $2::timestamptz)
+          AND NOT EXISTS (
+            SELECT 1 FROM trade_initiation_locks l
+            WHERE l.message_id = m.message_id AND l.channel = m.channel AND l.scope = $3
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM trades t
+            WHERE t.message_id = m.message_id AND t.channel = m.channel AND t.exchange = $4
+          )
+        ORDER BY m.id ASC
+      `,
+      [channel, cutoffTime, scope, exchange],
+    );
+    return result.rows.map(row => ({
+      ...row,
+      parsed: row.parsed === true || row.parsed === 't',
+      analyzed: row.analyzed === true || row.analyzed === 't' || false,
+      created_at: row.created_at instanceof Date ? row.created_at.toISOString() : row.created_at,
+      date: row.date instanceof Date ? row.date.toISOString() : row.date,
+    })) as Message[];
+  }
+
+  async hasTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    const result = await this.pool.query(
+      `
+        SELECT 1 FROM trade_initiation_locks
+        WHERE message_id = $1 AND channel = $2 AND scope = $3
+        LIMIT 1
+      `,
+      [messageId, channel, scope],
+    );
+    return (result.rowCount ?? 0) > 0;
+  }
+
   async getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
     let query: string;
     let params: any[];
@@ -2559,6 +2656,19 @@ export class DatabaseManager {
 
   getUnparsedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {
     return this.adapter.getUnparsedMessages(channel, maxStalenessMinutes);
+  }
+
+  getMessagesPendingForInitiator(
+    channel: string,
+    scope: string,
+    exchange: Trade['exchange'],
+    maxStalenessMinutes?: number,
+  ): Promise<Message[]> {
+    return this.adapter.getMessagesPendingForInitiator(channel, scope, exchange, maxStalenessMinutes);
+  }
+
+  hasTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<boolean> {
+    return this.adapter.hasTradeInitiationLock(messageId, channel, scope);
   }
 
   getEditedMessages(channel?: string, maxStalenessMinutes?: number): Promise<Message[]> {

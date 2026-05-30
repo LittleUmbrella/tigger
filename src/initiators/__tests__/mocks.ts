@@ -9,6 +9,7 @@ export function createMockDatabase(): DatabaseManager {
   const messages: any[] = [];
   const trades: any[] = [];
   const orders: any[] = [];
+  const locks = new Set<string>();
   let messageIdCounter = 1;
   let tradeIdCounter = 1;
   let orderIdCounter = 1;
@@ -52,8 +53,33 @@ export function createMockDatabase(): DatabaseManager {
     getTradesByMessageId: vi.fn((messageId: string, channel: string) => {
       return trades.filter(t => t.message_id === messageId && t.channel === channel);
     }),
-    acquireTradeInitiationLock: vi.fn().mockResolvedValue(true),
-    releaseTradeInitiationLock: vi.fn().mockResolvedValue(undefined),
+    getMessagesPendingForInitiator: vi.fn(
+      async (channel: string, scope: string, exchange: string) => {
+        const pending = messages.filter(
+          (m) =>
+            m.channel === channel &&
+            !m.parsed &&
+            !locks.has(`${m.message_id}:${channel}:${scope}`) &&
+            !trades.some(
+              (t) =>
+                t.message_id === m.message_id && t.channel === channel && t.exchange === exchange,
+            ),
+        );
+        return pending;
+      },
+    ),
+    hasTradeInitiationLock: vi.fn(async (messageId: string, channel: string, scope: string) =>
+      locks.has(`${messageId}:${channel}:${scope}`),
+    ),
+    acquireTradeInitiationLock: vi.fn(async (messageId: string, channel: string, scope: string) => {
+      const key = `${messageId}:${channel}:${scope}`;
+      if (locks.has(key)) return false;
+      locks.add(key);
+      return true;
+    }),
+    releaseTradeInitiationLock: vi.fn(async (messageId: string, channel: string, scope: string) => {
+      locks.delete(`${messageId}:${channel}:${scope}`);
+    }),
     insertOrder: vi.fn((order: any) => {
       const id = orderIdCounter++;
       orders.push({

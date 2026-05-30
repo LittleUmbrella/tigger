@@ -418,7 +418,31 @@
       "allowConcurrentSymbolTrades": true,
       "accountFilters": [
         {
-          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25", "hyrotrader_challenge1"],
+          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
+          "rules": {}
+        }
+      ]
+    },
+    {
+      "channel": "2845421508",
+      "harvester": "dgfvip_harvester",
+      "parser": "dgfvip",
+      "initiator": "bybit",
+      "monitor": "bybit",
+      "useLimitOrderForBreakeven": true,
+      "useLimitOrderForEntry": false,
+      "riskPercentage": 1,
+      "entryTimeoutMinutes": 244,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Hyrotrader Bybit leg for dgfvip (same Telegram channel as cTrader config above; shares dgfvip_harvester)",
+      "tradeObfuscation": {
+        "tp": 0.02
+      },
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}],
+      "accountFilters": [
+        {
+          "accounts": ["hyrotrader_challenge1"],
           "rules": {}
         }
       ]
