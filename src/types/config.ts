@@ -110,6 +110,11 @@ export interface AccountConfig {
    * active cTrader trade row for that symbol. Overridden by channel `allowConcurrentSymbolTrades`.
    */
   allowConcurrentSymbolTrades?: boolean;
+  /**
+   * Minimum reward-to-risk ratio (reward / risk). E.g. 2 requires at least 2:1.
+   * Overrides channel-level `minRiskReward` for this account when set.
+   */
+  minRiskReward?: number;
 }
 
 export interface InitiatorConfig {
@@ -243,6 +248,11 @@ export interface ChannelSetConfig {
    * Overrides account-level `allowConcurrentSymbolTrades` for this channel.
    */
   allowConcurrentSymbolTrades?: boolean;
+  /**
+   * Minimum reward-to-risk ratio (reward / risk). E.g. 2 requires at least 2:1.
+   * Account-level `minRiskReward` overrides this when set.
+   */
+  minRiskReward?: number;
 }
 
 export interface SimulationConfig {

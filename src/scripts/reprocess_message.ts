@@ -230,7 +230,8 @@ program
         channelConfig.maxRisk,
         entryPriceStrategy,
         !!force,
-        channelConfig.allowConcurrentSymbolTrades
+        channelConfig.allowConcurrentSymbolTrades,
+        channelConfig.minRiskReward
       );
 
       // --- Show result ---

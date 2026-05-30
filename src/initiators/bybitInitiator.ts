@@ -15,6 +15,7 @@ import { withBybitRateLimitRetry } from '../utils/bybitRateLimitRetry.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
+import { assertMinRiskReward, resolveMinRiskReward } from '../utils/minRiskReward.js';
 import dayjs from 'dayjs';
 
 /**
@@ -296,7 +297,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, maxRisk } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, maxRisk, minRiskReward } = context;
 
   try {
     // Log trade initiation start for this account - critical for investigations
@@ -1206,6 +1207,22 @@ const executeTradeForAccount = async (
             error: serializeErrorForLog(error)
           });
         }
+      }
+
+      if (roundedStopLoss && roundedTPPrices && roundedTPPrices.length > 0) {
+        assertMinRiskReward({
+          minRiskReward: resolveMinRiskReward(minRiskReward, account),
+          signalType: order.signalType,
+          entryPrice: roundedEntryPrice,
+          stopLoss: roundedStopLoss,
+          takeProfits: roundedTPPrices,
+          context: {
+            channel,
+            symbol,
+            messageId: message.message_id,
+            accountName: accountName || 'default'
+          }
+        });
       }
 
       // Place the entry order with stop loss (if supported in initial order)

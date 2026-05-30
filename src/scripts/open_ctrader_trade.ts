@@ -214,6 +214,7 @@ program
     let useMarketRangeForEntry: boolean | undefined;
     let maxRisk: number | undefined;
     let allowConcurrentSymbolTrades: boolean | undefined;
+    let minRiskReward: number | undefined;
     let messageContent: string;
 
     if (contentMode) {
@@ -248,6 +249,7 @@ program
       useMarketRangeForEntry = channelConfig.useMarketRangeForEntry;
       maxRisk = channelConfig.maxRisk;
       allowConcurrentSymbolTrades = channelConfig.allowConcurrentSymbolTrades;
+      minRiskReward = channelConfig.minRiskReward;
 
       if (opts.account) {
         const account = contextAccounts.find(a => a.name === opts.account && a.exchange === 'ctrader');
@@ -334,6 +336,7 @@ program
       maxSkippablePastTPs,
       useMarketRangeForEntry,
       allowConcurrentSymbolTrades,
+      minRiskReward,
       forcePlaceTrade: opts.force ?? false
     };
 

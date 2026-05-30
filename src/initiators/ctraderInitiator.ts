@@ -22,6 +22,7 @@ import {
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
 import { resolveAllowConcurrentSymbolTrades } from '../utils/allowConcurrentSymbolTrades.js';
+import { assertMinRiskReward, resolveMinRiskReward } from '../utils/minRiskReward.js';
 import {
   CTraderClient,
   CTraderClientConfig,
@@ -239,6 +240,7 @@ const executeTradeForAccount = async (
     maxRisk,
     tradeObfuscation,
     signalStopLoss,
+    minRiskReward,
   } = context;
 
   /** Channel `useLimitOrderForEntry` (defaults true when omitted): false → MARKET + relative SL/TP; true → limit-at-touch. `order.marketExecution` forces the MARKET path. */
@@ -1164,6 +1166,22 @@ const executeTradeForAccount = async (
           error: error instanceof Error ? error.message : String(error)
         });
       }
+    }
+
+    if (roundedStopLoss && roundedTPPrices && roundedTPPrices.length > 0) {
+      assertMinRiskReward({
+        minRiskReward: resolveMinRiskReward(minRiskReward, account),
+        signalType: order.signalType,
+        entryPrice: roundedEntryPrice,
+        stopLoss: roundedStopLoss,
+        takeProfits: roundedTPPrices,
+        context: {
+          channel,
+          symbol,
+          messageId: message.message_id,
+          accountName: accountName || 'default'
+        }
+      });
     }
 
     const roundSlForExchange = (p: number) => roundPrice(p, pricePrecision, tickSize);

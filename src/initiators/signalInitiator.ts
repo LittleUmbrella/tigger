@@ -53,7 +53,9 @@ const isRetryableError = (error: unknown): boolean => {
     'entry order cancelled',
     'all take profit orders failed',
     'cannot place cTrader MARKET_RANGE',
-    'max risk:'
+    'max risk:',
+    'below minimum',
+    'minimum risk/reward'
   ];
 
   // Check if error matches any non-retryable pattern
@@ -184,7 +186,8 @@ export const initiateFromStrategy = async (options: {
     useLimitOrderForEntry: channelConfig.useLimitOrderForEntry,
     maxSkippablePastTPs: channelConfig.maxSkippablePastTPs,
     useMarketRangeForEntry: channelConfig.useMarketRangeForEntry,
-    allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades
+    allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades,
+    minRiskReward: channelConfig.minRiskReward
   };
   try {
     logger.info('initiateFromStrategy: running initiator', {
@@ -238,7 +241,8 @@ export const processUnparsedMessages = async (
   maxRisk?: number,
   entryPriceStrategy?: 'worst' | 'average',
   messageEndDate?: string,
-  allowConcurrentSymbolTrades?: boolean
+  allowConcurrentSymbolTrades?: boolean,
+  minRiskReward?: number
 ): Promise<void> => {
   // In simulation/evaluation mode, get all messages (including parsed ones)
   // so we can re-process them for backtesting
@@ -349,7 +353,8 @@ export const processUnparsedMessages = async (
     maxRisk,
     entryPriceStrategy,
     false,
-    allowConcurrentSymbolTrades
+    allowConcurrentSymbolTrades,
+    minRiskReward
   );
   
   logger.debug('Finished processing messages', {
@@ -387,7 +392,8 @@ export const processMessages = async (
   maxRisk?: number,
   entryPriceStrategy?: 'worst' | 'average',
   bypassInitiationLock: boolean = false,
-  allowConcurrentSymbolTrades?: boolean
+  allowConcurrentSymbolTrades?: boolean,
+  minRiskReward?: number
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -515,7 +521,8 @@ export const processMessages = async (
           useLimitOrderForEntry,
           maxSkippablePastTPs,
           useMarketRangeForEntry,
-          allowConcurrentSymbolTrades
+          allowConcurrentSymbolTrades,
+          minRiskReward
         };
 
         try {

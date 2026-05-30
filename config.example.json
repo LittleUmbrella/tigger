@@ -49,7 +49,9 @@
       "envVarNames": {
         "apiKey": "BYBIT_API_KEY",
         "apiSecret": "BYBIT_API_SECRET"
-      }
+      },
+      "_comment_minRiskReward": "optional. Overrides channel minRiskReward for this account when set.",
+      "minRiskReward": 2.5
     },
     {
       "name": "testnet",
@@ -96,6 +98,8 @@
       "baseLeverage": 20,
       "_comment_maxRisk": "optional. Human percent (5 = 5%; 1 = 1%). Caps total worst-case exposure (open positions + new trade) as a share of account balance.",
       "maxRisk": 5,
+      "_comment_minRiskReward": "optional. Minimum reward-to-risk ratio (reward/risk). E.g. 2 requires at least 2:1. Account-level minRiskReward overrides when set.",
+      "minRiskReward": 2,
       "tradeObfuscation": {
         "sl": 0.5,
         "entry": { "minPercent": -0.3, "maxPercent": 0.3 },

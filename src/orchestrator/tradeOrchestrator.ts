@@ -1064,7 +1064,8 @@ export const startTradeOrchestrator = async (
           channelConfig.maxRisk,
           channelEntryPriceStrategy,
           undefined, // messageEndDate
-          channelConfig.allowConcurrentSymbolTrades
+          channelConfig.allowConcurrentSymbolTrades,
+          channelConfig.minRiskReward
         );
       }
     };
@@ -1132,7 +1133,8 @@ export const startTradeOrchestrator = async (
           channelConfig.maxRisk,
           channelEntryPriceStrategy,
           undefined, // messageEndDate
-          channelConfig.allowConcurrentSymbolTrades
+          channelConfig.allowConcurrentSymbolTrades,
+          channelConfig.minRiskReward
         ).catch(error => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,
