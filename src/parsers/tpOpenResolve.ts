@@ -140,15 +140,23 @@ const normalizeTpSuperscriptLabels = (content: string): string =>
     return digits ? `${tp}${digits}` : _full;
   });
 
-/** Tp 4 — 4738; TP1 ➝ 4723 → TPn: price for the main TP regex. */
+/** Unicode/ASCII arrows between TP label and price (not plain space — avoids matching `TP 4 : Open`). */
+const TP_ARROW_SEP = String.raw`(?:➝|→|➜|➡|=>)`;
+
+/** Tp 4 — 4738; TP1 ➝ 4723 / TP2➝ 72650 / TP3 ➝72350 → TPn: price for the main TP regex. */
 const normalizeTpArrowAndEmDashLabels = (content: string): string => {
   let s = content;
   s = s.replace(/T[Pp]\s+(\d+)\s*[\u2014\u2013\-]\s*([\d.]+)/gi, 'TP$1: $2');
-  s = s.replace(/T[Pp](\d*)\s+[^\d.\r\n:]{1,40}?\s+([\d.]+)/gi, (_full, idx: string, price: string) =>
-    `TP${idx}: ${price}`,
+  s = s.replace(
+    new RegExp(`T[Pp](\\d*)\\s*${TP_ARROW_SEP}\\s*([\\d.]+)`, 'gi'),
+    (_full, idx: string, price: string) => `TP${idx}: ${price}`,
   );
   return s;
 };
+
+/** Require colon/@/space separator so TP index digits are not captured as prices (e.g. TP2➝). */
+const TP_PRICE_CAPTURE =
+  /T[Pp](?:\d+\s*:\s*|\d+\s*@\s*|\d+\s+|\s*:\s*|\s+@\s*|\s+)([\d.]+|open)\b/gi;
 
 /** TP 4 : Open — index must not be captured as the price by the generic TP regex. */
 const normalizeTpIndexedOpenLabels = (content: string): string =>
@@ -160,17 +168,16 @@ const normalizeBareTTakeProfitLabels = (content: string): string =>
 
 /** Ordered TP lines: numeric price or the word "open" (case-insensitive). */
 export const parseTpTokens = (content: string): TpToken[] => {
-  const normalized = normalizeTpIndexedOpenLabels(
-    normalizeTpArrowAndEmDashLabels(
+  const normalized = normalizeTpArrowAndEmDashLabels(
+    normalizeTpIndexedOpenLabels(
       normalizeBareTTakeProfitLabels(
         normalizeTpSuperscriptLabels(normalizeMathematicalTpLabels(content)),
       ),
     ),
   );
-  const re = /T[Pp]\d*[\s:]*@?\s*([\d.]+|open)\b/gi;
   const out: TpToken[] = [];
   let m: RegExpExecArray | null;
-  while ((m = re.exec(normalized)) !== null) {
+  while ((m = TP_PRICE_CAPTURE.exec(normalized)) !== null) {
     const raw = m[1].trim().toLowerCase();
     if (raw === 'open') {
       out.push({ kind: 'open' });

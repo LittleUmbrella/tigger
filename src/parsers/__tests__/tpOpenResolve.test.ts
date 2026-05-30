@@ -39,6 +39,24 @@ describe('parseTpTokens', () => {
       { kind: 'open' },
     ]);
   });
+
+  it('recognizes TP arrow labels with inconsistent spacing (message 15302)', () => {
+    const msg =
+      'TP1 ➝ 72950 TP2➝ 72650 TP3 ➝72350 TP 4—72000';
+    expect(parseTpTokens(msg)).toEqual([
+      { kind: 'number', value: 72950 },
+      { kind: 'number', value: 72650 },
+      { kind: 'number', value: 72350 },
+      { kind: 'number', value: 72000 },
+    ]);
+  });
+
+  it('does not treat TP index digits as prices when arrow normalization fails', () => {
+    expect(parseTpTokens('TP2➝ 72650 TP3 ➝72350')).toEqual([
+      { kind: 'number', value: 72650 },
+      { kind: 'number', value: 72350 },
+    ]);
+  });
 });
 
 describe('resolveTpTokensWithOpen', () => {

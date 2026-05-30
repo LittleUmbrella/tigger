@@ -236,6 +236,18 @@ TP : 4800.00
     expect(order!.takeProfits).toEqual([4520, 4530]);
   });
 
+  it('parses single-line BTCUSD SELL with inconsistent TP arrow spacing (message 15302)', () => {
+    const msg =
+      '🛡 BTCUSD | SELL 73750-73450 💣 SL: 74250 TP1 ➝ 72950 TP2➝ 72650 TP3 ➝72350 TP 4—72000 Use proper money management. Consistency is 🔑';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('BTCUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.marketExecution).toBe(true);
+    expect(order!.stopLoss).toBe(74250);
+    expect(order!.takeProfits).toEqual([72950, 72650, 72350, 72000]);
+  });
+
   it('parses Format 9 as limit: emoji, XAUUSD | SELL SIGNAL, Entry range, TP arrows', () => {
     const msg =
       '📢 XAUUSD | SELL SIGNAL 🟢 Entry: 4705-4700 💣 SL: 4715 TP1 ➝ 4695 TP2 ➝ 4690 TP3 ➝ 4685 Tp 4 — 4680 Use proper money management. Consistency is 🔑';
