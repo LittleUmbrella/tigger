@@ -214,9 +214,16 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     await printSampleMessageReferences(db, channel, sampleIds);
 
     const defaultParser = channelDefaults?.parser ?? '';
-    let parserName =
-      cli.parserName?.trim() ||
-      (await question(rl, 'Parser registry name (must already exist; see src/parsers/signalParser)', defaultParser)).trim();
+    let parserName = cli.parserName?.trim() || defaultParser;
+    if (!parserName) {
+      parserName = (await question(rl, 'Parser registry name (must already exist; see src/parsers/signalParser)', defaultParser)).trim();
+    } else if (cli.parserName?.trim() && channelDefaults?.parser && cli.parserName.trim() !== channelDefaults.parser) {
+      console.log(
+        `\nNote: CLI parser "${cli.parserName.trim()}" overrides config.json parser "${channelDefaults.parser}" for this channel.\n`
+      );
+    } else if (!cli.parserName?.trim() && channelDefaults?.parser) {
+      console.log(`\nUsing parser from config.json: ${channelDefaults.parser}\n`);
+    }
     if (!parserName) {
       throw new Error('Parser name is required (implement and register it before running evaluation).');
     }
