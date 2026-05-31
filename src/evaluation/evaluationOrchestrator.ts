@@ -192,7 +192,7 @@ export async function runEvaluation(
   });
 
   // Process unparsed messages to initiate trades in parallel
-  // Quantities will be set to 0 initially and recalculated after mock exchanges complete
+  // Quantities start at 0 and are recalculated in batch before mock exchange simulation
   // Note: Evaluation mode doesn't use channel config, so baseLeverage comes from initiatorConfig only
   await processUnparsedMessages(
     initiatorConfig,
@@ -548,8 +548,8 @@ export async function runEvaluation(
 }
 
 /**
- * Recalculate quantities for all trades historically based on balance at creation time
- * This must be done sequentially after mock exchanges have processed all trades
+ * Recalculate quantities for all trades historically based on balance at creation time.
+ * Runs sequentially before mock exchanges process trades (uses entry_price and SL at creation).
  */
 async function recalculateQuantitiesHistorically(
   db: DatabaseManager,

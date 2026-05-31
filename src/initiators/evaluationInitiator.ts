@@ -16,6 +16,7 @@ import {
   filterTakeProfitsAtMarketQuote,
   resolveEvalEntryMode,
 } from '../evaluation/evalEntryResolution.js';
+import { getEvalDecisionQuotePrice } from '../evaluation/evalDecisionPricing.js';
 import dayjs from 'dayjs';
 
 
@@ -150,17 +151,23 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
 
   if (needsQuotePrice && priceProvider) {
     try {
-      const currentPrice = await priceProvider.getCurrentPrice(tradingPairForPriceProvider);
-      if (currentPrice && currentPrice > 0) {
-        quotePrice = currentPrice;
-        logger.info('Using current price from price provider for entry', {
+      const messageTime = dayjs(message.date);
+      const decisionQuote = await getEvalDecisionQuotePrice(
+        priceProvider,
+        tradingPairForPriceProvider,
+        messageTime
+      );
+      if (decisionQuote && decisionQuote > 0) {
+        quotePrice = decisionQuote;
+        logger.info('Using eval decision-time quote for market entry (signal + eval delay)', {
           tradingPair: order.tradingPair,
           normalizedTradingPair,
-          quotePrice
+          signalTime: messageTime.toISOString(),
+          quotePrice,
         });
       }
     } catch (error) {
-      logger.warn('Failed to get current price from price provider', {
+      logger.warn('Failed to get eval decision-time quote from price provider', {
         tradingPair: order.tradingPair,
         normalizedTradingPair,
         error: serializeErrorForLog(error)
@@ -234,16 +241,17 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     });
   }
 
-  // In evaluation mode, set quantity to 0 initially
-  // Quantities will be recalculated after mock exchanges process trades
-  // This allows parallel trade creation while maintaining accurate balance-based position sizing
+  // In evaluation mode, set quantity to 0 initially.
+  // Quantities are recalculated in batch before mock exchange simulation
+  // (recalculateQuantitiesHistorically in evaluationOrchestrator).
+  // Parallel trade creation; balance-based sizing applied once all trades exist.
   const qty = 0;
 
   // Use baseLeverage as default if leverage is not specified in order
   const baseLeverage = context.config.baseLeverage;
   const effectiveLeverage = order.leverage > 0 ? order.leverage : (baseLeverage || 1);
   
-  logger.info('Creating trade with placeholder quantity (will be recalculated after processing)', {
+  logger.info('Creating trade with placeholder quantity (recalculated before mock exchange sim)', {
     channel,
     tradingPair: order.tradingPair,
     entryPrice: roundedEntryPrice,

@@ -350,7 +350,7 @@ export const processUnparsedMessages = async (
     : filteredMessages;
 
   // Process messages in parallel - trade creation is independent
-  // Quantities will be set to 0 initially and recalculated after mock exchanges complete
+  // Evaluation: quantities start at 0 and are recalculated before mock exchange simulation
   await processMessages(
     sortedMessages,
     initiatorConfig,

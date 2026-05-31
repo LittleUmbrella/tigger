@@ -398,6 +398,7 @@ program
   .option('--config-path <path>', 'Path to config.json for channel defaults (default: config.json)')
   .option('--no-channel-config', 'Do not load evaluation defaults from config.json')
   .option('--entry-timeout-minutes <n>', 'Override entry timeout (channel config used when omitted)')
+  .option('--output-dir <dir>', 'Write trades.csv + run-results.{json,md} (default: data/eval-wizard/<channel>)')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -424,6 +425,7 @@ program
         configPath: options.configPath,
         noChannelConfig: options.noChannelConfig,
         entryTimeoutMinutes: options.entryTimeoutMinutes,
+        outputDir: options.outputDir,
       });
       process.exit(0);
     } catch (error) {

@@ -13,6 +13,7 @@ import type { HistoricalPriceProvider, PriceDataPoint } from './historicalPriceP
 import { normalizeCTraderSymbol } from './ctraderSymbolUtils.js';
 import { getCtraderCachedResponse, setCtraderCachedResponse } from './bybitCache.js';
 import {
+  getEvalStartMs,
   getTickMinuteBounds,
   mergeHybridEvalSeries,
   M1_BAR_PERIOD_MS,
@@ -101,7 +102,7 @@ export function createCTraderHistoricalPriceProvider(
         }));
         points.sort((a, b) => a.timestamp - b.timestamp);
         state.tickMinuteCache.set(cacheKey, points);
-        logger.info('Fetched cTrader tick minute for hybrid eval', {
+        logger.info('Loaded cTrader tick minute for hybrid eval', {
           symbol: normalizedSymbol,
           minuteOpen: new Date(minuteOpenMs).toISOString(),
           dataPoints: points.length,
@@ -294,6 +295,21 @@ export function createCTraderHistoricalPriceProvider(
               : [];
 
           return mergeHybridEvalSeries(minuteTicks, signalMs, m1Bars);
+        },
+
+    getEvalStartTickPrice: useTickData
+      ? undefined
+      : async (symbol: string, signalTime: dayjs.Dayjs): Promise<number | null> => {
+          const normalizedSymbol = normalizeCTraderSymbol(symbol);
+          const signalMs = signalTime.valueOf();
+          const evalStartMs = getEvalStartMs(signalMs);
+          const { minuteOpenMs } = getTickMinuteBounds(signalMs);
+          const minuteTicks = await fetchTickMinute(normalizedSymbol, minuteOpenMs);
+          const firstTick = minuteTicks.find((t) => t.timestamp >= evalStartMs);
+          if (firstTick != null && firstTick.price > 0) {
+            return firstTick.price;
+          }
+          return null;
         },
 
     hasData: (symbol: string): boolean => {

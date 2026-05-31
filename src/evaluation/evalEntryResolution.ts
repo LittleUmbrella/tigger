@@ -122,7 +122,8 @@ export interface ResolvedEvalEntryMode {
 
 /**
  * Decide how mock exchange should fill entry.
- * Limit: wait for M1 touch. Market / MARKET_RANGE: fill at signal-time quote on first bar.
+ * Limit: wait for M1 touch. Market / MARKET_RANGE: fill at first price after eval delay.
+ * Market-entry quote for sizing uses the same decision time (see evalDecisionPricing).
  */
 export const resolveEvalEntryMode = (
   params: ResolveEvalEntryModeParams

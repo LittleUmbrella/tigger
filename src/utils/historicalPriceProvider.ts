@@ -39,6 +39,8 @@ export interface HistoricalPriceProvider {
     signalTime: dayjs.Dayjs,
     endTime: dayjs.Dayjs
   ) => Promise<PriceDataPoint[]>;
+  /** cTrader hybrid eval: first tick at signal + eval delay (sizing quote only; no M1). */
+  getEvalStartTickPrice?: (symbol: string, signalTime: dayjs.Dayjs) => Promise<number | null>;
   hasData: (symbol: string) => boolean;
   getAvailableSymbols: () => string[];
   getBybitClient: () => RestClientV5 | null;

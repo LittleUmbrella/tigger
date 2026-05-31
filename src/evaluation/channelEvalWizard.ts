@@ -9,6 +9,8 @@
 import '../initiators/index.js';
 import { createInterface } from 'node:readline/promises';
 import process from 'node:process';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import dayjs from 'dayjs';
 import { DatabaseManager } from '../db/schema.js';
 import { harvestMessages } from './messageHarvester.js';
@@ -21,6 +23,13 @@ import {
   resolveChannelEvalDefaults,
 } from './channelEvalConfig.js';
 import { CustomPropFirmConfig } from '../types/config.js';
+import {
+  collectChannelTrades,
+  writeEvalRunArtifacts,
+} from './evalRunArtifacts.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const projectRoot = path.resolve(__dirname, '../..');
 
 export interface ChannelEvalWizardOptions {
   channel?: string;
@@ -46,6 +55,8 @@ export interface ChannelEvalWizardOptions {
   entryTimeoutMinutes?: string;
   /** Auto-confirm harvest and other y/n prompts (non-interactive) */
   yes?: boolean;
+  /** Write trades.csv + run-results.{json,md} (default: data/eval-wizard/<channel>) */
+  outputDir?: string;
 }
 
 async function question(
@@ -243,17 +254,21 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     const defaultPropFirms =
       channelDefaults?.propFirms?.map((f) => (typeof f === 'string' ? f : f.name)).join(',') ??
       'crypto-fund-trader';
-    const propFirmsStr =
-      cli.propFirms?.trim() ||
-      (await question(rl, 'Prop firms (comma-separated)', defaultPropFirms));
+    const propFirmsStr = nonInteractive
+      ? cli.propFirms?.trim() || defaultPropFirms
+      : cli.propFirms?.trim() ||
+        (await question(rl, 'Prop firms (comma-separated)', defaultPropFirms));
     const propFirms = parsePropFirms(propFirmsStr);
     if (propFirms.length === 0) {
       throw new Error('At least one prop firm name is required.');
     }
 
     const defaultRisk = String(channelDefaults?.riskPercentage ?? 3);
-    const riskPercentage =
-      parseFloat(cli.riskPercentage || (await question(rl, 'Risk % per trade', defaultRisk))) || 3;
+    const riskPercentage = parseFloat(
+      nonInteractive
+        ? cli.riskPercentage ?? defaultRisk
+        : cli.riskPercentage || (await question(rl, 'Risk % per trade', defaultRisk))
+    ) || 3;
 
     const defaultMinRiskReward =
       channelDefaults?.minRiskReward != null ? String(channelDefaults.minRiskReward) : '';
@@ -285,13 +300,15 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     const defaultLeverage =
       cli.baseLeverage ??
       (channelDefaults?.baseLeverage != null ? String(channelDefaults.baseLeverage) : '');
-    const baseLeverageRaw =
-      defaultLeverage || (await question(rl, 'Base leverage (optional, blank to omit)', ''));
+    const baseLeverageRaw = nonInteractive
+      ? defaultLeverage
+      : defaultLeverage || (await question(rl, 'Base leverage (optional, blank to omit)', ''));
     const baseLeverage = baseLeverageRaw.trim() ? parseFloat(baseLeverageRaw) : undefined;
 
     const defaultMonitor = channelDefaults?.monitorType ?? 'bybit';
-    const monitorType =
-      cli.monitorType || (await question(rl, 'Monitor type (bybit | ctrader)', defaultMonitor));
+    const monitorType = nonInteractive
+      ? cli.monitorType || defaultMonitor
+      : cli.monitorType || (await question(rl, 'Monitor type (bybit | ctrader)', defaultMonitor));
     if (monitorType !== 'bybit' && monitorType !== 'ctrader') {
       throw new Error(`Invalid monitor type: ${monitorType}`);
     }
@@ -301,9 +318,11 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
         ? cli.initialBalance
         : (channelDefaults?.initialBalance ?? 10000)
     );
-    const initialBalance =
-      parseFloat(cli.initialBalance || (await question(rl, 'Initial balance (USDT)', defaultBalance))) ||
-      10000;
+    const initialBalance = parseFloat(
+      nonInteractive
+        ? cli.initialBalance ?? defaultBalance
+        : cli.initialBalance || (await question(rl, 'Initial balance (USDT)', defaultBalance))
+    ) || 10000;
 
     const entryTimeoutMinutes = cli.entryTimeoutMinutes
       ? parseInt(cli.entryTimeoutMinutes, 10)
@@ -346,6 +365,29 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     for (const p of result.propFirmResults) {
       console.log(`  ${p.propFirmName}: ${p.passed ? 'PASSED' : 'FAILED'} — PnL $${p.metrics.totalPnL.toFixed(2)}`);
     }
+
+    const outputDir = path.resolve(
+      projectRoot,
+      cli.outputDir?.trim() || path.join('data', 'eval-wizard', channel)
+    );
+    const trades = await collectChannelTrades(db, channel);
+    const { jsonPath, mdPath, tradesPath } = await writeEvalRunArtifacts({
+      outputDir,
+      projectRoot,
+      channel,
+      startDate: startHarvestDate,
+      endDate: endHarvestDate,
+      months,
+      minRiskReward: evalConfig.minRiskReward,
+      riskPercentage: evalConfig.initiator.riskPercentage,
+      propFirmResults: result.propFirmResults,
+      totalMessages: result.totalMessages,
+      trades,
+    });
+    console.log('\nArtifacts written:');
+    console.log(`  ${path.relative(projectRoot, mdPath)}`);
+    console.log(`  ${path.relative(projectRoot, jsonPath)}`);
+    console.log(`  ${path.relative(projectRoot, tradesPath)}`);
 
     await db.close();
     db = undefined;
