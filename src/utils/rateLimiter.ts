@@ -142,3 +142,14 @@ export function createBybitPrivateRateLimiter(): RateLimiter {
     windowMs: 60 * 1000 // 1 minute window
   });
 }
+
+/**
+ * cTrader Open API historical endpoints (trendbars, tick data, deal list): 5 req/sec.
+ * Use 4/sec so parallel eval mock exchanges can run concurrently without tripping limits.
+ */
+export function createCTraderHistoricalRateLimiter(): RateLimiter {
+  return createRateLimiter({
+    maxRequests: 3,
+    windowMs: 1000,
+  });
+}

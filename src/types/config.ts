@@ -325,4 +325,11 @@ export interface EvaluationConfig {
   slAdjustmentTolerancePercent?: number; // When price past SL, max overshoot % to allow proportional adjustment (0 = reject)
   /** Portfolio worst-case exposure cap — same semantics as {@link ChannelSetConfig.maxRisk} */
   maxRisk?: number;
+  /** Mirror {@link ChannelSetConfig.allowConcurrentSymbolTrades} for evaluation initiator */
+  allowConcurrentSymbolTrades?: boolean;
+  /** Mirror {@link ChannelSetConfig.useLimitOrderForEntry} */
+  useLimitOrderForEntry?: boolean;
+  maxSkippablePastTPs?: number;
+  useMarketRangeForEntry?: boolean;
+  minRiskReward?: number;
 }

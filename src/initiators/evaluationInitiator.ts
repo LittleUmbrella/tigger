@@ -26,7 +26,8 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     order,
     db,
     isSimulation,
-    priceProvider
+    priceProvider,
+    allowConcurrentSymbolTrades,
   } = context;
 
   // In evaluation mode, we should always be in simulation
@@ -74,27 +75,29 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     logger.debug('Symbol validated', { tradingPair: order.tradingPair, normalizedTradingPair });
   }
 
-  // Check for existing open positions for the same symbol to prevent multiple positions
-  // This ensures stop loss always applies to 100% of the position
-  const existingTrades = await db.getActiveTrades();
-  const existingTradeForSymbol = existingTrades.find(t => 
-    t.trading_pair === tradingPairForPriceProvider && 
-    (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
-  );
-  
-  if (existingTradeForSymbol) {
-    logger.info('Skipping trade - existing open position for symbol', {
-      channel,
-      tradingPair: order.tradingPair,
-      normalizedTradingPair: tradingPairForPriceProvider,
-      existingTradeId: existingTradeForSymbol.id,
-      existingTradeStatus: existingTradeForSymbol.status,
-      existingTradeCreatedAt: existingTradeForSymbol.created_at,
-      messageId: message.message_id
-    });
-    // Mark message as parsed to avoid reprocessing
-    await db.markMessageParsed(message.id);
-    return;
+  // Block stacked same-symbol trades unless channel allows concurrent (mirrors live initiator).
+  if (!allowConcurrentSymbolTrades) {
+    const existingTrades = await db.getActiveTrades();
+    const existingTradeForSymbol = existingTrades.find(
+      (t) =>
+        t.channel === channel &&
+        t.trading_pair === tradingPairForPriceProvider &&
+        (t.status === 'pending' || t.status === 'active' || t.status === 'filled')
+    );
+
+    if (existingTradeForSymbol) {
+      logger.info('Skipping trade - existing open position for symbol', {
+        channel,
+        tradingPair: order.tradingPair,
+        normalizedTradingPair: tradingPairForPriceProvider,
+        existingTradeId: existingTradeForSymbol.id,
+        existingTradeStatus: existingTradeForSymbol.status,
+        existingTradeCreatedAt: existingTradeForSymbol.created_at,
+        messageId: message.message_id
+      });
+      await db.markMessageParsed(message.id);
+      return;
+    }
   }
 
   // Get current price from price provider if entry price is not provided

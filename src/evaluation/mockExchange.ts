@@ -10,6 +10,11 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 import { getDecimalPrecision } from '../utils/positionSizing.js';
 import { computeDynamicBreakevenAfterTPs } from '../utils/breakevenAfterTPs.js';
+import {
+  computeDirectionalPnL,
+  selectCanonicalEntryOrder,
+  selectCanonicalStopLossOrder,
+} from './mockExchangeOrderHelpers.js';
 import dayjs from 'dayjs';
 
 interface PriceDataPoint {
@@ -71,7 +76,7 @@ export function createMockExchange(
     
     // Create stop loss order if missing
     // Set quantity to trade quantity to ensure 100% coverage
-    const hasStopLoss = existingOrders.some(o => o.order_type === 'stop_loss');
+    const hasStopLoss = selectCanonicalStopLossOrder(existingOrders) != null;
     if (!hasStopLoss && state.trade.stop_loss) {
       try {
         const stopLossQuantity = state.trade.quantity || 0;
@@ -94,7 +99,7 @@ export function createMockExchange(
       }
     } else if (hasStopLoss) {
       // Update existing stop loss order quantity to match trade quantity (ensure 100% coverage)
-      const stopLossOrder = existingOrders.find(o => o.order_type === 'stop_loss');
+      const stopLossOrder = selectCanonicalStopLossOrder(existingOrders);
       if (stopLossOrder && state.trade.quantity && state.trade.quantity > 0) {
         // Only update if quantity is missing or doesn't match trade quantity
         if (!stopLossOrder.quantity || stopLossOrder.quantity !== state.trade.quantity) {
@@ -180,9 +185,11 @@ export function createMockExchange(
       position_id: `SIM-${state.trade.id}`
     });
 
-    // Update entry order to filled status
+    // Update entry order to filled status (skip duplicate zero-qty rows from re-eval)
     const orders = await db.getOrdersByTradeId(state.trade.id);
-    const entryOrder = orders.find(o => o.order_type === 'entry');
+    const entryOrder =
+      orders.find((o) => o.order_type === 'entry' && o.status === 'pending') ??
+      selectCanonicalEntryOrder(orders);
     if (entryOrder) {
       await db.updateOrder(entryOrder.id, {
         status: 'filled',
@@ -245,7 +252,7 @@ export function createMockExchange(
       });
 
       // Update stop loss order quantity to match trade quantity (ensure 100% coverage)
-      const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+      const stopLossOrder = selectCanonicalStopLossOrder(orders);
       if (stopLossOrder) {
         try {
           await db.updateOrder(stopLossOrder.id, {
@@ -280,6 +287,8 @@ export function createMockExchange(
         tpQuantities
       });
     }
+
+    await recomputePnLFromFilledOrders();
   };
 
   const shouldFillStopLoss = (pricePoint: PriceDataPoint): boolean => {
@@ -312,14 +321,101 @@ export function createMockExchange(
       return 0; // Return 0 to avoid incorrect calculations, but log the error
     }
 
-    const priceDiff = state.isLong
-      ? exitPrice - state.entryFillPrice
-      : state.entryFillPrice - exitPrice;
+    return computeDirectionalPnL(state.isLong, state.entryFillPrice, exitPrice, quantity);
+  };
 
-    // P&L = priceDiff * quantity
-    // Leverage does NOT affect P&L - it only affects margin requirement
-    // The actual profit/loss is always: quantity × price difference
-    return priceDiff * quantity;
+  const recomputePnLFromFilledOrders = async (): Promise<void> => {
+    if (!state.entryFillPrice) return;
+
+    const orders = await db.getOrdersByTradeId(state.trade.id);
+    let accumulatedPnL = 0;
+    let remainingQty =
+      state.trade.quantity || selectCanonicalEntryOrder(orders)?.quantity || 0;
+    state.filledTakeProfits.clear();
+
+    for (const order of orders) {
+      if (
+        order.order_type === 'take_profit' &&
+        order.status === 'filled' &&
+        order.tp_index !== undefined &&
+        order.filled_price
+      ) {
+        state.filledTakeProfits.add(order.tp_index);
+        const tpQuantity =
+          order.quantity || (state.trade.quantity || 0) / state.takeProfits.length;
+        accumulatedPnL += calculatePnL(order.filled_price, tpQuantity);
+        remainingQty -= tpQuantity;
+      }
+    }
+
+    state.totalPnL = accumulatedPnL;
+    state.remainingQuantity = Math.max(0, remainingQty);
+  };
+
+  const clearFilledOrder = async (order: Order): Promise<void> => {
+    await db.updateOrder(order.id, {
+      status: 'pending',
+      filled_at: null as unknown as string,
+      filled_price: null as unknown as number,
+    });
+  };
+
+  /** Orphaned fills from prior eval runs (FK was off) must not block this simulation. */
+  const resetStaleFilledOrders = async (orders: Order[]): Promise<Order[]> => {
+    if (state.trade.exit_filled_at) {
+      return orders;
+    }
+
+    let resetCount = 0;
+
+    if (state.trade.status === 'pending' && !state.trade.entry_filled_at) {
+      for (const order of orders) {
+        if (
+          (order.order_type === 'take_profit' ||
+            order.order_type === 'entry' ||
+            order.order_type === 'stop_loss') &&
+          order.status === 'filled'
+        ) {
+          await clearFilledOrder(order);
+          resetCount++;
+        }
+      }
+    }
+
+    if (resetCount > 0) {
+      logger.warn('Reset stale filled orders on pending trade (orphaned from prior eval run)', {
+        tradeId: state.trade.id,
+        resetCount,
+      });
+      return db.getOrdersByTradeId(state.trade.id);
+    }
+
+    return orders;
+  };
+
+  /** Filled SL rows without a trade exit block TP/SL checks for the rest of the sim. */
+  const resetOrphanedStopLossFills = async (): Promise<void> => {
+    if (state.trade.exit_filled_at) {
+      return;
+    }
+
+    const orders = await db.getOrdersByTradeId(state.trade.id);
+    const orphanedSl = orders.filter(
+      (o) => o.order_type === 'stop_loss' && o.status === 'filled'
+    );
+    if (orphanedSl.length === 0) {
+      return;
+    }
+
+    for (const order of orphanedSl) {
+      await clearFilledOrder(order);
+    }
+    state.stopLossFilled = false;
+
+    logger.warn('Reset orphaned filled stop loss orders (trade has no exit)', {
+      tradeId: state.trade.id,
+      count: orphanedSl.length,
+    });
   };
 
   const calculatePnLPercentage = (exitPrice: number, quantity: number, totalQuantity: number): number => {
@@ -394,7 +490,9 @@ export function createMockExchange(
     });
 
     const orders = await db.getOrdersByTradeId(state.trade.id);
-    const slOrder = orders.find(o => o.order_type === 'stop_loss' && o.status === 'pending');
+    const slOrder =
+      orders.find((o) => o.order_type === 'stop_loss' && o.status === 'pending') ??
+      selectCanonicalStopLossOrder(orders);
     if (slOrder) {
       await db.updateOrder(slOrder.id, {
         status: 'filled',
@@ -523,7 +621,7 @@ export function createMockExchange(
     // Update stop loss order quantity to match remaining quantity (after TPs filled)
     // This ensures stop loss covers 100% of remaining position
     const orders = await db.getOrdersByTradeId(state.trade.id);
-    const stopLossOrder = orders.find(o => o.order_type === 'stop_loss');
+    const stopLossOrder = selectCanonicalStopLossOrder(orders);
     if (stopLossOrder && state.remainingQuantity > 0) {
       try {
         await db.updateOrder(stopLossOrder.id, {
@@ -545,7 +643,7 @@ export function createMockExchange(
   };
 
   const closeTrade = async (price: number, fillTime: dayjs.Dayjs): Promise<void> => {
-    // All TPs are filled, so totalPnL already contains the sum of all TP PNLs
+    await recomputePnLFromFilledOrders();
     const totalPnL = state.totalPnL;
     const pnlPercentage = state.trade.quantity && state.trade.quantity > 0 && state.entryFillPrice
       ? (totalPnL / (state.trade.quantity * state.entryFillPrice)) * 100 * state.trade.leverage
@@ -659,18 +757,25 @@ export function createMockExchange(
       });
     }
 
-    // Initialize state from existing trade
-    const orders = await db.getOrdersByTradeId(state.trade.id);
-    
-    if (state.trade.entry_filled_at) {
+    // Initialize state from existing trade (clear orphaned fills when re-simulating pending trades)
+    let orders = await resetStaleFilledOrders(await db.getOrdersByTradeId(state.trade.id));
+
+    const filledEntryOrder = selectCanonicalEntryOrder(
+      orders.filter((o) => o.order_type === 'entry' && o.status === 'filled' && o.filled_at)
+    );
+    if (filledEntryOrder) {
+      state.entryFilled = true;
+      state.entryFillTime = dayjs(filledEntryOrder.filled_at!);
+      state.entryFillPrice = filledEntryOrder.filled_price || state.trade.entry_price;
+      if (!state.trade.quantity && filledEntryOrder.quantity) {
+        state.trade.quantity = filledEntryOrder.quantity;
+      }
+    } else if (state.trade.entry_filled_at) {
       state.entryFilled = true;
       state.entryFillTime = dayjs(state.trade.entry_filled_at);
-      // Use entry_filled_price if available, otherwise fall back to entry_price
-      // Check orders to find the actual fill price
-      const entryOrder = orders.find(o => o.order_type === 'entry' && o.filled_at);
+      const entryOrder = selectCanonicalEntryOrder(orders);
       state.entryFillPrice = entryOrder?.filled_price || state.trade.entry_price;
-      
-      // If trade.quantity is missing, try to get it from the entry order
+
       if (!state.trade.quantity && entryOrder?.quantity) {
         state.trade.quantity = entryOrder.quantity;
         logger.info('Using quantity from entry order', {
@@ -686,64 +791,14 @@ export function createMockExchange(
       state.currentStopLoss = breakevenPrice;
     }
 
-    // Check which TPs are already filled and calculate accumulated PNL
-    // Use trade quantity, or try to infer from entry order if missing
-    let remainingQty = state.trade.quantity || 0;
-    if (remainingQty === 0) {
-      const entryOrder = orders.find(o => o.order_type === 'entry');
-      if (entryOrder?.quantity) {
-        remainingQty = entryOrder.quantity;
-        logger.info('Using quantity from entry order for remainingQuantity initialization', {
-          tradeId: state.trade.id,
-          quantity: entryOrder.quantity
-        });
-      }
+    if (state.entryFillPrice) {
+      await recomputePnLFromFilledOrders();
+    } else {
+      state.filledTakeProfits.clear();
+      state.totalPnL = 0;
+      const entryOrder = selectCanonicalEntryOrder(orders);
+      state.remainingQuantity = state.trade.quantity || entryOrder?.quantity || 0;
     }
-    let accumulatedPnL = 0;
-
-    for (const order of orders) {
-      if (order.order_type === 'take_profit' && order.status === 'filled' && order.tp_index !== undefined) {
-        state.filledTakeProfits.add(order.tp_index);
-        
-        // Calculate PNL for this filled TP
-        if (order.filled_price && state.entryFillPrice) {
-          const tpQuantity = order.quantity || (state.trade.quantity || 0) / state.takeProfits.length;
-          const tpPnL = calculatePnL(order.filled_price, tpQuantity);
-          accumulatedPnL += tpPnL;
-          remainingQty -= tpQuantity;
-          
-          // Ensure remainingQty doesn't go negative (indicates TP quantities sum to more than total)
-          if (remainingQty < 0) {
-            logger.error('remainingQty became negative during initialization - TP quantities may be incorrect', {
-              tradeId: state.trade.id,
-              tpIndex: order.tp_index,
-              tpQuantity,
-              remainingQtyBefore: remainingQty + tpQuantity,
-              remainingQtyAfter: remainingQty,
-              totalQuantity: state.trade.quantity
-            });
-            remainingQty = 0; // Cap at 0 to prevent further issues
-          }
-        }
-      }
-      if (order.order_type === 'stop_loss' && order.status === 'filled') {
-        state.stopLossFilled = true;
-      }
-    }
-
-    // Update state with restored values
-    // Ensure non-negative - if negative, this indicates TP quantities don't match trade quantity
-    if (remainingQty < 0) {
-      logger.error('remainingQuantity is negative after initialization - this indicates a bug', {
-        tradeId: state.trade.id,
-        calculatedRemainingQty: remainingQty,
-        totalQuantity: state.trade.quantity,
-        filledTPs: Array.from(state.filledTakeProfits)
-      });
-      remainingQty = 0;
-    }
-    state.remainingQuantity = remainingQty;
-    state.totalPnL = accumulatedPnL;
   };
 
   const process = async (): Promise<boolean> => {
@@ -784,6 +839,7 @@ export function createMockExchange(
 
     // Ensure orders exist (they might not be created in simulation mode)
     await ensureOrdersExist();
+    await resetOrphanedStopLossFills();
 
     // Track entry fill attempts for debugging
     let entryCheckCount = 0;
@@ -961,7 +1017,6 @@ export function createMockExchange(
       }
     }
 
-    // Trade is still active (price history ended but trade didn't complete)
     return false;
   };
 

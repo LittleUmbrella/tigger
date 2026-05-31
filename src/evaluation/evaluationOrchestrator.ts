@@ -71,6 +71,19 @@ export async function runEvaluation(
     evaluationEndDate = endParsed.format('YYYY-MM-DD');
   }
 
+  const purgeResult = await db.purgeChannelEvaluationData(channel, {
+    createdAfter: config.startDate ? startDate : undefined,
+    createdBefore: evaluationEndDate
+      ? dayjs(evaluationEndDate).endOf('day').toISOString()
+      : undefined,
+  });
+  logger.info('Purged prior evaluation data for channel', {
+    channel,
+    startDate: config.startDate ?? 'all',
+    endDate: evaluationEndDate ?? 'all',
+    ...purgeResult,
+  });
+
   const monitorType = monitorConfig.type || 'bybit';
   let priceProvider: HistoricalPriceProvider;
 
@@ -104,6 +117,12 @@ export async function runEvaluation(
       speedMultiplier: config.speedMultiplier || 0,
       useTickData: monitorConfig.ctraderUseTickData,
     });
+    const ctraderClient = priceProvider.getCTraderClient?.();
+    if (ctraderClient) {
+      await ctraderClient.connect();
+      await ctraderClient.authenticate();
+      logger.info('cTrader client pre-authenticated for evaluation');
+    }
   } else {
     const apiKey = process.env.BYBIT_API_KEY;
     const apiSecret = process.env.BYBIT_API_SECRET;
@@ -192,12 +211,14 @@ export async function runEvaluation(
     undefined, // propFirms (evaluation validates prop firms after simulation)
     config.tradeObfuscation,
     config.slAdjustmentTolerancePercent,
-    undefined, // useLimitOrderForEntry (evaluation path leaves it unset; initiator defaults apply)
-    undefined, // maxSkippablePastTPs
-    undefined, // useMarketRangeForEntry
+    config.useLimitOrderForEntry,
+    config.maxSkippablePastTPs,
+    config.useMarketRangeForEntry,
     config.maxRisk,
     undefined, // entryPriceStrategy (evaluation uses parser defaults unless extended on EvaluationConfig)
-    evaluationEndDate
+    evaluationEndDate,
+    config.allowConcurrentSymbolTrades,
+    config.minRiskReward
   );
 
   // Get all trades for this channel that need simulation

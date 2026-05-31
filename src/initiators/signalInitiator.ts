@@ -677,8 +677,22 @@ export const processMessages = async (
     isSimulation
   });
 
-  // Process all messages in parallel
-  await Promise.all(messages.map(processMessage));
+  // cTrader evaluation shares one Open API connection — process sequentially to avoid
+  // auth races and ensure trades exist before the orchestrator runs mock exchanges.
+  const useSequentialSimulation =
+    isSimulation && typeof priceProvider?.getCTraderClient === 'function';
+
+  if (useSequentialSimulation) {
+    logger.info('Processing evaluation messages sequentially (cTrader)', {
+      channel,
+      messageCount: messages.length
+    });
+    for (const message of messages) {
+      await processMessage(message);
+    }
+  } else {
+    await Promise.all(messages.map(processMessage));
+  }
   
   logger.debug('Finished processing messages', {
     channel,

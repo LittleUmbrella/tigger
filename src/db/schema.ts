@@ -179,7 +179,20 @@ interface DatabaseAdapter {
   getOrdersByTradeId(tradeId: number): Promise<Order[]>;
   getOrdersByStatus(status: Order['status']): Promise<Order[]>;
   updateOrder(id: number, updates: Partial<Order>): Promise<void>;
+  /** Remove prior eval trades/orders/results for a channel (optionally date-scoped). */
+  purgeChannelEvaluationData(
+    channel: string,
+    options?: { createdAfter?: string; createdBefore?: string },
+  ): Promise<PurgeChannelEvaluationResult>;
   close(): Promise<void>;
+}
+
+export interface PurgeChannelEvaluationResult {
+  tradesDeleted: number;
+  ordersDeleted: number;
+  orphanedOrdersDeleted: number;
+  evaluationResultsDeleted: number;
+  tradeEventsDeleted: number;
 }
 
 class SQLiteAdapter implements DatabaseAdapter {
@@ -188,6 +201,7 @@ class SQLiteAdapter implements DatabaseAdapter {
   constructor(dbPath: string) {
     this.db = new Database(dbPath);
     this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
   }
 
   async initializeSchema(): Promise<void> {
@@ -1048,6 +1062,10 @@ class SQLiteAdapter implements DatabaseAdapter {
       fields.push('stop_loss = ?');
       values.push(updates.stop_loss);
     }
+    if (updates.quantity !== undefined) {
+      fields.push('quantity = ?');
+      values.push(updates.quantity);
+    }
 
     fields.push('updated_at = CURRENT_TIMESTAMP');
     values.push(id);
@@ -1132,6 +1150,68 @@ class SQLiteAdapter implements DatabaseAdapter {
 
     const stmt = this.db.prepare(`UPDATE orders SET ${fields.join(', ')} WHERE id = ?`);
     stmt.run(...values);
+  }
+
+  async purgeChannelEvaluationData(
+    channel: string,
+    options?: { createdAfter?: string; createdBefore?: string },
+  ): Promise<PurgeChannelEvaluationResult> {
+    const params: unknown[] = [channel];
+    let tradeDateClause = '';
+    if (options?.createdAfter) {
+      tradeDateClause += ' AND created_at >= ?';
+      params.push(options.createdAfter);
+    }
+    if (options?.createdBefore) {
+      tradeDateClause += ' AND created_at <= ?';
+      params.push(options.createdBefore);
+    }
+
+    const ordersForTrades = (
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM orders WHERE trade_id IN (
+            SELECT id FROM trades WHERE channel = ?${tradeDateClause}
+          )`,
+        )
+        .get(...params) as { n: number }
+    ).n;
+
+    const tradesDeleted = this.db
+      .prepare(`DELETE FROM trades WHERE channel = ?${tradeDateClause}`)
+      .run(...params).changes;
+
+    const orphanedOrdersDeleted = this.db
+      .prepare('DELETE FROM orders WHERE trade_id NOT IN (SELECT id FROM trades)')
+      .run().changes;
+
+    const evaluationResultsDeleted = this.db
+      .prepare('DELETE FROM evaluation_results WHERE channel = ?')
+      .run(channel).changes;
+
+    const eventParams: unknown[] = [channel];
+    let eventDateClause = '';
+    if (options?.createdAfter) {
+      eventDateClause += ' AND created_at >= ?';
+      eventParams.push(options.createdAfter);
+    }
+    if (options?.createdBefore) {
+      eventDateClause += ' AND created_at <= ?';
+      eventParams.push(options.createdBefore);
+    }
+    const tradeEventsDeleted = this.db
+      .prepare(`DELETE FROM trade_events WHERE channel = ?${eventDateClause}`)
+      .run(...eventParams).changes;
+
+    this.db.prepare('DELETE FROM trade_initiation_locks WHERE channel = ?').run(channel);
+
+    return {
+      tradesDeleted,
+      ordersDeleted: ordersForTrades + orphanedOrdersDeleted,
+      orphanedOrdersDeleted,
+      evaluationResultsDeleted,
+      tradeEventsDeleted,
+    };
   }
 
   async insertEvaluationResult(result: Omit<EvaluationResultRecord, 'id' | 'created_at'>): Promise<number> {
@@ -2359,6 +2439,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       fields.push(`stop_loss = $${paramIndex++}`);
       values.push(updates.stop_loss);
     }
+    if (updates.quantity !== undefined) {
+      fields.push(`quantity = $${paramIndex++}`);
+      values.push(updates.quantity);
+    }
 
     fields.push('updated_at = CURRENT_TIMESTAMP');
     values.push(id);
@@ -2452,6 +2536,71 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       `UPDATE orders SET ${fields.join(', ')} WHERE id = $${paramIndex}`,
       values
     );
+  }
+
+  async purgeChannelEvaluationData(
+    channel: string,
+    options?: { createdAfter?: string; createdBefore?: string },
+  ): Promise<PurgeChannelEvaluationResult> {
+    const params: unknown[] = [channel];
+    let tradeDateClause = '';
+    let paramIndex = 2;
+    if (options?.createdAfter) {
+      tradeDateClause += ` AND created_at >= $${paramIndex++}`;
+      params.push(options.createdAfter);
+    }
+    if (options?.createdBefore) {
+      tradeDateClause += ` AND created_at <= $${paramIndex++}`;
+      params.push(options.createdBefore);
+    }
+
+    const ordersCountResult = await this.pool.query(
+      `SELECT COUNT(*)::int AS n FROM orders WHERE trade_id IN (
+        SELECT id FROM trades WHERE channel = $1${tradeDateClause}
+      )`,
+      params,
+    );
+    const ordersForTrades = ordersCountResult.rows[0]?.n ?? 0;
+
+    const tradesResult = await this.pool.query(
+      `DELETE FROM trades WHERE channel = $1${tradeDateClause}`,
+      params,
+    );
+
+    const orphanResult = await this.pool.query(
+      'DELETE FROM orders WHERE trade_id NOT IN (SELECT id FROM trades)',
+    );
+
+    const evalResult = await this.pool.query(
+      'DELETE FROM evaluation_results WHERE channel = $1',
+      [channel],
+    );
+
+    const eventParams: unknown[] = [channel];
+    let eventDateClause = '';
+    let eventParamIndex = 2;
+    if (options?.createdAfter) {
+      eventDateClause += ` AND created_at >= $${eventParamIndex++}`;
+      eventParams.push(options.createdAfter);
+    }
+    if (options?.createdBefore) {
+      eventDateClause += ` AND created_at <= $${eventParamIndex++}`;
+      eventParams.push(options.createdBefore);
+    }
+    const eventsResult = await this.pool.query(
+      `DELETE FROM trade_events WHERE channel = $1${eventDateClause}`,
+      eventParams,
+    );
+
+    await this.pool.query('DELETE FROM trade_initiation_locks WHERE channel = $1', [channel]);
+
+    return {
+      tradesDeleted: tradesResult.rowCount ?? 0,
+      ordersDeleted: ordersForTrades + (orphanResult.rowCount ?? 0),
+      orphanedOrdersDeleted: orphanResult.rowCount ?? 0,
+      evaluationResultsDeleted: evalResult.rowCount ?? 0,
+      tradeEventsDeleted: eventsResult.rowCount ?? 0,
+    };
   }
 
   private normalizeTrades(rows: any[]): Trade[] {
@@ -2811,6 +2960,13 @@ export class DatabaseManager {
 
   releaseTradeInitiationLock(messageId: string, channel: string, scope: string): Promise<void> {
     return this.adapter.releaseTradeInitiationLock(messageId, channel, scope);
+  }
+
+  purgeChannelEvaluationData(
+    channel: string,
+    options?: { createdAfter?: string; createdBefore?: string },
+  ): Promise<PurgeChannelEvaluationResult> {
+    return this.adapter.purgeChannelEvaluationData(channel, options);
   }
 
   close(): Promise<void> {

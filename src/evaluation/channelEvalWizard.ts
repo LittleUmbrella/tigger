@@ -2,8 +2,8 @@
  * Interactive workflow: harvest → optional sample message IDs (printed for manual parser work) →
  * evaluate with an existing parser over a 1–5 month window.
  *
- * Date window: evaluation includes messages where date >= startDate (oldest boundary) and
- * date <= endDate end-of-day (newest boundary). The wizard sets start = N months ago, end = today.
+ * When config.json contains a matching channel row, evaluation defaults mirror live bot settings
+ * (entry timeout, concurrent symbols, obfuscation, prop firms, etc.). CLI flags override config.
  */
 
 import '../initiators/index.js';
@@ -13,8 +13,14 @@ import dayjs from 'dayjs';
 import { DatabaseManager } from '../db/schema.js';
 import { harvestMessages } from './messageHarvester.js';
 import { runEvaluation } from './evaluationOrchestrator.js';
-import { EvaluationConfig } from '../types/config.js';
 import type { HarvestOptions } from './messageHarvester.js';
+import {
+  buildEvaluationConfig,
+  formatChannelEvalDefaultsSummary,
+  loadBotConfig,
+  resolveChannelEvalDefaults,
+} from './channelEvalConfig.js';
+import { CustomPropFirmConfig } from '../types/config.js';
 
 export interface ChannelEvalWizardOptions {
   channel?: string;
@@ -32,6 +38,11 @@ export interface ChannelEvalWizardOptions {
   baseLeverage?: string;
   monitorType?: string;
   initialBalance?: string;
+  /** Path to config.json (default: CONFIG_PATH or config.json) */
+  configPath?: string;
+  /** Skip loading channel defaults from config.json */
+  noChannelConfig?: boolean;
+  entryTimeoutMinutes?: string;
 }
 
 async function question(
@@ -82,6 +93,9 @@ async function printSampleMessageReferences(
 
 const PLATFORM_OPTIONS = new Set(['telegram', 'discord', 'discord-selfbot']);
 
+const parsePropFirms = (value: string): (string | CustomPropFirmConfig)[] =>
+  value.split(',').map((f) => f.trim()).filter(Boolean);
+
 export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promise<void> {
   const rl = createInterface(process.stdin as any, process.stdout as any);
   let db: DatabaseManager | undefined;
@@ -90,6 +104,21 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     let channel = cli.channel?.trim() || (await question(rl, 'Channel ID or username')).trim();
     if (!channel) {
       throw new Error('Channel is required');
+    }
+
+    const useChannelConfig = !cli.noChannelConfig;
+    const botConfig = useChannelConfig ? await loadBotConfig(cli.configPath) : null;
+    const channelDefaults =
+      botConfig && useChannelConfig
+        ? resolveChannelEvalDefaults(botConfig, channel, cli.monitorType)
+        : null;
+
+    if (channelDefaults) {
+      console.log(
+        `\nUsing channel defaults from config.json: ${formatChannelEvalDefaultsSummary(channelDefaults)}\n`
+      );
+    } else if (useChannelConfig && botConfig) {
+      console.log(`\nNo config.json row for channel ${channel}; using CLI / prompts only.\n`);
     }
 
     const monthsStr =
@@ -174,9 +203,10 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
 
     await printSampleMessageReferences(db, channel, sampleIds);
 
+    const defaultParser = channelDefaults?.parser ?? '';
     let parserName =
       cli.parserName?.trim() ||
-      (await question(rl, 'Parser registry name (must already exist; see src/parsers/signalParser)', '')).trim();
+      (await question(rl, 'Parser registry name (must already exist; see src/parsers/signalParser)', defaultParser)).trim();
     if (!parserName) {
       throw new Error('Parser name is required (implement and register it before running evaluation).');
     }
@@ -192,49 +222,70 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
       );
     }
 
+    const defaultPropFirms =
+      channelDefaults?.propFirms?.map((f) => (typeof f === 'string' ? f : f.name)).join(',') ??
+      'crypto-fund-trader';
     const propFirmsStr =
       cli.propFirms?.trim() ||
-      (await question(rl, 'Prop firms (comma-separated)', 'crypto-fund-trader'));
-    const propFirms = propFirmsStr.split(',').map((f) => f.trim()).filter(Boolean);
+      (await question(rl, 'Prop firms (comma-separated)', defaultPropFirms));
+    const propFirms = parsePropFirms(propFirmsStr);
     if (propFirms.length === 0) {
       throw new Error('At least one prop firm name is required.');
     }
 
-    const riskPercentage = parseFloat(cli.riskPercentage || (await question(rl, 'Risk % per trade', '3'))) || 3;
-    const baseLeverageRaw = cli.baseLeverage || (await question(rl, 'Base leverage (optional, blank to omit)', ''));
+    const defaultRisk = String(channelDefaults?.riskPercentage ?? 3);
+    const riskPercentage =
+      parseFloat(cli.riskPercentage || (await question(rl, 'Risk % per trade', defaultRisk))) || 3;
+
+    const defaultLeverage =
+      cli.baseLeverage ??
+      (channelDefaults?.baseLeverage != null ? String(channelDefaults.baseLeverage) : '');
+    const baseLeverageRaw =
+      defaultLeverage || (await question(rl, 'Base leverage (optional, blank to omit)', ''));
     const baseLeverage = baseLeverageRaw.trim() ? parseFloat(baseLeverageRaw) : undefined;
-    const monitorType = cli.monitorType || (await question(rl, 'Monitor type (bybit | ctrader)', 'bybit'));
+
+    const defaultMonitor = channelDefaults?.monitorType ?? 'bybit';
+    const monitorType =
+      cli.monitorType || (await question(rl, 'Monitor type (bybit | ctrader)', defaultMonitor));
     if (monitorType !== 'bybit' && monitorType !== 'ctrader') {
       throw new Error(`Invalid monitor type: ${monitorType}`);
     }
-    const initialBalance =
-      parseFloat(cli.initialBalance || (await question(rl, 'Initial balance (USDT)', '10000'))) || 10000;
 
-    const evalConfig: EvaluationConfig = {
-      channel,
-      parser: parserName,
-      initiator: {
-        name: 'evaluation',
+    const defaultBalance = String(
+      cli.initialBalance != null
+        ? cli.initialBalance
+        : (channelDefaults?.initialBalance ?? 10000)
+    );
+    const initialBalance =
+      parseFloat(cli.initialBalance || (await question(rl, 'Initial balance (USDT)', defaultBalance))) ||
+      10000;
+
+    const entryTimeoutMinutes = cli.entryTimeoutMinutes
+      ? parseInt(cli.entryTimeoutMinutes, 10)
+      : channelDefaults?.entryTimeoutMinutes;
+
+    const evalConfig = buildEvaluationConfig(
+      {
+        channel,
+        parser: parserName,
+        propFirms,
+        startDate: startHarvestDate,
+        endDate: endHarvestDate,
+        initialBalance,
         riskPercentage,
         baseLeverage,
-        testnet: false,
+        monitorType: monitorType as 'bybit' | 'ctrader',
+        entryTimeoutMinutes,
       },
-      monitor: {
-        type: monitorType,
-        testnet: false,
-        pollInterval: 10000,
-        entryTimeoutMinutes: 2880,
-        breakevenAfterTPs: 1,
-      },
-      propFirms,
-      initialBalance,
-      startDate: startHarvestDate,
-      endDate: endHarvestDate,
-      speedMultiplier: 0,
-      maxTradeDurationDays: 7,
-    };
+      channelDefaults
+    );
 
     console.log('\nRunning evaluation (this may take a while)…');
+    console.log(
+      `  entryTimeout=${evalConfig.monitor.entryTimeoutMinutes}m` +
+        ` concurrentSymbols=${evalConfig.allowConcurrentSymbolTrades ?? false}` +
+        (evalConfig.tradeObfuscation ? ` obfuscation=${JSON.stringify(evalConfig.tradeObfuscation)}` : '')
+    );
     const result = await runEvaluation(db, evalConfig, channel, parserName, evalConfig.initiator, evalConfig.monitor);
 
     console.log('\nEvaluation summary');

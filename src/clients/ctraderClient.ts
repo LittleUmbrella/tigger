@@ -1,6 +1,7 @@
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { withCTraderRateLimitRetry } from '../utils/ctraderRateLimitRetry.js';
+import { getCtraderCachedResponse, setCtraderCachedResponse } from '../utils/bybitCache.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 
@@ -494,6 +495,34 @@ export class CTraderClient {
   }
 
   /**
+   * Max time span per GetTrendbarsReq chunk so `count` bars cover the full [from, to] window.
+   * Proto count limits bars returned **back from toTimestamp** (not forward from fromTimestamp).
+   */
+  static trendbarMaxChunkMs(
+    period: 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1' = 'M1',
+    maxCount = 2000
+  ): number {
+    const periodMinutes: Record<string, number> = {
+      M1: 1,
+      M5: 5,
+      M15: 15,
+      M30: 30,
+      H1: 60,
+      H4: 240,
+      D1: 1440,
+    };
+    const barMs = (periodMinutes[period] ?? 1) * 60 * 1000;
+    const fromCountLimit = (maxCount - 1) * barMs;
+    const apiMaxRangeMs =
+      period === 'M1' || period === 'M5'
+        ? 302_400_000
+        : period === 'M15' || period === 'M30' || period === 'H1'
+          ? 21_168_000_000
+          : 31_622_400_000;
+    return Math.min(fromCountLimit, apiMaxRangeMs);
+  }
+
+  /**
    * Get historical OHLC trendbars for a symbol (for evaluation/backtesting)
    * Uses ProtoOAGetTrendbarsReq. Requires account authentication.
    * @param symbol - Symbol name (e.g., EURUSD, XAUUSD)
@@ -533,44 +562,73 @@ export class CTraderClient {
     };
     const periodNum = periodMap[params.period ?? 'M1'] ?? 1;
 
+    const period = params.period ?? 'M1';
+    const maxCount = 2000;
+    const maxChunkMs = CTraderClient.trendbarMaxChunkMs(period, maxCount);
     const result: Array<{ timestamp: number; price: number; high?: number; low?: number }> = [];
-    const maxChunkMs = params.period === 'M1' || params.period === 'M5' ? 5 * 7 * 24 * 60 * 60 * 1000 : 35 * 7 * 24 * 60 * 60 * 1000;
+    const seenTimestamps = new Set<number>();
     let currentFrom = params.fromTimestamp;
     const toTs = params.toTimestamp;
 
     while (currentFrom < toTs) {
       const currentTo = Math.min(currentFrom + maxChunkMs, toTs);
+      const cacheParams = {
+        symbol: params.symbol.toUpperCase(),
+        fromTimestamp: currentFrom,
+        toTimestamp: currentTo,
+        period,
+      };
 
       try {
-        const response = await this.connection.sendCommand('ProtoOAGetTrendbarsReq', {
-          ctidTraderAccountId: accountIdNum,
-          fromTimestamp: currentFrom,
-          toTimestamp: currentTo,
-          period: periodNum,
-          symbolId,
-          count: 2000
-        });
+        let chunkBars = (await getCtraderCachedResponse('getTrendbars', cacheParams)) as
+          | Array<{ timestamp: number; price: number; high?: number; low?: number }>
+          | null;
 
-        const trendbars = response?.trendbar || [];
-        for (const bar of trendbars) {
-          const lowRaw = protobufLongToNumber(bar.low) ?? 0;
-          const deltaOpen = protobufLongToNumber(bar.deltaOpen) ?? 0;
-          const deltaHigh = protobufLongToNumber(bar.deltaHigh) ?? 0;
-          const deltaClose = protobufLongToNumber(bar.deltaClose) ?? 0;
+        if (!chunkBars) {
+          const response = await withCTraderRateLimitRetry(
+            () =>
+              this.connection!.sendCommand('ProtoOAGetTrendbarsReq', {
+                ctidTraderAccountId: accountIdNum,
+                fromTimestamp: currentFrom,
+                toTimestamp: currentTo,
+                period: periodNum,
+                symbolId,
+                count: maxCount,
+              }),
+            { label: `getTrendbars:${params.symbol}` }
+          );
 
-          const low = lowRaw / CTRADER_PRICE_SCALE;
-          const open = (lowRaw + deltaOpen) / CTRADER_PRICE_SCALE;
-          const high = (lowRaw + deltaHigh) / CTRADER_PRICE_SCALE;
-          const close = (lowRaw + deltaClose) / CTRADER_PRICE_SCALE;
-          const utcMinutes = protobufLongToNumber(bar.utcTimestampInMinutes) ?? 0;
-          const timestamp = utcMinutes * 60 * 1000;
+          const trendbars = response?.trendbar || [];
+          chunkBars = [];
+          for (const bar of trendbars) {
+            const lowRaw = protobufLongToNumber(bar.low) ?? 0;
+            const deltaHigh = protobufLongToNumber(bar.deltaHigh) ?? 0;
+            const deltaClose = protobufLongToNumber(bar.deltaClose) ?? 0;
 
-          result.push({
-            timestamp,
-            price: close,
-            high,
-            low
-          });
+            const low = lowRaw / CTRADER_PRICE_SCALE;
+            const high = (lowRaw + deltaHigh) / CTRADER_PRICE_SCALE;
+            const close = (lowRaw + deltaClose) / CTRADER_PRICE_SCALE;
+            const utcMinutes = protobufLongToNumber(bar.utcTimestampInMinutes) ?? 0;
+            const timestamp = utcMinutes * 60 * 1000;
+
+            if (timestamp < params.fromTimestamp || timestamp > params.toTimestamp) continue;
+
+            chunkBars.push({
+              timestamp,
+              price: close,
+              high,
+              low
+            });
+          }
+
+          await setCtraderCachedResponse('getTrendbars', cacheParams, chunkBars);
+        }
+
+        for (const bar of chunkBars) {
+          if (bar.timestamp < params.fromTimestamp || bar.timestamp > params.toTimestamp) continue;
+          if (seenTimestamps.has(bar.timestamp)) continue;
+          seenTimestamps.add(bar.timestamp);
+          result.push(bar);
         }
       } catch (error) {
         logger.warn('getTrendbars chunk failed', {
@@ -582,9 +640,6 @@ export class CTraderClient {
       }
 
       currentFrom = currentTo + 1;
-      if (currentFrom < toTs) {
-        await new Promise(r => setTimeout(r, 250));
-      }
     }
 
     result.sort((a, b) => a.timestamp - b.timestamp);
@@ -708,13 +763,17 @@ export class CTraderClient {
         // cTrader returns ticks in descending order (newest first). When hasMore, request OLDER data
         // by using the oldest timestamp we got as the new toTimestamp.
         while (currentFrom <= chunkTo) {
-          const response = await this.connection.sendCommand('ProtoOAGetTickDataReq', {
-            ctidTraderAccountId: accountIdNum,
-            symbolId,
-            type: typeNum,
-            fromTimestamp: currentFrom,
-            toTimestamp: chunkTo,
-          });
+          const response = await withCTraderRateLimitRetry(
+            () =>
+              this.connection!.sendCommand('ProtoOAGetTickDataReq', {
+                ctidTraderAccountId: accountIdNum,
+                symbolId,
+                type: typeNum,
+                fromTimestamp: currentFrom,
+                toTimestamp: chunkTo,
+              }),
+            { label: `getTickData:${params.symbol}` }
+          );
 
           const ticks = response?.tickData || [];
           let lastTimestampMs: number | null = null;
@@ -741,7 +800,6 @@ export class CTraderClient {
           const nextChunkTo = minTimestampMs !== null ? minTimestampMs - 1 : chunkTo - 1;
           if (nextChunkTo < currentFrom) break;
           chunkTo = nextChunkTo;
-          await new Promise(r => setTimeout(r, 100));
         }
       } catch (error) {
         logger.warn('getTickData chunk failed', {
@@ -753,9 +811,6 @@ export class CTraderClient {
       }
 
       currentFrom = currentTo + 1;
-      if (currentFrom < toTs) {
-        await new Promise(r => setTimeout(r, 250));
-      }
     }
 
     result.sort((a, b) => a.timestamp - b.timestamp);

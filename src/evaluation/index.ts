@@ -387,12 +387,15 @@ program
   .option('--skip-harvest', 'Use messages already in the evaluation DB')
   .option('--skip-samples', 'Do not prompt for sample message IDs or print reference text')
   .option('--sample-ids <ids>', 'Comma-separated message IDs to print as parser reference')
-  .option('-p, --parser <name>', 'Parser registry name (must already exist)')
-  .option('--prop-firms <firms>', 'Comma-separated prop firms', 'crypto-fund-trader')
-  .option('--risk-percentage <n>', 'Risk % per trade', '3')
-  .option('--base-leverage <n>', 'Optional base leverage')
-  .option('--monitor-type <type>', 'bybit | ctrader', 'bybit')
-  .option('--initial-balance <amount>', 'Initial balance', '10000')
+  .option('-p, --parser <name>', 'Parser registry name (default: from config.json channel row)')
+  .option('--prop-firms <firms>', 'Comma-separated prop firms (default: from config.json / account propFirms)')
+  .option('--risk-percentage <n>', 'Risk % per trade (default: from channel config)')
+  .option('--base-leverage <n>', 'Optional base leverage (default: from channel config)')
+  .option('--monitor-type <type>', 'bybit | ctrader (default: from channel config; required when channel has multiple initiators)')
+  .option('--initial-balance <amount>', 'Initial balance (default: from account propFirms initialBalance)')
+  .option('--config-path <path>', 'Path to config.json for channel defaults (default: config.json)')
+  .option('--no-channel-config', 'Do not load evaluation defaults from config.json')
+  .option('--entry-timeout-minutes <n>', 'Override entry timeout (channel config used when omitted)')
   .option('--db-path <path>', 'Database path (SQLite) or connection string (PostgreSQL)', 'data/evaluation.db')
   .option('--db-type <type>', 'Database type: sqlite or postgresql', 'sqlite')
   .action(async (options) => {
@@ -414,6 +417,9 @@ program
         baseLeverage: options.baseLeverage,
         monitorType: options.monitorType,
         initialBalance: options.initialBalance,
+        configPath: options.configPath,
+        noChannelConfig: options.noChannelConfig,
+        entryTimeoutMinutes: options.entryTimeoutMinutes,
       });
       process.exit(0);
     } catch (error) {

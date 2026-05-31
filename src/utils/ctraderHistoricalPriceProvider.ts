@@ -3,6 +3,7 @@
  *
  * Fetches historical OHLC data from cTrader Open API (ProtoOAGetTrendbarsReq)
  * for evaluation/backtesting of Forex and CFD symbols.
+ * M1 chunks are persisted under data/ctrader-cache/ for re-runs (via getTrendbars).
  */
 
 import dayjs from 'dayjs';
