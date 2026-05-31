@@ -16,6 +16,10 @@ import {
   selectCanonicalStopLossOrder,
 } from './mockExchangeOrderHelpers.js';
 import { clampMarketRangeFillPrice } from './evalEntryResolution.js';
+import {
+  canSimulatePricePointAtSignal,
+  M1_BAR_PERIOD_MS,
+} from './mockExchangeBarTiming.js';
 import { getRangeBoundaryTpPrice } from '../utils/ctraderMarketRange.js';
 import dayjs from 'dayjs';
 
@@ -24,6 +28,7 @@ interface PriceDataPoint {
   price: number; // Close price (for backward compatibility)
   high?: number; // High price of the candle (for TP/SL checks)
   low?: number; // Low price of the candle (for TP/SL checks)
+  pointKind?: 'tick' | 'm1';
 }
 
 interface MockExchangeState {
@@ -44,6 +49,10 @@ interface MockExchangeState {
 export interface MockExchangeEntryOptions {
   useMarketRangeForEntry?: boolean;
   maxSkippablePastTPs?: number;
+  /** M1 width in ms; 0 = tick/point data (only timestamps strictly after signal). */
+  barPeriodMs?: number;
+  /** cTrader M1: ticks from signal+12s minute, then M1 bars (no look-ahead). */
+  useHybridTickM1?: boolean;
 }
 
 export interface MockExchange {
@@ -301,13 +310,11 @@ export function createMockExchange(
 
   const shouldFillStopLoss = (pricePoint: PriceDataPoint): boolean => {
     if (state.isLong) {
-      // For LONG: SL fills when candle LOW hits SL price
-      // Use low if available, otherwise fall back to close price
+      // LONG: trigger when price trades at or through SL; fill happens at stop level
       const checkPrice = pricePoint.low ?? pricePoint.price;
       return checkPrice <= state.currentStopLoss;
     } else {
-      // For SHORT: SL fills when candle HIGH hits SL price
-      // Use high if available, otherwise fall back to close price
+      // SHORT: trigger when price trades at or through SL; fill happens at stop level
       const checkPrice = pricePoint.high ?? pricePoint.price;
       return checkPrice >= state.currentStopLoss;
     }
@@ -520,15 +527,13 @@ export function createMockExchange(
 
   const shouldFillTakeProfit = (tpIndex: number, pricePoint: PriceDataPoint): boolean => {
     const tpPrice = state.takeProfits[tpIndex];
-    
+
     if (state.isLong) {
-      // For LONG: TP fills when candle HIGH reaches TP price
-      // Use high if available, otherwise fall back to close price
+      // LONG: trigger when high trades at or through TP; fill at TP level (limit TP)
       const checkPrice = pricePoint.high ?? pricePoint.price;
       return checkPrice >= tpPrice;
     } else {
-      // For SHORT: TP fills when candle LOW reaches TP price
-      // Use low if available, otherwise fall back to close price
+      // SHORT: trigger when low trades at or through TP; fill at TP level (limit TP)
       const checkPrice = pricePoint.low ?? pricePoint.price;
       return checkPrice <= tpPrice;
     }
@@ -736,13 +741,21 @@ export function createMockExchange(
       isFuture: tradeEndTime.isAfter(now)
     });
 
-    // Fetch price history
+    // Fetch price history (hybrid tick-then-M1 for cTrader eval when enabled)
     const fetchStartTime = Date.now();
-    state.priceHistory = await priceProvider.getPriceHistory(
-      state.trade.trading_pair,
-      tradeStartTime,
-      cappedEndTime
-    );
+    const useHybridTickM1 =
+      entryOptions?.useHybridTickM1 === true && priceProvider.getHybridEvalPriceHistory != null;
+    state.priceHistory = useHybridTickM1
+      ? await priceProvider.getHybridEvalPriceHistory!(
+          state.trade.trading_pair,
+          tradeStartTime,
+          cappedEndTime
+        )
+      : await priceProvider.getPriceHistory(
+          state.trade.trading_pair,
+          tradeStartTime,
+          cappedEndTime
+        );
     const fetchElapsed = Date.now() - fetchStartTime;
 
     if (state.priceHistory.length === 0) {
@@ -757,6 +770,13 @@ export function createMockExchange(
       logger.debug('Price history loaded', {
         tradeId: state.trade.id,
         pricePoints: state.priceHistory.length,
+        useHybridTickM1,
+        tickPoints: useHybridTickM1
+          ? state.priceHistory.filter((p) => p.pointKind === 'tick').length
+          : undefined,
+        m1Points: useHybridTickM1
+          ? state.priceHistory.filter((p) => p.pointKind === 'm1').length
+          : undefined,
         firstPrice: state.priceHistory[0]?.price,
         lastPrice: state.priceHistory[state.priceHistory.length - 1]?.price,
         firstTimestamp: new Date(state.priceHistory[0]?.timestamp || 0).toISOString(),
@@ -863,6 +883,9 @@ export function createMockExchange(
     const tolerance = state.trade.entry_price * 0.001;
     const isMarketEntry = state.trade.entry_order_type === 'market';
     const tradeStartMs = dayjs(state.trade.created_at).valueOf();
+    const barPeriodMs = entryOptions?.barPeriodMs ?? M1_BAR_PERIOD_MS;
+    const useHybridTickM1 =
+      entryOptions?.useHybridTickM1 === true && priceProvider.getHybridEvalPriceHistory != null;
     const marketRangeBoundaryTp = entryOptions?.useMarketRangeForEntry
       ? getRangeBoundaryTpPrice(state.takeProfits, entryOptions.maxSkippablePastTPs)
       : undefined;
@@ -880,25 +903,29 @@ export function createMockExchange(
     // Process each price point chronologically
     for (let i = 0; i < state.priceHistory.length; i++) {
       const pricePoint = state.priceHistory[i];
+      if (
+        !useHybridTickM1 &&
+        !canSimulatePricePointAtSignal(pricePoint.timestamp, tradeStartMs, barPeriodMs)
+      ) {
+        continue;
+      }
       const priceTime = dayjs(pricePoint.timestamp);
       const price = pricePoint.price;
 
       // Check if entry should fill
       if (!state.entryFilled) {
         if (isMarketEntry) {
-          if (pricePoint.timestamp >= tradeStartMs) {
-            const fillPrice = resolveMarketFillPrice(price);
-            logger.info('Mock exchange: Market entry filled on first bar at/after signal', {
-              tradeId: state.trade.id,
-              tradingPair: state.trade.trading_pair,
-              quotePrice: state.trade.entry_price,
-              fillPrice,
-              useMarketRange: marketRangeBoundaryTp != null,
-              boundaryTp: marketRangeBoundaryTp,
-              priceTime: priceTime.toISOString(),
-            });
-            await fillEntry(fillPrice, priceTime);
-          }
+          const fillPrice = resolveMarketFillPrice(price);
+          logger.info('Mock exchange: Market entry filled on first price after eval delay', {
+            tradeId: state.trade.id,
+            tradingPair: state.trade.trading_pair,
+            quotePrice: state.trade.entry_price,
+            fillPrice,
+            useMarketRange: marketRangeBoundaryTp != null,
+            boundaryTp: marketRangeBoundaryTp,
+            priceTime: priceTime.toISOString(),
+          });
+          await fillEntry(fillPrice, priceTime);
         } else {
           entryCheckCount++;
           const priceDiff = Math.abs(price - state.trade.entry_price);
@@ -959,22 +986,16 @@ export function createMockExchange(
       if (state.entryFilled && !state.stopLossFilled) {
         // Check if stop loss should fill (use high/low from candle)
         if (shouldFillStopLoss(pricePoint)) {
-          // Use the actual price that triggered SL (low for LONG, high for SHORT)
-          const slFillPrice = state.isLong 
-            ? (pricePoint.low ?? pricePoint.price)
-            : (pricePoint.high ?? pricePoint.price);
-          await fillStopLoss(slFillPrice, priceTime);
+          // Position stop (cTrader setTradingStop): fill at stop level, not bar/tick extreme
+          await fillStopLoss(state.currentStopLoss, priceTime);
           return true; // Trade is done
         }
 
         // Check if take profits should fill (use high/low from candle)
         for (let tpIndex = 0; tpIndex < state.takeProfits.length; tpIndex++) {
           if (!state.filledTakeProfits.has(tpIndex) && shouldFillTakeProfit(tpIndex, pricePoint)) {
-            // Use the actual price that triggered TP (high for LONG, low for SHORT)
-            const tpFillPrice = state.isLong
-              ? (pricePoint.high ?? pricePoint.price)
-              : (pricePoint.low ?? pricePoint.price);
-            await fillTakeProfit(tpIndex, tpFillPrice, priceTime);
+            // Limit TP: fill at declared TP price, not bar extreme
+            await fillTakeProfit(tpIndex, state.takeProfits[tpIndex], priceTime);
             
             // Move stop loss to breakeven after N TPs are filled
             // Count filled TPs (including the one we just filled)

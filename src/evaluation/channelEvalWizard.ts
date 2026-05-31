@@ -35,6 +35,7 @@ export interface ChannelEvalWizardOptions {
   dbPath?: string;
   dbType?: string;
   riskPercentage?: string;
+  minRiskReward?: string;
   baseLeverage?: string;
   monitorType?: string;
   initialBalance?: string;
@@ -254,6 +255,33 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     const riskPercentage =
       parseFloat(cli.riskPercentage || (await question(rl, 'Risk % per trade', defaultRisk))) || 3;
 
+    const defaultMinRiskReward =
+      channelDefaults?.minRiskReward != null ? String(channelDefaults.minRiskReward) : '';
+    let minRiskReward: number | undefined;
+    if (cli.minRiskReward?.trim()) {
+      minRiskReward = parseFloat(cli.minRiskReward);
+      if (
+        channelDefaults?.minRiskReward != null &&
+        minRiskReward !== channelDefaults.minRiskReward
+      ) {
+        console.log(
+          `\nNote: CLI min risk/reward ${minRiskReward} overrides config.json ${channelDefaults.minRiskReward} for this channel.\n`
+        );
+      }
+    } else if (nonInteractive && defaultMinRiskReward) {
+      minRiskReward = parseFloat(defaultMinRiskReward);
+    } else {
+      const minRiskRewardRaw = await question(
+        rl,
+        'Min risk/reward ratio (blank to disable)',
+        defaultMinRiskReward
+      );
+      minRiskReward = minRiskRewardRaw.trim() ? parseFloat(minRiskRewardRaw) : undefined;
+    }
+    if (minRiskReward != null && (!Number.isFinite(minRiskReward) || minRiskReward <= 0)) {
+      throw new Error(`Invalid min risk/reward: ${cli.minRiskReward ?? minRiskReward}`);
+    }
+
     const defaultLeverage =
       cli.baseLeverage ??
       (channelDefaults?.baseLeverage != null ? String(channelDefaults.baseLeverage) : '');
@@ -290,6 +318,7 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
         endDate: endHarvestDate,
         initialBalance,
         riskPercentage,
+        minRiskReward,
         baseLeverage,
         monitorType: monitorType as 'bybit' | 'ctrader',
         entryTimeoutMinutes,
@@ -300,6 +329,7 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     console.log('\nRunning evaluation (this may take a while)…');
     console.log(
       `  entryTimeout=${evalConfig.monitor.entryTimeoutMinutes}m` +
+        ` minRR=${evalConfig.minRiskReward ?? 'none'}` +
         ` concurrentSymbols=${evalConfig.allowConcurrentSymbolTrades ?? false}` +
         (evalConfig.tradeObfuscation ? ` obfuscation=${JSON.stringify(evalConfig.tradeObfuscation)}` : '')
     );

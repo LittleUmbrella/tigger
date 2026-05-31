@@ -21,6 +21,8 @@ export interface PriceDataPoint {
   price: number;
   high?: number;
   low?: number;
+  /** tick = point-in-time; m1 = OHLC candle (hybrid cTrader eval) */
+  pointKind?: 'tick' | 'm1';
 }
 
 export interface HistoricalPriceProvider {
@@ -31,6 +33,12 @@ export interface HistoricalPriceProvider {
   getPriceAtTime: (symbol: string, time: dayjs.Dayjs) => Promise<number | null>;
   prefetchPriceData: (symbol: string, messageTime: dayjs.Dayjs, maxDurationDays?: number) => Promise<void>;
   getPriceHistory: (symbol: string, startTime: dayjs.Dayjs, endTime: dayjs.Dayjs) => Promise<PriceDataPoint[]>;
+  /** cTrader M1 eval: ticks from signal+delay minute, then M1 bars */
+  getHybridEvalPriceHistory?: (
+    symbol: string,
+    signalTime: dayjs.Dayjs,
+    endTime: dayjs.Dayjs
+  ) => Promise<PriceDataPoint[]>;
   hasData: (symbol: string) => boolean;
   getAvailableSymbols: () => string[];
   getBybitClient: () => RestClientV5 | null;

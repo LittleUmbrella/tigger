@@ -261,6 +261,8 @@ export async function runEvaluation(
       {
         useMarketRangeForEntry: config.useMarketRangeForEntry,
         maxSkippablePastTPs: config.maxSkippablePastTPs,
+        barPeriodMs: monitorConfig.ctraderUseTickData ? 0 : 60_000,
+        useHybridTickM1: monitorType === 'ctrader' && !monitorConfig.ctraderUseTickData,
       }
     )
   }));

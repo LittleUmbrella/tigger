@@ -36,6 +36,7 @@ const botConfig = {
       useLimitOrderForEntry: true,
       tradeObfuscation: { tp: 0.02 },
       maxSkippablePastTPs: 0,
+      minRiskReward: 1.5,
       accountFilters: [{ accounts: ['ctrader_demo_2'], rules: {} }],
     },
     {
@@ -80,6 +81,7 @@ describe('channelEvalConfig', () => {
     expect(config.useLimitOrderForEntry).toBe(true);
     expect(config.tradeObfuscation).toEqual({ tp: 0.02 });
     expect(config.initiator.riskPercentage).toBe(1);
+    expect(config.minRiskReward).toBe(1.5);
     expect(config.initiator.baseLeverage).toBe(20);
     expect(config.initialBalance).toBe(5000);
     expect(config.monitor.dynamicBreakevenAfterTPs).toBe(true);
@@ -94,11 +96,13 @@ describe('channelEvalConfig', () => {
         propFirms: ['the5ers'],
         entryTimeoutMinutes: 30,
         allowConcurrentSymbolTrades: false,
+        minRiskReward: 2,
       },
       defaults
     );
 
     expect(config.monitor.entryTimeoutMinutes).toBe(30);
     expect(config.allowConcurrentSymbolTrades).toBe(false);
+    expect(config.minRiskReward).toBe(2);
   });
 });

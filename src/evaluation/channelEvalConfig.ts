@@ -222,6 +222,7 @@ export const formatChannelEvalDefaultsSummary = (defaults: ChannelEvalDefaults):
   if (defaults.parser) parts.push(`parser=${defaults.parser}`);
   if (defaults.monitorType) parts.push(`monitor=${defaults.monitorType}`);
   if (defaults.riskPercentage != null) parts.push(`risk=${defaults.riskPercentage}%`);
+  if (defaults.minRiskReward != null) parts.push(`minRR=${defaults.minRiskReward}`);
   if (defaults.baseLeverage != null) parts.push(`leverage=${defaults.baseLeverage}`);
   if (defaults.entryTimeoutMinutes != null) {
     parts.push(`entryTimeout=${defaults.entryTimeoutMinutes}m`);

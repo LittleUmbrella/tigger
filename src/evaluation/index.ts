@@ -391,6 +391,7 @@ program
   .option('-p, --parser <name>', 'Parser registry name (default: from config.json channel row)')
   .option('--prop-firms <firms>', 'Comma-separated prop firms (default: from config.json / account propFirms)')
   .option('--risk-percentage <n>', 'Risk % per trade (default: from channel config)')
+  .option('--min-risk-reward <n>', 'Minimum risk/reward ratio (default: from channel config minRiskReward)')
   .option('--base-leverage <n>', 'Optional base leverage (default: from channel config)')
   .option('--monitor-type <type>', 'bybit | ctrader (default: from channel config; required when channel has multiple initiators)')
   .option('--initial-balance <amount>', 'Initial balance (default: from account propFirms initialBalance)')
@@ -416,6 +417,7 @@ program
         dbPath: options.dbPath,
         dbType: options.dbType,
         riskPercentage: options.riskPercentage,
+        minRiskReward: options.minRiskReward,
         baseLeverage: options.baseLeverage,
         monitorType: options.monitorType,
         initialBalance: options.initialBalance,

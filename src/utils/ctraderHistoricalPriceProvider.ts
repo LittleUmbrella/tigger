@@ -11,9 +11,16 @@ import { logger } from './logger.js';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
 import type { HistoricalPriceProvider, PriceDataPoint } from './historicalPriceProvider.js';
 import { normalizeCTraderSymbol } from './ctraderSymbolUtils.js';
+import { getCtraderCachedResponse, setCtraderCachedResponse } from './bybitCache.js';
+import {
+  getTickMinuteBounds,
+  mergeHybridEvalSeries,
+  M1_BAR_PERIOD_MS,
+} from './ctraderHybridEvalTiming.js';
 
 interface CTraderPriceProviderState {
   priceCache: Map<string, PriceDataPoint[]>;
+  tickMinuteCache: Map<string, PriceDataPoint[]>;
   inFlightRequests: Map<string, Promise<PriceDataPoint[]>>;
   currentTime: dayjs.Dayjs;
   speedMultiplier: number;
@@ -40,11 +47,80 @@ export function createCTraderHistoricalPriceProvider(
 
   const state: CTraderPriceProviderState = {
     priceCache: new Map(),
+    tickMinuteCache: new Map(),
     inFlightRequests: new Map(),
     currentTime: dayjs(startDate),
     speedMultiplier,
     startTime: dayjs(startDate),
     ctraderClient,
+  };
+
+  const fetchTickMinute = async (
+    symbol: string,
+    minuteOpenMs: number
+  ): Promise<PriceDataPoint[]> => {
+    const normalizedSymbol = normalizeCTraderSymbol(symbol);
+    const cacheKey = `${normalizedSymbol}_tickmin_${minuteOpenMs}`;
+    if (state.tickMinuteCache.has(cacheKey)) {
+      return state.tickMinuteCache.get(cacheKey)!;
+    }
+
+    if (state.inFlightRequests.has(cacheKey)) {
+      return state.inFlightRequests.get(cacheKey)!;
+    }
+
+    const minuteEndMs = minuteOpenMs + M1_BAR_PERIOD_MS;
+    const diskParams = {
+      symbol: normalizedSymbol,
+      fromTimestamp: minuteOpenMs,
+      toTimestamp: minuteEndMs - 1,
+      type: 'BID' as const,
+    };
+
+    const fetchPromise = (async () => {
+      try {
+        await ctraderClient.connect();
+        await ctraderClient.authenticate();
+
+        let ticks = (await getCtraderCachedResponse('getTickData', diskParams)) as
+          | Array<{ timestamp: number; price: number }>
+          | null;
+
+        if (!ticks) {
+          ticks = await ctraderClient.getTickData({
+            symbol: normalizedSymbol,
+            fromTimestamp: minuteOpenMs,
+            toTimestamp: minuteEndMs - 1,
+          });
+          await setCtraderCachedResponse('getTickData', diskParams, ticks);
+        }
+
+        const points: PriceDataPoint[] = ticks.map((t) => ({
+          timestamp: t.timestamp,
+          price: t.price,
+        }));
+        points.sort((a, b) => a.timestamp - b.timestamp);
+        state.tickMinuteCache.set(cacheKey, points);
+        logger.info('Fetched cTrader tick minute for hybrid eval', {
+          symbol: normalizedSymbol,
+          minuteOpen: new Date(minuteOpenMs).toISOString(),
+          dataPoints: points.length,
+        });
+        return points;
+      } catch (error) {
+        logger.warn('Failed to fetch cTrader tick minute', {
+          symbol: normalizedSymbol,
+          minuteOpen: new Date(minuteOpenMs).toISOString(),
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return [];
+      } finally {
+        state.inFlightRequests.delete(cacheKey);
+      }
+    })();
+
+    state.inFlightRequests.set(cacheKey, fetchPromise);
+    return fetchPromise;
   };
 
   const fetchPriceData = async (
@@ -195,6 +271,30 @@ export function createCTraderHistoricalPriceProvider(
     ): Promise<PriceDataPoint[]> => {
       return fetchPriceData(normalizeCTraderSymbol(symbol), startTime, endTime);
     },
+
+    getHybridEvalPriceHistory: useTickData
+      ? undefined
+      : async (
+          symbol: string,
+          signalTime: dayjs.Dayjs,
+          endTime: dayjs.Dayjs
+        ): Promise<PriceDataPoint[]> => {
+          const normalizedSymbol = normalizeCTraderSymbol(symbol);
+          const signalMs = signalTime.valueOf();
+          const { minuteOpenMs, minuteEndMs } = getTickMinuteBounds(signalMs);
+
+          const minuteTicks = await fetchTickMinute(normalizedSymbol, minuteOpenMs);
+          const m1Bars =
+            endTime.valueOf() > minuteEndMs
+              ? await fetchPriceData(
+                  normalizedSymbol,
+                  dayjs(minuteEndMs),
+                  endTime
+                )
+              : [];
+
+          return mergeHybridEvalSeries(minuteTicks, signalMs, m1Bars);
+        },
 
     hasData: (symbol: string): boolean => {
       const normalizedSymbol = normalizeCTraderSymbol(symbol);
