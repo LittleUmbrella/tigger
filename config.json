@@ -417,6 +417,7 @@
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true,
       "allowConcurrentSymbolTrades": true,
+      "minRiskReward": 2,
       "accountFilters": [
         {
           "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],

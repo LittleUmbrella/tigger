@@ -11,6 +11,11 @@ import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo, getCTraderSymbolInfo } from './symbolValidator.js';
 import { getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
+import { assertMinRiskReward } from '../utils/minRiskReward.js';
+import {
+  filterTakeProfitsAtMarketQuote,
+  resolveEvalEntryMode,
+} from '../evaluation/evalEntryResolution.js';
 import dayjs from 'dayjs';
 
 
@@ -28,6 +33,10 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     isSimulation,
     priceProvider,
     allowConcurrentSymbolTrades,
+    useLimitOrderForEntry,
+    useMarketRangeForEntry,
+    maxSkippablePastTPs,
+    minRiskReward,
   } = context;
 
   // In evaluation mode, we should always be in simulation
@@ -100,42 +109,16 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
   }
 
-  // Get current price from price provider if entry price is not provided
-  let entryPrice = order.entryPrice;
-  if (!entryPrice || entryPrice <= 0) {
-    if (priceProvider) {
-      try {
-        const currentPrice = await priceProvider.getCurrentPrice(tradingPairForPriceProvider);
-        if (currentPrice && currentPrice > 0) {
-          entryPrice = currentPrice;
-          logger.info('Using current price from price provider for entry', {
-            tradingPair: order.tradingPair,
-            normalizedTradingPair,
-            entryPrice
-          });
-        }
-      } catch (error) {
-        logger.warn('Failed to get current price from price provider', {
-          tradingPair: order.tradingPair,
-          normalizedTradingPair,
-          error: serializeErrorForLog(error)
-        });
-      }
-    }
-    
-    if (!entryPrice || entryPrice <= 0) {
-      throw new Error(`Cannot calculate position size: entry price is required for ${normalizedTradingPair}`);
-    }
-  }
-
-  // Get price precision from price provider if available
+  // Get price precision and pip size from price provider if available
   let pricePrecision: number | undefined = undefined;
+  let pipSize: number | undefined = undefined;
   if (priceProvider) {
     try {
       const ctraderClient = priceProvider.getCTraderClient?.();
       if (ctraderClient) {
         const symbolInfo = await getCTraderSymbolInfo(ctraderClient, normalizedTradingPair);
         pricePrecision = symbolInfo?.pricePrecision;
+        pipSize = symbolInfo?.tickSize;
       } else {
         const bybitClient = priceProvider.getBybitClient();
         if (bybitClient) {
@@ -144,24 +127,88 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
         }
       }
     } catch (error) {
-      pricePrecision = getDecimalPrecision(entryPrice);
+      pricePrecision = order.entryPrice ? getDecimalPrecision(order.entryPrice) : undefined;
     }
   }
   if (pricePrecision === undefined) {
-    pricePrecision = getDecimalPrecision(entryPrice);
+    pricePrecision = order.entryPrice ? getDecimalPrecision(order.entryPrice) : 2;
   }
 
-  // Round prices to exchange precision
-  const roundedEntryPrice = roundPrice(entryPrice, pricePrecision);
-  const roundedStopLoss = order.stopLoss && order.stopLoss > 0 
+  const roundedStopLoss = order.stopLoss && order.stopLoss > 0
     ? roundPrice(order.stopLoss, pricePrecision)
     : order.stopLoss;
-  const roundedTPPrices = order.takeProfits && order.takeProfits.length > 0
+  let roundedTPPrices = order.takeProfits && order.takeProfits.length > 0
     ? order.takeProfits.map(tpPrice => roundPrice(tpPrice, pricePrecision))
     : order.takeProfits;
 
+  const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
+  const needsQuotePrice = !useLimitAtTouch || !order.entryPrice || order.entryPrice <= 0;
+
+  let quotePrice: number | undefined = order.entryPrice && order.entryPrice > 0
+    ? order.entryPrice
+    : undefined;
+
+  if (needsQuotePrice && priceProvider) {
+    try {
+      const currentPrice = await priceProvider.getCurrentPrice(tradingPairForPriceProvider);
+      if (currentPrice && currentPrice > 0) {
+        quotePrice = currentPrice;
+        logger.info('Using current price from price provider for entry', {
+          tradingPair: order.tradingPair,
+          normalizedTradingPair,
+          quotePrice
+        });
+      }
+    } catch (error) {
+      logger.warn('Failed to get current price from price provider', {
+        tradingPair: order.tradingPair,
+        normalizedTradingPair,
+        error: serializeErrorForLog(error)
+      });
+    }
+  }
+
+  const entryMode = resolveEvalEntryMode({
+    order,
+    useLimitOrderForEntry,
+    useMarketRangeForEntry,
+    maxSkippablePastTPs,
+    currentPrice: quotePrice,
+    pipSize,
+  });
+
+  let roundedEntryPrice: number;
+  if (entryMode.entryOrderType === 'limit') {
+    if (!order.entryPrice || order.entryPrice <= 0) {
+      throw new Error(`Cannot calculate position size: entry price is required for ${normalizedTradingPair}`);
+    }
+    roundedEntryPrice = roundPrice(order.entryPrice, pricePrecision);
+  } else {
+    if (!quotePrice || quotePrice <= 0) {
+      throw new Error(`Cannot calculate position size: entry price is required for ${normalizedTradingPair}`);
+    }
+    roundedEntryPrice = roundPrice(quotePrice, pricePrecision);
+
+    const { activeTPs, skippedTPs } = filterTakeProfitsAtMarketQuote(
+      order.signalType,
+      roundedTPPrices ?? [],
+      roundedEntryPrice,
+      maxSkippablePastTPs ?? 0
+    );
+    if (skippedTPs.length > 0) {
+      logger.info('Skipped TPs already past quote price for market entry', {
+        channel,
+        tradingPair: order.tradingPair,
+        quotePrice: roundedEntryPrice,
+        skippedTPs,
+        activeTPs,
+        maxSkippablePastTPs: maxSkippablePastTPs ?? 0,
+      });
+    }
+    roundedTPPrices = activeTPs;
+  }
+
   // Validate trade prices before proceeding (safety net - parsers should have validated already)
-  // This is especially important for market orders where entry price is fetched from price provider
   if (!validateTradePrices(
     order.signalType,
     roundedEntryPrice,
@@ -170,6 +217,21 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     { channel, symbol: normalizedTradingPair, messageId: message.message_id }
   )) {
     throw new Error(`Trade validation failed for ${normalizedTradingPair}: Invalid price relationships detected`);
+  }
+
+  if (roundedStopLoss && roundedTPPrices && roundedTPPrices.length > 0) {
+    assertMinRiskReward({
+      minRiskReward,
+      signalType: order.signalType,
+      entryPrice: roundedEntryPrice,
+      stopLoss: roundedStopLoss,
+      takeProfits: roundedTPPrices,
+      context: {
+        channel,
+        symbol: normalizedTradingPair,
+        messageId: message.message_id,
+      },
+    });
   }
 
   // In evaluation mode, set quantity to 0 initially
@@ -185,7 +247,8 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     channel,
     tradingPair: order.tradingPair,
     entryPrice: roundedEntryPrice,
-    originalEntryPrice: entryPrice,
+    entryOrderType: entryMode.entryOrderType,
+    useMarketRange: entryMode.useMarketRange,
     stopLoss: roundedStopLoss,
     leverage: effectiveLeverage,
     baseLeverage,
@@ -213,6 +276,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     trading_pair: tradingPairForPriceProvider, // Use normalized format with slash
     leverage: effectiveLeverage,
     entry_price: roundedEntryPrice,
+    entry_order_type: entryMode.entryOrderType,
     stop_loss: roundedStopLoss || order.stopLoss,
     take_profits: JSON.stringify(roundedTPPrices || order.takeProfits),
     risk_percentage: riskPercentage,

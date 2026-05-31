@@ -15,6 +15,8 @@ import {
   selectCanonicalEntryOrder,
   selectCanonicalStopLossOrder,
 } from './mockExchangeOrderHelpers.js';
+import { clampMarketRangeFillPrice } from './evalEntryResolution.js';
+import { getRangeBoundaryTpPrice } from '../utils/ctraderMarketRange.js';
 import dayjs from 'dayjs';
 
 interface PriceDataPoint {
@@ -39,6 +41,11 @@ interface MockExchangeState {
   totalPnL: number; // Accumulated PNL from filled TPs
 }
 
+export interface MockExchangeEntryOptions {
+  useMarketRangeForEntry?: boolean;
+  maxSkippablePastTPs?: number;
+}
+
 export interface MockExchange {
   initialize: (maxDurationDays?: number) => Promise<void>;
   process: () => Promise<boolean>;
@@ -52,7 +59,8 @@ export function createMockExchange(
   db: DatabaseManager,
   priceProvider: HistoricalPriceProvider,
   breakevenAfterTPs: number = 1, // Ignored when dynamicBreakevenAfterTPs is true
-  dynamicBreakevenAfterTPs: boolean = false
+  dynamicBreakevenAfterTPs: boolean = false,
+  entryOptions?: MockExchangeEntryOptions
 ): MockExchange {
   const takeProfits = JSON.parse(trade.take_profits) as number[];
   const isLong = trade.entry_price > trade.stop_loss;
@@ -853,6 +861,21 @@ export function createMockExchange(
     let bestEntryTime: dayjs.Dayjs | null = null;
     let bestEntryIndex: number | null = null;
     const tolerance = state.trade.entry_price * 0.001;
+    const isMarketEntry = state.trade.entry_order_type === 'market';
+    const tradeStartMs = dayjs(state.trade.created_at).valueOf();
+    const marketRangeBoundaryTp = entryOptions?.useMarketRangeForEntry
+      ? getRangeBoundaryTpPrice(state.takeProfits, entryOptions.maxSkippablePastTPs)
+      : undefined;
+    const resolveMarketFillPrice = (barPrice: number): number => {
+      if (marketRangeBoundaryTp == null) {
+        return barPrice;
+      }
+      return clampMarketRangeFillPrice(
+        state.isLong ? 'long' : 'short',
+        barPrice,
+        marketRangeBoundaryTp
+      );
+    };
 
     // Process each price point chronologically
     for (let i = 0; i < state.priceHistory.length; i++) {
@@ -862,57 +885,73 @@ export function createMockExchange(
 
       // Check if entry should fill
       if (!state.entryFilled) {
-        entryCheckCount++;
-        const priceDiff = Math.abs(price - state.trade.entry_price);
-        
-        // Track closest price to entry (for debugging)
-        if (priceDiff < closestPriceDiff) {
-          closestPriceDiff = priceDiff;
-          closestPriceToEntry = price;
-        }
-        
-        // Check if price is within tolerance for entry fill
-        if (shouldFillEntry(pricePoint)) {
-          // Track best price within tolerance window
-          // For LONG: best = lowest price (best buy) - use low if available
-          // For SHORT: best = highest price (best sell) - use high if available
-          const entryCheckPrice = state.isLong 
-            ? (pricePoint.low ?? pricePoint.price)
-            : (pricePoint.high ?? pricePoint.price);
+        if (isMarketEntry) {
+          if (pricePoint.timestamp >= tradeStartMs) {
+            const fillPrice = resolveMarketFillPrice(price);
+            logger.info('Mock exchange: Market entry filled on first bar at/after signal', {
+              tradeId: state.trade.id,
+              tradingPair: state.trade.trading_pair,
+              quotePrice: state.trade.entry_price,
+              fillPrice,
+              useMarketRange: marketRangeBoundaryTp != null,
+              boundaryTp: marketRangeBoundaryTp,
+              priceTime: priceTime.toISOString(),
+            });
+            await fillEntry(fillPrice, priceTime);
+          }
+        } else {
+          entryCheckCount++;
+          const priceDiff = Math.abs(price - state.trade.entry_price);
           
-          if (bestEntryPrice === null) {
-            bestEntryPrice = entryCheckPrice;
-            bestEntryTime = priceTime;
-            bestEntryIndex = i;
-          } else {
-            const isBetter = state.isLong 
-              ? entryCheckPrice < bestEntryPrice  // LONG: lower is better
-              : entryCheckPrice > bestEntryPrice; // SHORT: higher is better
+          // Track closest price to entry (for debugging)
+          if (priceDiff < closestPriceDiff) {
+            closestPriceDiff = priceDiff;
+            closestPriceToEntry = price;
+          }
+          
+          // Check if price is within tolerance for entry fill
+          if (shouldFillEntry(pricePoint)) {
+            // Track best price within tolerance window
+            // For LONG: best = lowest price (best buy) - use low if available
+            // For SHORT: best = highest price (best sell) - use high if available
+            const entryCheckPrice = state.isLong 
+              ? (pricePoint.low ?? pricePoint.price)
+              : (pricePoint.high ?? pricePoint.price);
             
-            if (isBetter) {
+            if (bestEntryPrice === null) {
               bestEntryPrice = entryCheckPrice;
               bestEntryTime = priceTime;
               bestEntryIndex = i;
+            } else {
+              const isBetter = state.isLong 
+                ? entryCheckPrice < bestEntryPrice  // LONG: lower is better
+                : entryCheckPrice > bestEntryPrice; // SHORT: higher is better
+              
+              if (isBetter) {
+                bestEntryPrice = entryCheckPrice;
+                bestEntryTime = priceTime;
+                bestEntryIndex = i;
+              }
             }
+          } else if (bestEntryPrice !== null && bestEntryTime !== null && bestEntryIndex !== null) {
+            // Price moved outside tolerance window - fill at best price we found
+            // Fill at the best price we encountered while within tolerance
+            logger.info('Entry fill condition met (best price within tolerance)', {
+              tradeId: state.trade.id,
+              tradingPair: state.trade.trading_pair,
+              entryPrice: state.trade.entry_price,
+              fillPrice: bestEntryPrice,
+              priceDiff: Math.abs(bestEntryPrice - state.trade.entry_price),
+              tolerance,
+              isLong,
+              priceTime: bestEntryTime.toISOString()
+            });
+            await fillEntry(bestEntryPrice, bestEntryTime);
+            // Reset tracking variables
+            bestEntryPrice = null;
+            bestEntryTime = null;
+            bestEntryIndex = null;
           }
-        } else if (bestEntryPrice !== null && bestEntryTime !== null && bestEntryIndex !== null) {
-          // Price moved outside tolerance window - fill at best price we found
-          // Fill at the best price we encountered while within tolerance
-          logger.info('Entry fill condition met (best price within tolerance)', {
-            tradeId: state.trade.id,
-            tradingPair: state.trade.trading_pair,
-            entryPrice: state.trade.entry_price,
-            fillPrice: bestEntryPrice,
-            priceDiff: Math.abs(bestEntryPrice - state.trade.entry_price),
-            tolerance,
-            isLong,
-            priceTime: bestEntryTime.toISOString()
-          });
-          await fillEntry(bestEntryPrice, bestEntryTime);
-          // Reset tracking variables
-          bestEntryPrice = null;
-          bestEntryTime = null;
-          bestEntryIndex = null;
         }
       }
 

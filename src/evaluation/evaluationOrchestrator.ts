@@ -257,7 +257,11 @@ export async function runEvaluation(
       db,
       priceProvider,
       monitorConfig.breakevenAfterTPs ?? 1,
-      monitorConfig.dynamicBreakevenAfterTPs ?? false
+      monitorConfig.dynamicBreakevenAfterTPs ?? false,
+      {
+        useMarketRangeForEntry: config.useMarketRangeForEntry,
+        maxSkippablePastTPs: config.maxSkippablePastTPs,
+      }
     )
   }));
 
