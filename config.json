@@ -405,7 +405,7 @@
       "initiator": "ctrader",
       "monitor": "ctrader",
       "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": true,
+      "useLimitOrderForEntry": false,
       "riskPercentage": 1,
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
@@ -415,6 +415,7 @@
         "tp": 0.02
       },
       "maxSkippablePastTPs": 0,
+      "useMarketRangeForEntry": true,
       "allowConcurrentSymbolTrades": true,
       "accountFilters": [
         {

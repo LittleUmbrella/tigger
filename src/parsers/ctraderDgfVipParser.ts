@@ -3,78 +3,8 @@ import { validateParsedOrder } from '../utils/tradeValidation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
-import { calculateEntryPrice } from '../utils/entryPriceStrategy.js';
 import { logger } from '../utils/logger.js';
 import { meanNumericGap, parseTpTokens, resolveTpTokensWithOpen } from './tpOpenResolve.js';
-
-type DgfVipLimitEntry = {
-  entryPrice: number;
-  entryTargets?: [number, number];
-};
-
-const parsePositivePrice = (raw: string | undefined): number | undefined => {
-  if (raw === undefined) return undefined;
-  const n = parseFloat(raw);
-  return !isNaN(n) && n > 0 ? n : undefined;
-};
-
-const limitEntryFromRange = (
-  a: number,
-  b: number,
-  signalType: 'long' | 'short',
-  options?: ParserOptions,
-): DgfVipLimitEntry => {
-  const strategy = options?.entryPriceStrategy || 'worst';
-  return {
-    entryPrice: calculateEntryPrice(a, b, signalType, strategy),
-    entryTargets: [Math.min(a, b), Math.max(a, b)],
-  };
-};
-
-/** Explicit entry price or range on the signal header → limit order (not market / MARKET_RANGE). */
-const resolveDgfVipLimitEntryFromLine = (
-  line: string,
-  signalType: 'long' | 'short',
-  options?: ParserOptions,
-): DgfVipLimitEntry | undefined => {
-  const slash = line.match(/([\d.]+)\s*\/\s*([\d.]+)/);
-  if (slash) {
-    const a = parsePositivePrice(slash[1]);
-    const b = parsePositivePrice(slash[2]);
-    if (a != null && b != null) return limitEntryFromRange(a, b, signalType, options);
-  }
-
-  const plus = line.match(/([\d.]+)\s*\+\s*([\d.]+)/);
-  if (plus) {
-    const a = parsePositivePrice(plus[1]);
-    const b = parsePositivePrice(plus[2]);
-    if (a != null && b != null) return limitEntryFromRange(a, b, signalType, options);
-  }
-
-  const tilde = line.match(/([\d.]+)\s*~\s*([\d.]+)/);
-  if (tilde) {
-    const a = parsePositivePrice(tilde[1]);
-    const b = parsePositivePrice(tilde[2]);
-    if (a != null && b != null) return limitEntryFromRange(a, b, signalType, options);
-  }
-
-  const dashRange = line.match(/([\d.]+)\s*-\s*([\d.]+)/);
-  if (dashRange) {
-    const a = parsePositivePrice(dashRange[1]);
-    const b = parsePositivePrice(dashRange[2]);
-    if (a != null && b != null) return limitEntryFromRange(a, b, signalType, options);
-  }
-
-  const atEntry = line.match(/@\s*([\d.]+)/);
-  const atPrice = parsePositivePrice(atEntry?.[1]);
-  if (atPrice != null) return { entryPrice: atPrice };
-
-  const nowSingle = line.match(/\bnow\s+([\d.]+)/i);
-  const nowPrice = parsePositivePrice(nowSingle?.[1]);
-  if (nowPrice != null) return { entryPrice: nowPrice };
-
-  return undefined;
-};
 
 /** Parse SL from text starting at SL label through end of line (avoids conflating entry `@` with SL `@`). */
 const parseStopLossFromSlClause = (slClause: string): number | undefined => {
@@ -131,8 +61,7 @@ const stripToFirstDgfSymbol = (s: string): string => {
 /**
  * Parser for DGF-style cTrader signals (channel dgfvip): same formats as ctrader_dgf — gold/XAU and
  * forex pairs written as Buy/Sell NOW [#]SYMBOL @ entry (# optional). "gold" / XAU family maps to XAUUSD;
- * other symbols (e.g. EURNZD) are left unchanged. Explicit entry prices or ranges → limit at zone
- * (calculateEntryPrice worst by default); messages with no entry price remain market.
+ * other symbols (e.g. EURNZD) are left unchanged. Most formats omit entryPrice (market); Formats 8–9 set entryPrice (limit).
  *
  * Format 6 (symbol before side; optional emoji prefix; slash entry range): see ctraderDgfParser.
  */
@@ -290,7 +219,6 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
 
     let tradingPair: string;
     let signalType: 'long' | 'short';
-    let entryLimit: DgfVipLimitEntry | undefined;
 
     const validatePositivePrice = (raw: string): boolean => {
       const n = parseFloat(raw);
@@ -301,23 +229,16 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
       signalType = hashNowPair[1].toLowerCase() === 'buy' ? 'long' : 'short';
       tradingPair = normalizeAssetAliasToCTraderPair(hashNowPair[2]);
       if (!validatePositivePrice(hashNowPair[3])) return null;
-      const entryPrice = parsePositivePrice(hashNowPair[3]);
-      if (entryPrice != null) entryLimit = { entryPrice };
     } else if (sideFirst) {
       signalType = sideFirst[1].toLowerCase() === 'buy' ? 'long' : 'short';
       tradingPair = normalizeAssetAliasToCTraderPair(sideFirst[2]);
       if (!validatePositivePrice(sideFirst[3])) return null;
-      const entryPrice = parsePositivePrice(sideFirst[3]);
-      if (entryPrice != null) entryLimit = { entryPrice };
     } else if (symbolSideEntry) {
       signalType = symbolSideEntry[2].toLowerCase() === 'buy' ? 'long' : 'short';
       tradingPair = normalizeAssetAliasToCTraderPair(symbolSideEntry[1]);
       if (!validatePositivePrice(symbolSideEntry[3])) return null;
-      const firstEntry = parsePositivePrice(symbolSideEntry[3]);
-      const secondEntry = parsePositivePrice(symbolSideEntry[4] ?? symbolSideEntry[5]);
-      if (secondEntry != null && firstEntry != null) {
-        entryLimit = limitEntryFromRange(firstEntry, secondEntry, signalType, options);
-      }
+      const secondEntry = symbolSideEntry[4] ?? symbolSideEntry[5];
+      if (secondEntry !== undefined && !validatePositivePrice(secondEntry)) return null;
     } else {
       const tradingPairMatch = contentFromAsset.match(
         new RegExp(`^(${DGF_PAIR_TOKEN})\\s+`, 'i'),
@@ -348,8 +269,6 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
           }
         }
       }
-
-      entryLimit = resolveDgfVipLimitEntryFromLine(firstLineForDgf, signalType, options);
     }
 
     const stopLoss = resolveStopLossFromDgfContent(normalizedContent);
@@ -393,9 +312,8 @@ export const ctraderDgfVipParser = (content: string, options?: ParserOptions): P
 
     const parsedOrder: ParsedOrder = {
       tradingPair,
-      entryPrice: entryLimit?.entryPrice,
-      entryTargets: entryLimit?.entryTargets,
-      marketExecution: entryLimit == null,
+      entryPrice: undefined,
+      marketExecution: true,
       stopLoss,
       takeProfits: deduplicatedTPs,
       leverage,
