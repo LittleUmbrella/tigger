@@ -416,7 +416,7 @@
       },
       "maxSkippablePastTPs": 0,
       "allowConcurrentSymbolTrades": true,
-      "minRiskReward": 2,
+      "minRiskReward": 1.5,
       "accountFilters": [
         {
           "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
