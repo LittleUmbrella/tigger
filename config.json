@@ -350,6 +350,7 @@
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true,
+      "minRiskReward": 1.5,
       "accountFilters": [
         {
           "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
