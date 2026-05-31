@@ -170,7 +170,27 @@ async function harvestTelegramMessages(
     // For historical messages, we start from lastMessageId and go backward
     // Convert lastMessageId to number for Telegram API (Telegram uses numeric IDs)
     const lastMessageIdNum = typeof lastMessageId === 'number' ? lastMessageId : parseInt(String(lastMessageId), 10) || 0;
-    let offsetId = harvestNewerMessages ? 0 : lastMessageIdNum;
+    const minMessageIdNum =
+      existingMessages.length > 0
+        ? Math.min(
+            ...existingMessages.map((m) => {
+              const numId = typeof m.message_id === 'string' ? parseInt(m.message_id, 10) : m.message_id;
+              return isNaN(numId) ? Number.MAX_SAFE_INTEGER : numId;
+            })
+          )
+        : 0;
+
+    // offsetId: messages older than this ID. For backward history, start from oldest known
+    // (not newest) so we don't re-walk duplicates and stop before reaching earlier messages.
+    let offsetId = harvestNewerMessages ? 0 : existingMessages.length > 0 ? minMessageIdNum : 0;
+    if (!harvestNewerMessages && existingMessages.length > 0) {
+      logger.info('Historical harvest: paginating backward from oldest known message ID', {
+        channel: options.channel,
+        minMessageId: minMessageIdNum,
+        maxMessageId: lastMessageIdNum,
+      });
+    }
+
     let lastProcessedId = lastMessageIdNum;
     let batchCount = 0;
     let consecutiveDuplicateBatches = 0;
@@ -178,7 +198,7 @@ async function harvestTelegramMessages(
     let shouldStop = false; // Flag to stop harvesting when we hit duplicates
 
     while (true) {
-      if (shouldStop) {
+      if (shouldStop && harvestNewerMessages) {
         logger.info('Stopping harvest: reached already-processed messages', {
           channel: options.channel
         });
@@ -358,17 +378,19 @@ async function harvestTelegramMessages(
             result.lastMessageId = Math.max(currentLastId, msgId);
           } catch (error) {
             if (isDuplicateKeyError(error)) {
-              // Duplicate message - we've reached messages we've already processed
-              // In evaluation mode, this means we can stop harvesting (we've caught up)
-              logger.info('Reached already-processed messages, stopping harvest', {
-                channel: options.channel,
-                messageId: msgId,
-                lastProcessedId
-              });
-              // Set flag to stop harvesting after processing current batch
-              shouldStop = true;
-              // Break out of the message loop
-              break;
+              batchSkipped++;
+              if (harvestNewerMessages) {
+                // Forward harvest: duplicates mean we've caught up to the DB watermark
+                logger.info('Reached already-processed messages, stopping harvest', {
+                  channel: options.channel,
+                  messageId: msgId,
+                  lastProcessedId
+                });
+                shouldStop = true;
+                break;
+              }
+              // Backward history: skip known rows and keep paginating to older IDs
+              continue;
             } else {
               logger.warn('Failed to insert message', {
                 channel: options.channel,

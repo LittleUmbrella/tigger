@@ -43,6 +43,8 @@ export interface ChannelEvalWizardOptions {
   /** Skip loading channel defaults from config.json */
   noChannelConfig?: boolean;
   entryTimeoutMinutes?: string;
+  /** Auto-confirm harvest and other y/n prompts (non-interactive) */
+  yes?: boolean;
 }
 
 async function question(
@@ -159,9 +161,17 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
     await db.initialize();
 
     const skipHarvest = Boolean(cli.skipHarvest);
+    const nonInteractive = Boolean(cli.yes || cli.channel?.trim());
     if (!skipHarvest) {
-      const go = (await question(rl, `Harvest ${channel} from ${startHarvestDate} to ${endHarvestDate}? (y/n)`, 'y'))
-        .toLowerCase();
+      let go = 'y';
+      if (!nonInteractive) {
+        go = (await question(rl, `Harvest ${channel} from ${startHarvestDate} to ${endHarvestDate}? (y/n)`, 'y'))
+          .toLowerCase();
+      } else {
+        console.log(
+          `\nHarvest ${channel} from ${startHarvestDate} to ${endHarvestDate} (auto-confirmed — channel set via CLI)\n`
+        );
+      }
       if (go !== 'y' && go !== 'yes') {
         console.log('Skipped harvest. Ensure messages for this window are already in the database.');
       } else {

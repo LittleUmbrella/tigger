@@ -385,6 +385,7 @@ program
   .option('--months <n>', 'Months back from today for harvest/eval window (1–5)', '3')
   .option('--platform <platform>', 'telegram | discord | discord-selfbot', 'telegram')
   .option('--skip-harvest', 'Use messages already in the evaluation DB')
+  .option('-y, --yes', 'Non-interactive: auto-confirm harvest when channel is set via CLI')
   .option('--skip-samples', 'Do not prompt for sample message IDs or print reference text')
   .option('--sample-ids <ids>', 'Comma-separated message IDs to print as parser reference')
   .option('-p, --parser <name>', 'Parser registry name (default: from config.json channel row)')
@@ -408,6 +409,7 @@ program
         platform: options.platform,
         skipHarvest: options.skipHarvest,
         skipSamples: options.skipSamples,
+        yes: options.yes,
         sampleIds: options.sampleIds,
         parserName: options.parser,
         propFirms: options.propFirms,
