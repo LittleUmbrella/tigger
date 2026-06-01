@@ -242,10 +242,10 @@
       "minRiskReward": 2
     },
     {
-      "name": "ctrader_demo_2",
+      "name": "ctrader_live_5",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader demo account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials. Per-account propFirms overrides channel-level config so this $5k account can share channels with the $100k account.",
+      "_comment": "cTrader funded account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials. Per-account propFirms overrides channel-level config so this $5k account can share channels with the $100k account.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -259,7 +259,7 @@
       "name": "ctrader_demo_2_100",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_demo_2; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
+      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_live_5; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -273,7 +273,7 @@
       "name": "ctrader_demo_2_25",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_demo_2; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
+      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_live_5; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -296,7 +296,7 @@
       "name": "ctrader",
       "riskPercentage": 1,
       "baseLeverage": 20,
-      "accounts": ["ctrader_demo_2"]
+      "accounts": ["ctrader_live_5"]
     }
   ],
   "monitors": [
@@ -354,7 +354,7 @@
       "minRiskReward": 0.1,
       "accountFilters": [
         {
-          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
+          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
           "rules": {}
         }
       ]
@@ -422,7 +422,7 @@
       "minRiskReward": 0.1,
       "accountFilters": [
         {
-          "accounts": ["ctrader_demo_2", "ctrader_demo_2_100", "ctrader_demo_2_25"],
+          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
           "rules": {}
         }
       ]
