@@ -35,7 +35,7 @@ export const completedTrade = (t: Trade): boolean =>
   t.entry_filled_at != null && t.entry_filled_at !== '';
 
 export const collectChannelTrades = async (
-  db: { getTradesByStatus: (s: string) => Promise<Trade[]> },
+  db: { getTradesByStatus: (status: Trade['status']) => Promise<Trade[]> },
   channel: string
 ): Promise<Trade[]> => {
   const statuses = ['pending', 'active', 'closed', 'stopped', 'cancelled'] as const;

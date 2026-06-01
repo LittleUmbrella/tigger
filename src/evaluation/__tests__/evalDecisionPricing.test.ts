@@ -66,6 +66,6 @@ describe('getEvalDecisionQuotePrice', () => {
       )
     ).resolves.toBe(5044.29);
 
-    expect(priceAtTime?.valueOf()).toBe(getEvalDecisionTime(signalTime).valueOf());
+    expect(priceAtTime).toEqual(getEvalDecisionTime(signalTime));
   });
 });
