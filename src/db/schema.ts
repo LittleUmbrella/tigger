@@ -1915,10 +1915,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
       
       if (channel) {
-        query = 'SELECT * FROM messages WHERE parsed = FALSE AND channel = $1 AND date >= $2 ORDER BY id ASC';
+        query = 'SELECT * FROM messages WHERE parsed = FALSE AND channel = $1 AND date::timestamptz >= $2::timestamptz ORDER BY id ASC';
         params = [channel, cutoffTime];
       } else {
-        query = 'SELECT * FROM messages WHERE parsed = FALSE AND date >= $1 ORDER BY id ASC';
+        query = 'SELECT * FROM messages WHERE parsed = FALSE AND date::timestamptz >= $1::timestamptz ORDER BY id ASC';
         params = [cutoffTime];
       }
     } else {
@@ -1957,7 +1957,7 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       `
         SELECT m.* FROM messages m
         WHERE m.channel = $1
-          AND ($2::timestamptz IS NULL OR m.date >= $2::timestamptz)
+          AND ($2::timestamptz IS NULL OR m.date::timestamptz >= $2::timestamptz)
           AND NOT EXISTS (
             SELECT 1 FROM trade_initiation_locks l
             WHERE l.message_id = m.message_id AND l.channel = m.channel AND l.scope = $3
@@ -2000,10 +2000,10 @@ class PostgreSQLAdapter implements DatabaseAdapter {
       const cutoffTime = new Date(Date.now() - maxStalenessMinutes * 60 * 1000).toISOString();
       
       if (channel) {
-        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = $1 AND date >= $2 ORDER BY id ASC';
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND channel = $1 AND date::timestamptz >= $2::timestamptz ORDER BY id ASC';
         params = [channel, cutoffTime];
       } else {
-        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND date >= $1 ORDER BY id ASC';
+        query = 'SELECT * FROM messages WHERE old_content IS NOT NULL AND date::timestamptz >= $1::timestamptz ORDER BY id ASC';
         params = [cutoffTime];
       }
     } else {
