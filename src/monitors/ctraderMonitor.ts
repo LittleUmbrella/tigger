@@ -36,6 +36,7 @@ import {
   classifyCtraderCloseFromExitAndPnl,
   collectSignalTakeProfitLevels,
 } from './ctraderCloseClassification.js';
+import { allocateCtraderPositionPnlAmongSiblings } from './ctraderPnlAllocation.js';
 import {
   attemptCtraderBreakevenAmend,
   buildCtraderOpenPositionsSnapshot,
@@ -1167,6 +1168,29 @@ const applyCtraderReconciledClose = async (
   const accountSiblings = (await db.getTradesByMessageId(trade.message_id, trade.channel)).filter(
     (t) => t.exchange === 'ctrader' && t.account_name === trade.account_name
   );
+  const allocatedPnl = allocateCtraderPositionPnlAmongSiblings(trade, accountSiblings, pnl);
+  if (
+    pnl != null &&
+    allocatedPnl != null &&
+    allocatedPnl !== pnl &&
+    trade.position_id
+  ) {
+    const sharedLegCount = accountSiblings.filter(
+      (s) => s.position_id != null && String(s.position_id) === String(trade.position_id)
+    ).length;
+    logger.info('cTrader PnL split among legs sharing position_id', {
+      tradeId: trade.id,
+      messageId: trade.message_id,
+      channel: trade.channel,
+      accountName: trade.account_name,
+      positionId: trade.position_id,
+      positionPnl: pnl,
+      allocatedPnl,
+      sharedLegCount,
+      legQuantity: trade.quantity,
+      exchange: 'ctrader',
+    });
+  }
   const signalTpLevels = collectSignalTakeProfitLevels(accountSiblings);
   const reason = await resolveCtraderReconciledCloseReason(
     trade,
@@ -1179,9 +1203,9 @@ const applyCtraderReconciledClose = async (
     await applyBreakevenToActiveSiblingsBeforeTpClose(trade, db, ctraderClient, beContext);
   }
   if (reason === 'stop_loss') {
-    await updateTradeOnStopLossHit(trade, db, exitPrice, pnl);
+    await updateTradeOnStopLossHit(trade, db, exitPrice, allocatedPnl);
   } else {
-    await updateTradeOnPositionClosed(trade, db, exitPrice, pnl);
+    await updateTradeOnPositionClosed(trade, db, exitPrice, allocatedPnl);
   }
 };
 
