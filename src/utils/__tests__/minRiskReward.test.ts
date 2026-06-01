@@ -34,13 +34,13 @@ describe('resolveMinRiskReward', () => {
     minRiskReward,
   });
 
-  it('uses account override when set', () => {
-    expect(resolveMinRiskReward(2, account(3))).toBe(3);
-    expect(resolveMinRiskReward(2, account(1))).toBe(1);
+  it('uses channel when set', () => {
+    expect(resolveMinRiskReward(0.1, account(3))).toBe(0.1);
+    expect(resolveMinRiskReward(2, account(1))).toBe(2);
   });
 
-  it('falls back to channel when account unset', () => {
-    expect(resolveMinRiskReward(2, account())).toBe(2);
+  it('falls back to account when channel unset', () => {
+    expect(resolveMinRiskReward(undefined, account(2))).toBe(2);
     expect(resolveMinRiskReward(undefined, account())).toBeUndefined();
   });
 });

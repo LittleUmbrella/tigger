@@ -112,7 +112,7 @@ export interface AccountConfig {
   allowConcurrentSymbolTrades?: boolean;
   /**
    * Minimum reward-to-risk ratio (reward / risk). E.g. 2 requires at least 2:1.
-   * Overrides channel-level `minRiskReward` for this account when set.
+   * Used when channel `minRiskReward` is unset; channel overrides when set.
    */
   minRiskReward?: number;
 }
@@ -250,7 +250,7 @@ export interface ChannelSetConfig {
   allowConcurrentSymbolTrades?: boolean;
   /**
    * Minimum reward-to-risk ratio (reward / risk). E.g. 2 requires at least 2:1.
-   * Account-level `minRiskReward` overrides this when set.
+   * Overrides account-level `minRiskReward` when set.
    */
   minRiskReward?: number;
 }

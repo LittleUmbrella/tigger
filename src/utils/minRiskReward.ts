@@ -45,16 +45,19 @@ export const calculateRiskRewardRatio = (
 };
 
 /**
- * Account-level minRiskReward overrides channel-level (same precedence as propFirms).
+ * Channel-level minRiskReward overrides account-level when set; account is fallback only.
  */
 export const resolveMinRiskReward = (
   channelMin: number | undefined,
   account: AccountConfig | null | undefined
 ): number | undefined => {
+  if (channelMin !== undefined) {
+    return channelMin;
+  }
   if (account?.minRiskReward !== undefined) {
     return account.minRiskReward;
   }
-  return channelMin;
+  return undefined;
 };
 
 export const assertMinRiskReward = (opts: {
