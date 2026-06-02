@@ -46,6 +46,14 @@
       }
     },
     {
+      "name": "gold_scalps_harvester_ic",
+      "channel": "1422142227580194846",
+      "platform": "discord-selfbot",
+      "envVarNames": {
+        "userToken": "DISCORD_USER_TOKEN"
+      }
+    },
+    {
       "_comment": "`main_harvester` already harvests Telegram 2427485240; discord CMP/DCA channel uses dedicated self-bot harvester (same DISCORD_USER_TOKEN pattern as gold_scalps)",
       "name": "cmp_dca_signal_harvester",
       "channel": "1486846570531000412",
@@ -176,6 +184,10 @@
     {
       "name": "gold_scalps",
       "channel": "1441399338805891174"
+    },
+    {
+      "name": "gold_scalps_ic",
+      "channel": "1422142227580194846"
     },
     {
       "name": "cmp_dca_signal",
@@ -473,6 +485,26 @@
     },
     {
       "channel": "1441399338805891174",
+      "harvester": "gold_scalps_harvester",
+      "parser": "gold_scalps",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "useLimitOrderForBreakeven": false,
+      "riskPercentage": 0.80,
+      "entryTimeoutMinutes": 10,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
+      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
+      "tradeObfuscation": {
+        "tp": 0.02
+      },
+      "slAdjustmentTolerancePercent": 0.03,
+      "maxSkippablePastTPs": 0,
+      "useMarketRangeForEntry": true
+    },
+    {
+      "channel": "1422142227580194846",
       "harvester": "gold_scalps_harvester",
       "parser": "gold_scalps",
       "initiator": "ctrader",
