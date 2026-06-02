@@ -228,7 +228,7 @@
         "apiKey": "BYBIT_DEMO_API_KEY",
         "apiSecret": "BYBIT_DEMO_API_SECRET"
       },
-      "minRiskReward": 2
+      "minRiskReward": 1.11
     },
     {
       "name": "hyrotrader_challenge1",
@@ -239,7 +239,7 @@
         "apiKey": "BYBIT_DEMO_API_KEY_HYROTRADER_CHALLENGE1",
         "apiSecret": "BYBIT_DEMO_API_SECRET_HYROTRADER_CHALLENGE1"
       },
-      "minRiskReward": 2
+      "minRiskReward": 1.11
     },
     {
       "name": "ctrader_live_5",
@@ -252,7 +252,7 @@
         "accessToken": "CTRADER_ACCESS_TOKEN",
         "accountId": "CTRADER_ACCOUNT_ID"
       },
-      "minRiskReward": 2,
+      "minRiskReward": 1.11,
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}]
     },
     {
@@ -266,7 +266,7 @@
         "accessToken": "CTRADER_ACCESS_TOKEN",
         "accountId": "CTRADER_ACCOUNT_ID_2_100"
       },
-      "minRiskReward": 2,
+      "minRiskReward": 1.11,
       "propFirms": [{"name": "the5ers", "initialBalance": 100000}]
     },
     {
@@ -280,7 +280,7 @@
         "accessToken": "CTRADER_ACCESS_TOKEN",
         "accountId": "CTRADER_ACCOUNT_ID_2_25"
       },
-      "minRiskReward": 2,
+      "minRiskReward": 1.11,
       "propFirms": [{"name": "the5ers", "initialBalance": 25000}]
     }
   ],
