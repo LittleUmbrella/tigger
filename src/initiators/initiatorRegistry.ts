@@ -3,6 +3,7 @@ import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
+import type { CTraderClient } from '../clients/ctraderClient.js';
 
 import { CustomPropFirmConfig } from '../types/config.js';
 
@@ -49,6 +50,8 @@ export interface InitiatorContext {
    * `resolveAllowConcurrentSymbolTrades`; default false.
    */
   allowConcurrentSymbolTrades?: boolean;
+  /** Reuse orchestrator-pooled cTrader clients (avoids connect/auth per trade). */
+  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>;
 }
 
 /**

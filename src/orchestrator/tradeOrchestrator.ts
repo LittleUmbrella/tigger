@@ -44,6 +44,7 @@ import {
   buildChannelInitiatorScopeMap,
   isMultiInitiatorTelegramChannel,
 } from '../utils/multiInitiatorChannel.js';
+import { createChannelWake } from '../utils/channelWake.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -86,9 +87,8 @@ export const startTradeOrchestrator = async (
   });
   await db.initialize();
 
-  if (!isSimulation && config.accounts?.length) {
-    await verifyAllCtraderAccountsAtStartup(config.accounts);
-  }
+  const parserIntervalMs = config.orchestrator?.parserIntervalMs ?? 1000;
+  const initiatorIntervalMs = config.orchestrator?.initiatorIntervalMs ?? 1000;
 
   const state: OrchestratorState = {
     stopHarvesters: [],
@@ -289,6 +289,130 @@ export const startTradeOrchestrator = async (
   const channelInitiatorScopes = buildChannelInitiatorScopeMap(config.channels);
   const startedHarvesterNames = new Set<string>();
   const parserChannelsProcessed = new Set<string>();
+  /** Assigned after live pipeline helpers are defined; harvesters close over this binding. */
+  let wakeChannelLive: (channel: string) => void = () => {};
+
+  if (!isSimulation && config.accounts?.length) {
+    await verifyAllCtraderAccountsAtStartup(config.accounts);
+    const ctraderAccounts = config.accounts.filter((a) => a.exchange === 'ctrader');
+    await Promise.all(
+      ctraderAccounts.map(async (account) => {
+        try {
+          await createCTraderClient(account.name);
+        } catch (error) {
+          logger.warn('cTrader client pre-warm failed', {
+            accountName: account.name,
+            error: serializeErrorForLog(error),
+          });
+        }
+      }),
+    );
+    if (ctraderAccounts.length > 0) {
+      logger.info('cTrader clients pre-warmed for shared pool', {
+        accountNames: ctraderAccounts.map((a) => a.name),
+      });
+    }
+  }
+
+  const runInitiatorForChannelConfig = async (channelConfig: ChannelSetConfig): Promise<void> => {
+    if (channelConfig.strategy) {
+      return;
+    }
+    const initiator = initiatorMap.get(channelConfig.initiator);
+    const monitor = monitorMap.get(channelConfig.monitor);
+    if (!initiator) {
+      logger.error('Initiator not found for channel', {
+        channel: channelConfig.channel,
+        initiatorName: channelConfig.initiator,
+      });
+      return;
+    }
+
+    const entryTimeoutMinutes =
+      channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880;
+    const channelParser = parserMap.get(channelConfig.parser!);
+    const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
+    const allInitiatorScopes = channelInitiatorScopes.get(channelConfig.channel) ?? [];
+    const multiInitiator = isMultiInitiatorTelegramChannel(
+      channelConfig.channel,
+      channelInitiatorScopes,
+    );
+
+    await processUnparsedMessages(
+      initiator,
+      channelConfig.channel,
+      entryTimeoutMinutes,
+      db,
+      isSimulation,
+      priceProvider,
+      channelConfig.parser!,
+      config.accounts,
+      undefined,
+      channelConfig.baseLeverage,
+      channelConfig.riskPercentage,
+      channelConfig.maxMessageStalenessMinutes,
+      channelConfig.accountFilters,
+      channelConfig.propFirms,
+      channelConfig.tradeObfuscation,
+      channelConfig.slAdjustmentTolerancePercent,
+      channelConfig.useLimitOrderForEntry,
+      channelConfig.maxSkippablePastTPs,
+      channelConfig.useMarketRangeForEntry,
+      channelConfig.maxRisk,
+      channelEntryPriceStrategy,
+      undefined,
+      channelConfig.allowConcurrentSymbolTrades,
+      channelConfig.minRiskReward,
+      multiInitiator,
+      allInitiatorScopes,
+      createCTraderClient,
+    );
+  };
+
+  const runLivePipelineForChannel = async (channelId: string): Promise<void> => {
+    const channelConfigs = config.channels.filter(
+      (c) => c.channel === channelId && !c.strategy,
+    );
+    if (channelConfigs.length === 0) {
+      return;
+    }
+
+    const parser = parserMap.get(channelConfigs[0].parser!);
+    if (parser) {
+      try {
+        await parseUnparsedMessages(parser, db, channelConfigs[0].maxMessageStalenessMinutes);
+      } catch (error) {
+        const recoverable = isTransientInfrastructureError(error);
+        const payload = {
+          channel: channelId,
+          parserName: parser.name,
+          error: serializeErrorForLog(error),
+          recoverable,
+        };
+        if (recoverable) {
+          logger.warn('Parser error on channel wake (recoverable)', payload);
+        } else {
+          logger.error('Parser error on channel wake', payload);
+        }
+      }
+    }
+
+    await Promise.all(
+      channelConfigs.map((channelConfig) =>
+        runInitiatorForChannelConfig(channelConfig).catch((error) => {
+          logger.error('Initiator error on channel wake', {
+            channel: channelConfig.channel,
+            initiatorName: channelConfig.initiator,
+            error: serializeErrorForLog(error),
+          });
+        }),
+      ),
+    );
+  };
+
+  if (!isSimulation) {
+    wakeChannelLive = createChannelWake(runLivePipelineForChannel);
+  }
 
   // Start all channel sets
   for (const channelConfig of config.channels) {
@@ -411,7 +535,9 @@ export const startTradeOrchestrator = async (
             } else if (platform === 'discord-selfbot') {
               stopHarvester = await startDiscordSelfBotHarvester(harvester!, db);
             } else {
-              stopHarvester = await startSignalHarvester(harvester!, db);
+              stopHarvester = await startSignalHarvester(harvester!, db, {
+                onNewMessages: ({ channel }) => wakeChannelLive(channel),
+              });
             }
           }
           state.stopHarvesters.push(stopHarvester);
@@ -1010,7 +1136,7 @@ export const startTradeOrchestrator = async (
           }
         }
       }
-    }, 5000); // Parse every 5 seconds
+    }, parserIntervalMs);
   }
 
   // In simulation mode, advance time for monitoring
@@ -1084,6 +1210,7 @@ export const startTradeOrchestrator = async (
           channelConfig.minRiskReward,
           multiInitiator,
           allInitiatorScopes,
+          createCTraderClient,
         );
       }
     };
@@ -1108,67 +1235,20 @@ export const startTradeOrchestrator = async (
     // Live mode: Start initiator loop (runs periodically to initiate trades from parsed messages)
     state.initiatorInterval = setInterval(() => {
       if (!state.running) return;
-      
+
       for (const channelConfig of config.channels) {
         if (channelConfig.strategy) {
           continue;
         }
-        const initiator = initiatorMap.get(channelConfig.initiator);
-        const monitor = monitorMap.get(channelConfig.monitor);
-        
-        if (!initiator) {
-          logger.error('Initiator not found for channel', {
-            channel: channelConfig.channel,
-            initiatorName: channelConfig.initiator
-          });
-          continue;
-        }
-        
-        const entryTimeoutMinutes = channelConfig.entryTimeoutMinutes ?? monitor?.entryTimeoutMinutes ?? 2880; // Default: 2 days = 2880 minutes
-        const channelParser = parserMap.get(channelConfig.parser!);
-        const channelEntryPriceStrategy = channelParser?.entryPriceStrategy;
-        const allInitiatorScopes = channelInitiatorScopes.get(channelConfig.channel) ?? [];
-        const multiInitiator = isMultiInitiatorTelegramChannel(
-          channelConfig.channel,
-          channelInitiatorScopes,
-        );
-
-        processUnparsedMessages(
-          initiator,
-          channelConfig.channel,
-          entryTimeoutMinutes,
-          db,
-          isSimulation,
-          priceProvider,
-          channelConfig.parser!, // Pass parser name to initiator
-          config.accounts, // Pass accounts config
-          undefined, // startDate (not used in live mode)
-          channelConfig.baseLeverage, // Pass channel-specific baseLeverage
-          channelConfig.riskPercentage, // Pass channel-specific risk percentage (overrides initiator)
-          channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
-          channelConfig.accountFilters, // Pass channel-level account filtering rules
-          channelConfig.propFirms, // Pass prop firm configurations
-          channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
-          channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
-          channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
-          channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price
-          channelConfig.useMarketRangeForEntry, // Pass cTrader: MARKET_RANGE boundary TP (see maxSkippablePastTPs)
-          channelConfig.maxRisk,
-          channelEntryPriceStrategy,
-          undefined, // messageEndDate
-          channelConfig.allowConcurrentSymbolTrades,
-          channelConfig.minRiskReward,
-          multiInitiator,
-          allInitiatorScopes,
-        ).catch(error => {
+        runInitiatorForChannelConfig(channelConfig).catch((error) => {
           logger.error('Initiator error', {
             channel: channelConfig.channel,
-            initiatorName: initiator.name || initiator.type || channelConfig.initiator,
-            error: serializeErrorForLog(error)
+            initiatorName: channelConfig.initiator,
+            error: serializeErrorForLog(error),
           });
         });
       }
-    }, 10000); // Initiate every 10 seconds
+    }, initiatorIntervalMs);
   }
 
   logger.info('Trade orchestrator started', {
@@ -1177,7 +1257,9 @@ export const startTradeOrchestrator = async (
     strategyChannels: config.channels.filter(c => c.strategy).length,
     parsers: config.parsers.length,
     initiators: config.initiators.length,
-    monitors: config.monitors.length
+    monitors: config.monitors.length,
+    parserIntervalMs: isSimulation ? undefined : parserIntervalMs,
+    initiatorIntervalMs: isSimulation ? undefined : initiatorIntervalMs,
   });
 
   // Return stop function

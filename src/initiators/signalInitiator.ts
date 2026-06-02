@@ -16,6 +16,7 @@ import { getParser } from '../parsers/parserRegistry.js';
 import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
+import type { CTraderClient } from '../clients/ctraderClient.js';
 import { validateParsedOrder } from '../utils/tradeValidation.js';
 import {
   exchangeForInitiator,
@@ -250,6 +251,7 @@ export const processUnparsedMessages = async (
   minRiskReward?: number,
   multiInitiator?: boolean,
   allInitiatorScopes?: string[],
+  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
 ): Promise<void> => {
   const initiatorNameForScope = initiatorConfig.name || initiatorConfig.type;
   if (!initiatorNameForScope) {
@@ -379,6 +381,7 @@ export const processUnparsedMessages = async (
     minRiskReward,
     multiInitiator,
     allInitiatorScopes,
+    getCTraderClient,
   );
   
   logger.debug('Finished processing messages', {
@@ -420,6 +423,7 @@ export const processMessages = async (
   minRiskReward?: number,
   multiInitiator: boolean = false,
   allInitiatorScopes?: string[],
+  getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -562,7 +566,8 @@ export const processMessages = async (
           maxSkippablePastTPs,
           useMarketRangeForEntry,
           allowConcurrentSymbolTrades,
-          minRiskReward
+          minRiskReward,
+          getCTraderClient,
         };
 
         try {

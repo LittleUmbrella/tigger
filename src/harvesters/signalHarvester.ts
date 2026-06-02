@@ -1,4 +1,5 @@
 import { TelegramClient, Api } from 'telegram';
+import { NewMessage } from 'telegram/events/index.js';
 import { StringSession } from 'telegram/sessions/index.js';
 import { HarvesterConfig } from '../types/config.js';
 import { DatabaseManager, type Message } from '../db/schema.js';
@@ -577,13 +578,145 @@ const lastSkippedOldInfoLogTime = new Map<string, number>();
 // Track last heartbeat log time per harvester (to log heartbeat every 5 minutes when no messages)
 const lastHeartbeatLogTime = new Map<string, number>();
 
+export interface SignalHarvesterOptions {
+  /** Called after one or more messages are newly inserted (not duplicates). */
+  onNewMessages?: (payload: { channel: string; newCount: number }) => void;
+}
+
+type PersistTelegramMessageResult = 'inserted' | 'duplicate' | 'skipped' | 'error';
+
+const persistTelegramMessage = async (
+  config: HarvesterConfig,
+  client: TelegramClient,
+  db: DatabaseManager,
+  msg: Api.TypeMessage,
+  filters: {
+    skipOldMessages: boolean;
+    maxAgeMs: number;
+    now: number;
+    isFirstFetchAfterStartup?: boolean;
+  },
+): Promise<PersistTelegramMessageResult> => {
+  if (!('message' in msg) || !msg.message) {
+    return 'skipped';
+  }
+
+  const msgIdBigInt = typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id);
+  const msgId = Number(msgIdBigInt);
+  if (Number.isNaN(msgId)) {
+    return 'skipped';
+  }
+
+  let msgDate: Date;
+  if ('date' in msg && msg.date) {
+    const dateValue = msg.date as Date | number;
+    if (dateValue instanceof Date) {
+      msgDate = dateValue;
+    } else {
+      const numValue = typeof dateValue === 'number' ? dateValue : Number(dateValue);
+      msgDate = new Date(numValue < 1e12 ? numValue * 1000 : numValue);
+    }
+  } else {
+    msgDate = new Date();
+  }
+
+  if (filters.skipOldMessages) {
+    const msgAge = filters.now - msgDate.getTime();
+    if (msgAge > filters.maxAgeMs) {
+      logger.debug('Skipping old message (exceeds maxMessageAgeMinutes)', {
+        channel: config.channel,
+        messageId: msgId,
+        ageMinutes: Math.round(msgAge / 60000),
+        maxAgeMinutes: filters.maxAgeMs / 60000,
+        isFirstFetch: filters.isFirstFetchAfterStartup,
+      });
+      return 'skipped';
+    }
+  }
+
+  let replyToMessageId: string | undefined;
+  if ('replyTo' in msg && msg.replyTo) {
+    const replyTo = msg.replyTo as { replyToMsgId?: number | bigint };
+    if (replyTo.replyToMsgId) {
+      replyToMessageId = String(replyTo.replyToMsgId);
+    }
+  }
+
+  let imagePaths: string[] = [];
+  if (config.downloadImages && msg instanceof Api.Message) {
+    try {
+      imagePaths = await withTimeout(
+        downloadMessageImages(
+          { channel: config.channel, downloadImages: config.downloadImages },
+          client,
+          msg,
+        ),
+        DOWNLOAD_MEDIA_TIMEOUT_MS,
+        `downloadMessageImages ch=${config.channel} msg=${msgId}`,
+      );
+    } catch (error) {
+      if (error instanceof TimeoutError) {
+        logger.warn('Image download timed out; continuing without images', {
+          channel: config.channel,
+          messageId: msgId,
+          timeoutMs: error.timeoutMs,
+        });
+      } else {
+        logger.warn('Failed to download images for message', {
+          channel: config.channel,
+          messageId: msgId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  }
+
+  try {
+    await withTimeout(
+      db.insertMessage({
+        message_id: String(msgId),
+        channel: config.channel,
+        content: String(msg.message).replace(/\s+/g, ' ').trim(),
+        sender: String((msg as { fromId?: { userId?: unknown }; senderId?: { userId?: unknown } }).fromId?.userId
+          || (msg as { senderId?: { userId?: unknown } }).senderId?.userId || ''),
+        date: msgDate.toISOString(),
+        reply_to_message_id: replyToMessageId,
+        image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined,
+      }),
+      DB_OPERATION_TIMEOUT_MS,
+      `insertMessage ch=${config.channel} id=${msgId}`,
+    );
+    return 'inserted';
+  } catch (error) {
+    if (error instanceof TimeoutError) {
+      logger.warn('insertMessage timed out; will retry on next poll if message still missing', {
+        channel: config.channel,
+        messageId: msgId,
+        timeoutMs: error.timeoutMs,
+      });
+      return 'error';
+    }
+    if (isDuplicateKeyError(error)) {
+      getDuplicateKeyLogger().record(config.channel, String(msgId));
+      return 'duplicate';
+    }
+    logger.warn('Failed to insert message', {
+      channel: config.channel,
+      messageId: msgId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return 'error';
+  }
+};
+
 const fetchNewMessages = async (
   config: HarvesterConfig,
   client: TelegramClient,
   entity: Api.TypeInputPeer,
   db: DatabaseManager,
   lastMessageId: number,
-  isFirstFetchAfterStartup: boolean = false
+  isFirstFetchAfterStartup: boolean = false,
+  onNewMessages?: SignalHarvesterOptions['onNewMessages'],
 ): Promise<number> => {
   const harvesterKey = `${config.name}:${config.channel}`;
   
@@ -705,147 +838,28 @@ const fetchNewMessages = async (
 
     // Filter out messages older than maxMessageAgeMinutes (applies to all fetches)
     const maxAgeMinutes = config.maxMessageAgeMinutes ?? 10;
-    const skipOldMessages = config.skipOldMessagesOnStartup !== false; // Default to true
+    const skipOldMessages = config.skipOldMessagesOnStartup !== false;
     const now = Date.now();
     const maxAgeMs = maxAgeMinutes * 60 * 1000;
+    const persistFilters = {
+      skipOldMessages,
+      maxAgeMs,
+      now,
+      isFirstFetchAfterStartup,
+    };
 
     for (const msg of ordered) {
-      if (!('message' in msg) || !msg.message) {
-        skippedCount++;
-        logger.debug('Skipping message: no message content', {
-          channel: config.channel,
-          messageId: msg.id
-        });
-        continue;
-      }
-
-      // Handle BigInt message IDs properly
-      const msgIdBigInt = typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id);
-      const msgId = Number(msgIdBigInt);
-      if (Number.isNaN(msgId)) {
-        skippedCount++;
-        logger.debug('Skipping message: invalid ID', {
-          channel: config.channel,
-          messageId: msgId
-        });
-        continue;
-      }
-
-      let msgDate: Date;
-      if ('date' in msg && msg.date) {
-        const dateValue = msg.date as any;
-        if (dateValue instanceof Date) {
-          msgDate = dateValue;
-        } else {
-          const numValue = typeof dateValue === 'number' ? dateValue : Number(dateValue);
-          msgDate = new Date(numValue < 1e12 ? numValue * 1000 : numValue);
-        }
-      } else {
-        msgDate = new Date();
-      }
-
-      // Skip old messages that exceed maxMessageAgeMinutes
-      // This applies to all fetches, not just the first, to prevent inserting stale messages
-      // that may be returned by the Telegram API in subsequent polls (e.g., after reconnection)
-      if (skipOldMessages) {
-        const msgAge = now - msgDate.getTime();
-        if (msgAge > maxAgeMs) {
-          skippedOldCount++;
-          skippedCount++;
-          logger.debug('Skipping old message (exceeds maxMessageAgeMinutes)', {
-            channel: config.channel,
-            messageId: msgId,
-            ageMinutes: Math.round(msgAge / 60000),
-            maxAgeMinutes,
-            isFirstFetch: isFirstFetchAfterStartup
-          });
-          continue;
-        }
-      }
-
-      // Note: We don't skip based on lastMessageId here because:
-      // 1. Telegram returns messages newest-first, we reverse to process oldest-first
-      // 2. After reversing, we process messages in order: oldest (lowest ID) to newest (highest ID)
-      // 3. If we skip based on lastMessageId, we'd incorrectly skip older messages that come after newer ones
-      // 4. The database UNIQUE constraint on (message_id, channel) will handle duplicates
-      // 5. We track newLastMessageId to know the highest ID we've processed in this batch
-
-      // Extract reply_to information
-      let replyToMessageId: string | undefined;
-      if ('replyTo' in msg && msg.replyTo) {
-        const replyTo = msg.replyTo as any;
-        if ('replyToMsgId' in replyTo && replyTo.replyToMsgId) {
-          replyToMessageId = String(replyTo.replyToMsgId);
-        }
-      }
-
-      // Download images if enabled
-      let imagePaths: string[] = [];
-      if (config.downloadImages && msg instanceof Api.Message) {
-        try {
-          imagePaths = await withTimeout(
-            downloadMessageImages(
-              { channel: config.channel, downloadImages: config.downloadImages },
-              client,
-              msg
-            ),
-            DOWNLOAD_MEDIA_TIMEOUT_MS,
-            `downloadMessageImages ch=${config.channel} msg=${msgId}`
-          );
-        } catch (error) {
-          if (error instanceof TimeoutError) {
-            logger.warn('Image download timed out; continuing without images', {
-              channel: config.channel,
-              messageId: msgId,
-              timeoutMs: error.timeoutMs,
-              note: 'Set TG_DOWNLOAD_MEDIA_TIMEOUT_MS to adjust (default 60000).',
-            });
-          } else {
-            logger.warn('Failed to download images for message', {
-              channel: config.channel,
-              messageId: msgId,
-              error: error instanceof Error ? error.message : String(error)
-            });
-          }
-        }
-      }
-
-      try {
-        await withTimeout(
-          db.insertMessage({
-            message_id: String(msgId),
-            channel: config.channel,
-            content: String(msg.message).replace(/\s+/g, ' ').trim(),
-            sender: String((msg as any).fromId?.userId || (msg as any).senderId?.userId || ''),
-            date: msgDate.toISOString(),
-            reply_to_message_id: replyToMessageId ? String(replyToMessageId) : undefined,
-            image_paths: imagePaths.length > 0 ? JSON.stringify(imagePaths) : undefined
-          }),
-          DB_OPERATION_TIMEOUT_MS,
-          `insertMessage ch=${config.channel} id=${msgId}`
-        );
+      const result = await persistTelegramMessage(config, client, db, msg as Api.TypeMessage, persistFilters);
+      if (result === 'inserted') {
         newMessagesCount++;
-        newLastMessageId = Math.max(newLastMessageId, msgId);
-      } catch (error) {
-        if (error instanceof TimeoutError) {
-          logger.warn('insertMessage timed out; will retry on next poll if message still missing', {
-            channel: config.channel,
-            messageId: msgId,
-            timeoutMs: error.timeoutMs,
-            note: 'Set TG_DB_OPERATION_TIMEOUT_MS to adjust (default 90000).',
-          });
-          continue;
+        const msgId = Number(typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id));
+        if (!Number.isNaN(msgId)) {
+          newLastMessageId = Math.max(newLastMessageId, msgId);
         }
-        if (isDuplicateKeyError(error)) {
-          // Message already exists in database - this is expected for duplicates
-          skippedCount++;
-          getDuplicateKeyLogger().record(config.channel, String(msgId));
-        } else {
-          logger.warn('Failed to insert message', {
-            channel: config.channel,
-            messageId: msgId,
-            error: error instanceof Error ? error.message : String(error)
-          });
+      } else if (result === 'duplicate' || result === 'skipped') {
+        skippedCount++;
+        if (result === 'skipped' && skipOldMessages) {
+          skippedOldCount++;
         }
       }
     }
@@ -858,6 +872,7 @@ const fetchNewMessages = async (
         skippedOld: skippedOldCount,
         lastMessageId: newLastMessageId
       });
+      onNewMessages?.({ channel: config.channel, newCount: newMessagesCount });
     } else if (skippedCount > 0) {
       if (skippedOldCount > 0) {
         logger.debug('Skipped old messages (exceed maxMessageAgeMinutes)', {
@@ -989,7 +1004,8 @@ const fetchNewMessages = async (
 
 export const startSignalHarvester = async (
   config: HarvesterConfig,
-  db: DatabaseManager
+  db: DatabaseManager,
+  options?: SignalHarvesterOptions,
 ): Promise<() => Promise<void>> => {
   logger.info('Starting signal harvester', { name: config.name, channel: config.channel });
   
@@ -1250,7 +1266,7 @@ export const startSignalHarvester = async (
   }
 
   // Set up event handler for message edits
-  client.addEventHandler(async (update: any) => {
+  client.addEventHandler(async (update: Api.TypeUpdate) => {
     if (update instanceof Api.UpdateEditMessage) {
       try {
         // UpdateEditMessage has a 'message' property, not 'messageId'
@@ -1346,6 +1362,41 @@ export const startSignalHarvester = async (
     }
   });
 
+  // Push handler: harvest new messages immediately (poll remains as fallback)
+  client.addEventHandler(
+    async (event) => {
+      if (!running || !entity) {
+        return;
+      }
+      const msg = event.message;
+      if (!(msg instanceof Api.Message) || !msg.message) {
+        return;
+      }
+
+      const maxAgeMinutes = config.maxMessageAgeMinutes ?? 10;
+      const skipOldMessages = config.skipOldMessagesOnStartup !== false;
+      const now = Date.now();
+      const result = await persistTelegramMessage(config, client, db, msg, {
+        skipOldMessages,
+        maxAgeMs: maxAgeMinutes * 60 * 1000,
+        now,
+      });
+
+      if (result === 'inserted') {
+        const msgId = Number(typeof msg.id === 'bigint' ? msg.id : BigInt(msg.id));
+        if (!Number.isNaN(msgId)) {
+          lastMessageId = Math.max(lastMessageId, msgId);
+        }
+        logger.info('Harvested new message (push)', {
+          channel: config.channel,
+          messageId: msg.id,
+        });
+        options?.onNewMessages?.({ channel: config.channel, newCount: 1 });
+      }
+    },
+    new NewMessage({ chats: [entity] }),
+  );
+
   const pollInterval = config.pollInterval || 5000;
 
   // Track if this is the first fetch after startup
@@ -1360,7 +1411,15 @@ export const startSignalHarvester = async (
       try {
         if (entity) {
           const isFirstFetchAfterStartup = isFirstFetch;
-          lastMessageId = await fetchNewMessages(config, client, entity, db, lastMessageId, isFirstFetchAfterStartup);
+          lastMessageId = await fetchNewMessages(
+            config,
+            client,
+            entity,
+            db,
+            lastMessageId,
+            isFirstFetchAfterStartup,
+            options?.onNewMessages,
+          );
           isFirstFetch = false;
           // Reset counter on successful fetch
           consecutiveChannelInvalidErrors = 0;

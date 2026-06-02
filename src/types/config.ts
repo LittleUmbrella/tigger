@@ -263,6 +263,14 @@ export interface SimulationConfig {
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
 }
 
+/** Live orchestrator loop tuning (harvest wake + intervals). */
+export interface OrchestratorConfig {
+  /** Parser loop interval in ms (default 1000). */
+  parserIntervalMs?: number;
+  /** Initiator loop interval in ms (default 1000). */
+  initiatorIntervalMs?: number;
+}
+
 export interface BotConfig {
   harvesters: HarvesterConfig[];
   parsers: ParserConfig[];
@@ -272,6 +280,7 @@ export interface BotConfig {
   channels: ChannelSetConfig[];
   simulation?: SimulationConfig;
   evaluation?: EvaluationConfig;
+  orchestrator?: OrchestratorConfig;
   database?: {
     type?: 'sqlite' | 'postgresql';
     path?: string; // For SQLite

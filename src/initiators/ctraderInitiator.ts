@@ -9,6 +9,8 @@ import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
 import { resolveObfuscatedStopLossAbsolute } from '../utils/tradeObfuscation.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
+import { isCtraderGoldSymbol } from '../utils/ctraderGoldSymbol.js';
+import { getCachedCTraderSymbolInfo } from '../utils/ctraderSymbolInfoCache.js';
 import {
   buildCtraderOrderLabel,
   verifyCtraderEntryOrderLabel,
@@ -243,6 +245,9 @@ const executeTradeForAccount = async (
     minRiskReward,
   } = context;
 
+  const usePooledClient = !!context.getCTraderClient;
+  const skipSymbolInfoFetch = isCtraderGoldSymbol(order.tradingPair);
+
   /** Channel `useLimitOrderForEntry` (defaults true when omitted): false → MARKET + relative SL/TP; true → limit-at-touch. `order.marketExecution` forces the MARKET path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
 
@@ -266,7 +271,7 @@ const executeTradeForAccount = async (
     const { clientId, clientSecret, accessToken, refreshToken, accountId, environment } =
       resolveCtraderAccountCredentials(account);
     
-    if (!isSimulation && (!accessToken || !accountId)) {
+    if (!isSimulation && (!accessToken || !accountId) && !usePooledClient) {
       logger.error('cTrader credentials not found', {
         channel,
         accountName: accountName || 'default',
@@ -278,7 +283,23 @@ const executeTradeForAccount = async (
       });
       return;
     }
-    if (!isSimulation && accessToken && accountId) {
+
+    if (usePooledClient) {
+      ctraderClient = await context.getCTraderClient!(accountName || undefined);
+      if (!isSimulation && !ctraderClient) {
+        logger.error('Pooled cTrader client unavailable', {
+          channel,
+          accountName: accountName || 'default',
+        });
+        return;
+      }
+      if (ctraderClient) {
+        logger.debug('Using pooled cTrader client for trade initiation', {
+          channel,
+          accountName: accountName || 'default',
+        });
+      }
+    } else if (!isSimulation && accessToken && accountId) {
       const clientConfig: CTraderClientConfig = {
         clientId: clientId || '',
         clientSecret: clientSecret || '',
@@ -396,8 +417,8 @@ const executeTradeForAccount = async (
     // Normalize symbol for cTrader
     const symbol = normalizeCTraderSymbol(order.tradingPair);
     
-    // Validate symbol exists before creating trade (Gap #1)
-    if (!isSimulation && ctraderClient) {
+    // Validate symbol exists before creating trade (Gap #1); skip for known gold/XAU pairs
+    if (!isSimulation && ctraderClient && !skipSymbolInfoFetch) {
       logger.info('Validating symbol before trade creation', {
         channel,
         messageId: message.message_id,
@@ -407,7 +428,7 @@ const executeTradeForAccount = async (
       });
 
       try {
-        const symbolInfo = await ctraderClient.getSymbolInfo(symbol);
+        await getCachedCTraderSymbolInfo(ctraderClient, accountName || 'default', symbol);
         logger.info('Symbol validated successfully', {
           channel,
           messageId: message.message_id,
@@ -428,6 +449,14 @@ const executeTradeForAccount = async (
         });
         throw new Error(`Invalid symbol: ${error instanceof Error ? error.message : String(error)}`);
       }
+    } else if (skipSymbolInfoFetch) {
+      logger.debug('Skipping cTrader symbol validation for gold/XAU', {
+        channel,
+        messageId: message.message_id,
+        tradingPair: order.tradingPair,
+        symbol,
+        accountName: accountName || 'default',
+      });
     }
     
     // Per-channel symbol dedup (skip if forcePlaceTrade or allowConcurrentSymbolTrades).
@@ -580,9 +609,13 @@ const executeTradeForAccount = async (
     let volumeStep: number | undefined = undefined;
     let lotSize: number | undefined;
     
-    if (ctraderClient) {
+    if (ctraderClient && !skipSymbolInfoFetch) {
       try {
-        const symbolInfo = await ctraderClient.getSymbolInfo(symbol);
+        const symbolInfo = await getCachedCTraderSymbolInfo(
+          ctraderClient,
+          accountName || 'default',
+          symbol,
+        ) as Awaited<ReturnType<CTraderClient['getSymbolInfo']>>;
         
         logger.debug('Retrieved symbol info from cTrader', {
           channel,
@@ -2570,8 +2603,8 @@ const executeTradeForAccount = async (
     });
     throw error;
   } finally {
-    // Disconnect client if connected
-    if (ctraderClient && ctraderClient.isConnected()) {
+    // Disconnect ephemeral client only (pooled clients stay alive for the monitor + next trade)
+    if (!usePooledClient && ctraderClient && ctraderClient.isConnected()) {
       await ctraderClient.disconnect().catch((err: unknown) => {
         logger.warn('Error disconnecting cTrader client', {
           ...serializeError(err)
