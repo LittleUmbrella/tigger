@@ -620,7 +620,9 @@ const persistTelegramMessage = async (
     msgDate = new Date();
   }
 
-  if (filters.skipOldMessages) {
+  // Only skip by age on the first GetHistory after startup (avoid replaying channel history).
+  // Subsequent polls use minId and must not drop messages after brief outages or push misses.
+  if (filters.skipOldMessages && filters.isFirstFetchAfterStartup) {
     const msgAge = filters.now - msgDate.getTime();
     if (msgAge > filters.maxAgeMs) {
       logger.debug('Skipping old message (exceeds maxMessageAgeMinutes)', {
@@ -628,7 +630,7 @@ const persistTelegramMessage = async (
         messageId: msgId,
         ageMinutes: Math.round(msgAge / 60000),
         maxAgeMinutes: filters.maxAgeMs / 60000,
-        isFirstFetch: filters.isFirstFetchAfterStartup,
+        isFirstFetch: true,
       });
       return 'skipped';
     }
@@ -759,9 +761,11 @@ const fetchNewMessages = async (
       }
     }
 
-    // For forward polling (new messages), always get the most recent messages
-    // offsetId: 0 means get the newest messages
-    // We'll filter out already-processed messages below
+    // Poll for messages newer than lastMessageId (DB high-water). Duplicates are ignored via UNIQUE.
+    const pollLimit = Math.min(
+      100,
+      Math.max(5, parseInt(process.env.TG_HARVEST_POLL_LIMIT || '25', 10) || 25),
+    );
     const getHistoryStarted = Date.now();
     let history: Api.messages.TypeMessages;
     try {
@@ -770,10 +774,10 @@ const fetchNewMessages = async (
           new Api.messages.GetHistory({
             peer: entity,
             offsetId: 0,
-            limit: 5,
+            limit: pollLimit,
             addOffset: 0,
             maxId: 0,
-            minId: 0,
+            minId: lastMessageId > 0 ? lastMessageId : 0,
             hash: BigInt(0) as any,
           })
         ) as Promise<Api.messages.TypeMessages>,
@@ -865,12 +869,14 @@ const fetchNewMessages = async (
     }
 
     if (newMessagesCount > 0) {
-      logger.info('Harvested new messages', {
+      logger.info('Harvested new messages (poll)', {
         channel: config.channel,
         count: newMessagesCount,
         skipped: skippedCount,
         skippedOld: skippedOldCount,
-        lastMessageId: newLastMessageId
+        lastMessageId: newLastMessageId,
+        minId: lastMessageId,
+        pollLimit,
       });
       onNewMessages?.({ channel: config.channel, newCount: newMessagesCount });
     } else if (skippedCount > 0) {
@@ -1259,7 +1265,7 @@ export const startSignalHarvester = async (
   // Log that we'll skip old messages (prevents processing stale messages after pause/restart or in subsequent polls)
   const skipOldMessages = config.skipOldMessagesOnStartup !== false;
   if (skipOldMessages) {
-    logger.info('Will skip old messages (exceeding maxMessageAgeMinutes) on all fetches', {
+    logger.info('Will skip old messages (exceeding maxMessageAgeMinutes) on first poll after startup only', {
       channel: config.channel,
       maxMessageAgeMinutes: config.maxMessageAgeMinutes ?? 10
     });
@@ -1373,13 +1379,10 @@ export const startSignalHarvester = async (
         return;
       }
 
-      const maxAgeMinutes = config.maxMessageAgeMinutes ?? 10;
-      const skipOldMessages = config.skipOldMessagesOnStartup !== false;
-      const now = Date.now();
       const result = await persistTelegramMessage(config, client, db, msg, {
-        skipOldMessages,
-        maxAgeMs: maxAgeMinutes * 60 * 1000,
-        now,
+        skipOldMessages: false,
+        maxAgeMs: 0,
+        now: Date.now(),
       });
 
       if (result === 'inserted') {
@@ -1394,7 +1397,7 @@ export const startSignalHarvester = async (
         options?.onNewMessages?.({ channel: config.channel, newCount: 1 });
       }
     },
-    new NewMessage({ chats: [entity] }),
+    new NewMessage({ chats: [config.channel] }),
   );
 
   const pollInterval = config.pollInterval || 5000;
