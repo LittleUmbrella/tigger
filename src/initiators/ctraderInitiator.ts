@@ -609,7 +609,7 @@ const executeTradeForAccount = async (
     let volumeStep: number | undefined = undefined;
     let lotSize: number | undefined;
     
-    if (ctraderClient && !skipSymbolInfoFetch) {
+    if (ctraderClient) {
       try {
         const symbolInfo = await getCachedCTraderSymbolInfo(
           ctraderClient,
