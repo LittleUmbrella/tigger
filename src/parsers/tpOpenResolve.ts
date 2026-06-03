@@ -72,7 +72,7 @@ const MATHEMATICAL_LATIN_SMALL_BASES = [
   0x1d41a, 0x1d44e, 0x1d482, 0x1d5ba, 0x1d5ee, 0x1d622,
 ] as const;
 
-const decodeMathematicalLatinLetter = (codePoint: number): string | null => {
+export const decodeMathematicalLatinLetter = (codePoint: number): string | null => {
   for (const base of MATHEMATICAL_LATIN_CAPITAL_BASES) {
     if (codePoint >= base && codePoint < base + 26) {
       return String.fromCharCode(0x41 + (codePoint - base));
@@ -84,6 +84,21 @@ const decodeMathematicalLatinLetter = (codePoint: number): string | null => {
     }
   }
   return null;
+};
+
+/** Map Mathematical Alphanumeric Symbols (𝑋𝐴𝑈𝑈𝑆𝐷, 𝖲𝗍𝗈𝗉, etc.) to ASCII for DGF parsers. */
+export const normalizeMathematicalLatin = (content: string): string => {
+  let result = '';
+  let i = 0;
+  while (i < content.length) {
+    const cp = content.codePointAt(i);
+    if (cp === undefined) break;
+    const charLen = cp > 0xffff ? 2 : 1;
+    const decoded = decodeMathematicalLatinLetter(cp);
+    result += decoded ?? String.fromCodePoint(cp);
+    i += charLen;
+  }
+  return result;
 };
 
 const decodeTpLetter = (codePoint: number): string | null => {

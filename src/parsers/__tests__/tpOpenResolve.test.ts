@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { meanNumericGap, parseTpTokens, resolveTpTokensWithOpen } from '../tpOpenResolve.js';
+import {
+  meanNumericGap,
+  normalizeMathematicalLatin,
+  parseTpTokens,
+  resolveTpTokensWithOpen,
+} from '../tpOpenResolve.js';
 
 describe('meanNumericGap', () => {
   it('returns 0 for fewer than two numbers', () => {
@@ -9,6 +14,14 @@ describe('meanNumericGap', () => {
 
   it('averages consecutive gaps', () => {
     expect(meanNumericGap([10, 12, 16])).toBe(3);
+  });
+});
+
+describe('normalizeMathematicalLatin', () => {
+  it('decodes mathematical bold italic symbol and SL labels (message 15698)', () => {
+    const msg =
+      '𝑋𝐴𝑈𝑈𝑆𝐷 SELL 𝖲𝗍𝗈𝗉 𝖫𝗈𝗌𝗌(𝖲𝖫): 4450';
+    expect(normalizeMathematicalLatin(msg)).toBe('XAUUSD SELL Stop Loss(SL): 4450');
   });
 });
 

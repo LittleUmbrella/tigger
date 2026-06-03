@@ -4,7 +4,12 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { ParserOptions } from './parserRegistry.js';
 import { normalizeAssetAliasToCTraderPair } from '../utils/ctraderSymbolUtils.js';
 import { logger } from '../utils/logger.js';
-import { meanNumericGap, parseTpTokens, resolveTpTokensWithOpen } from './tpOpenResolve.js';
+import {
+  meanNumericGap,
+  normalizeMathematicalLatin,
+  parseTpTokens,
+  resolveTpTokensWithOpen,
+} from './tpOpenResolve.js';
 
 /** Parse SL from text starting at SL label through end of line (avoids conflating entry `@` with SL `@`). */
 const parseStopLossFromSlClause = (slClause: string): number | undefined => {
@@ -16,6 +21,11 @@ const parseStopLossFromSlClause = (slClause: string): number | undefined => {
   const solidBreak = slClause.match(/\bsolid\s+break\s+([\d.]+)/i);
   if (solidBreak) {
     const v = parseFloat(solidBreak[1]);
+    if (!isNaN(v) && v > 0) return v;
+  }
+  const stopLossLabeled = slClause.match(/Stop\s*Loss[^:\n]*:\s*([\d.]+)/i);
+  if (stopLossLabeled) {
+    const v = parseFloat(stopLossLabeled[1]);
     if (!isNaN(v) && v > 0) return v;
   }
   const slPlain = slClause.match(/(?:SL|Stop\s*Loss)\s*[=:]?\s*([\d.]+)/i);
@@ -42,9 +52,9 @@ const resolveStopLossFromDgfContent = (normalizedContent: string): number | unde
 const DGF_GOLD_TOKEN = 'gold|XAU|XAUT|XAUUSD';
 const DGF_PAIR_TOKEN = `${DGF_GOLD_TOKEN}|[A-Z][A-Z0-9]{2,11}`;
 
-/** En-dash / em-dash entry ranges (e.g. 4572– 4577) → ASCII hyphen for range regexes. */
+/** En-dash / em-dash / tilde entry ranges (e.g. 4572–4577, @4439~4443) → ASCII hyphen. */
 const normalizeUnicodeEntryRangeDashes = (content: string): string =>
-  content.replace(/([\d.]+)\s*[\u2013\u2014\u2012\u2212]\s*([\d.]+)/g, '$1-$2');
+  content.replace(/([\d.]+)\s*[\u2013\u2014\u2012\u2212~]\s*([\d.]+)/g, '$1-$2');
 
 /** Skip leading emoji / junk so symbol-first lines match (e.g. 🛡XAUUSD …, 🛡 BTCUSD BUY …). */
 const stripToFirstDgfSymbol = (s: string): string => {
@@ -67,7 +77,9 @@ const stripToFirstDgfSymbol = (s: string): string => {
  */
 export const ctraderDgfVipParser = (content: string, options?: ParserOptions): ParsedOrder | null => {
   try {
-    const normalizedContent = normalizeUnicodeEntryRangeDashes(content.trim());
+    const normalizedContent = normalizeUnicodeEntryRangeDashes(
+      normalizeMathematicalLatin(content.trim()),
+    );
     const lines = normalizedContent.split(/\r?\n/);
     const rawFirstLine = lines[0] ?? '';
     const firstLineForDgf = stripToFirstDgfSymbol(rawFirstLine);
