@@ -505,7 +505,7 @@
     },
     {
       "channel": "1422142227580194846",
-      "harvester": "gold_scalps_harvester",
+      "harvester": "gold_scalps_harvester_ic",
       "parser": "gold_scalps",
       "initiator": "ctrader",
       "monitor": "ctrader",
