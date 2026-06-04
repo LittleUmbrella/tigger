@@ -70,6 +70,16 @@ describe('parseTpTokens', () => {
       { kind: 'number', value: 72350 },
     ]);
   });
+
+  it('recognizes spaced TP index labels (dgfvip message 15756)', () => {
+    const msg =
+      'TP 1: 4464 TP 2: 4459 TP 3: 4454';
+    expect(parseTpTokens(msg)).toEqual([
+      { kind: 'number', value: 4464 },
+      { kind: 'number', value: 4459 },
+      { kind: 'number', value: 4454 },
+    ]);
+  });
 });
 
 describe('resolveTpTokensWithOpen', () => {
