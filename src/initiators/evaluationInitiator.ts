@@ -9,6 +9,7 @@ import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
 import { validateSymbolWithPriceProvider, getSymbolInfo, getCTraderSymbolInfo } from './symbolValidator.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import { getDecimalPrecision, roundPrice } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { assertMinRiskReward } from '../utils/minRiskReward.js';
@@ -63,10 +64,7 @@ export const evaluationInitiator: InitiatorFunction = async (context: InitiatorC
     }
     tradingPairForPriceProvider = `${normalizedTradingPair.slice(0, -3)}/${normalizedTradingPair.slice(-3)}`;
   } else {
-    // Bybit: crypto, ensure USDT
-    if (!normalizedTradingPair.endsWith('USDT') && !normalizedTradingPair.endsWith('USDC')) {
-      normalizedTradingPair = normalizedTradingPair + 'USDT';
-    }
+    normalizedTradingPair = normalizeBybitSymbol(order.tradingPair);
     tradingPairForPriceProvider = normalizedTradingPair.slice(0, -4) + '/' + normalizedTradingPair.slice(-4);
   }
 

@@ -19,4 +19,9 @@ describe('normalizeBybitSymbol', () => {
   it('does not double-append when already USDT', () => {
     expect(normalizeBybitSymbol('BTCUSDT')).toBe('BTCUSDT');
   });
+
+  it('maps cTrader-style USD quote to USDT (e.g. BTCUSD from dgfvip)', () => {
+    expect(normalizeBybitSymbol('BTCUSD')).toBe('BTCUSDT');
+    expect(normalizeBybitSymbol('btc/usd')).toBe('BTCUSDT');
+  });
 });

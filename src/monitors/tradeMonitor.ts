@@ -105,10 +105,7 @@ const getCurrentPrice = async (
       }
       return price;
     } else if (bybitClient) {
-      // Normalize symbol similar to validateBybitSymbol
-      const normalizedSymbol = tradingPair.replace('/', '').toUpperCase();
-      
-      // Ensure symbol ends with USDT or USDC
+      const normalizedSymbol = normalizeBybitSymbol(tradingPair);
       const baseSymbol = normalizedSymbol.replace(/USDT$|USDC$/, '');
       const quoteCurrency = normalizedSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
       

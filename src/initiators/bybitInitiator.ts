@@ -4,6 +4,7 @@ import { AccountConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { validateBybitSymbol, getSymbolInfo } from './symbolValidator.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuantityPrecisionFromRiskAmount, roundPrice, roundQuantity, distributeQuantityAcrossTPs, validateAndRedistributeTPQuantities } from '../utils/positionSizing.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
@@ -383,13 +384,8 @@ const executeTradeForAccount = async (
       logger.info('Simulation mode: Using default balance', { balance, channel });
     }
 
-    // Convert trading pair to Bybit format (e.g., BTCUSDT or BTCUSDC)
-    // Ensure symbol always ends with USDT or USDC
-    let symbol = order.tradingPair.replace('/', '').toUpperCase();
-    if (!symbol.endsWith('USDT') && !symbol.endsWith('USDC')) {
-      symbol = symbol + 'USDT'; // Default to USDT
-    }
-    
+    let symbol = normalizeBybitSymbol(order.tradingPair);
+
     // Validate symbol exists before creating trade
     // Validation will try both USDT and USDC if needed
     if (!isSimulation && bybitClient) {

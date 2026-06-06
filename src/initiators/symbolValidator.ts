@@ -12,6 +12,7 @@ import { getAssetVariant } from '../utils/assetNormalizer.js';
 import { getBybitField } from '../utils/bybitFieldHelper.js';
 import { getCachedResponse, setCachedResponse } from '../utils/bybitCache.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { normalizeBybitSymbol } from '../utils/normalizeBybitSymbol.js';
 
 export interface SymbolInfo {
   qtyPrecision?: number;
@@ -277,14 +278,7 @@ export async function validateBybitSymbol(
   useCache: boolean = false
 ): Promise<{ valid: boolean; error?: string; actualSymbol?: string }> {
   try {
-    let normalizedSymbol = symbol.replace('/', '').toUpperCase();
-    if (
-      normalizedSymbol.endsWith('USD') &&
-      !normalizedSymbol.endsWith('USDT') &&
-      !normalizedSymbol.endsWith('USDC')
-    ) {
-      normalizedSymbol = normalizedSymbol.replace(/USD$/, 'USDT');
-    }
+    const normalizedSymbol = normalizeBybitSymbol(symbol);
 
     // Log validation attempt - critical for investigations
     logger.debug('Starting symbol validation', {
@@ -694,11 +688,10 @@ export async function validateSymbolWithPriceProvider(
       return await validateSymbolWithPriceData(priceProvider, tradingPair);
     }
 
-    let normalizedPair = tradingPair.replace('/', '').toUpperCase();
+    const normalizedPair = normalizeBybitSymbol(tradingPair);
     const baseSymbol = normalizedPair.replace(/USDT$|USDC$/, '');
     const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
-    const originalSymbol = `${baseSymbol}${quoteCurrency}`;
-    const validation = await validateBybitSymbol(bybitClient, originalSymbol, true);
+    const validation = await validateBybitSymbol(bybitClient, normalizedPair, true);
     if (validation.valid) return { valid: true };
 
     const assetVariant = getAssetVariant(baseSymbol);
@@ -739,12 +732,12 @@ async function validateSymbolWithPriceData(
     }
 
     // Bybit: ensure USDT/USDC
-    const baseSymbol = normalizedPair.replace(/USDT$|USDC$/, '');
-    const quoteCurrency = normalizedPair.endsWith('USDC') ? 'USDC' : 'USDT';
-    const originalSymbol = `${baseSymbol}${quoteCurrency}`;
+    const bybitSymbol = normalizeBybitSymbol(normalizedPair);
+    const baseSymbol = bybitSymbol.replace(/USDT$|USDC$/, '');
+    const quoteCurrency = bybitSymbol.endsWith('USDC') ? 'USDC' : 'USDT';
 
     try {
-      const price = await priceProvider.getCurrentPrice(originalSymbol);
+      const price = await priceProvider.getCurrentPrice(bybitSymbol);
       if (price && price > 0) return { valid: true };
     } catch {
       /* continue */
