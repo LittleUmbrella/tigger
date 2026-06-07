@@ -23,14 +23,6 @@ program
   .description('Evaluate Telegram channel signals against prop firm rules')
   .version('1.0.0');
 
-/** Parse "min,max" string into { minPercent, maxPercent }. Returns undefined if invalid or not provided. */
-const parsePercentRange = (value: string | undefined): { minPercent: number; maxPercent: number } | undefined => {
-  if (!value || typeof value !== 'string') return undefined;
-  const parts = value.split(',').map((s) => parseFloat(s.trim()));
-  if (parts.length !== 2 || !Number.isFinite(parts[0]) || !Number.isFinite(parts[1])) return undefined;
-  return { minPercent: parts[0], maxPercent: parts[1] };
-};
-
 const parsePercentValue = (value: string | undefined): number | undefined => {
   if (value == null || value === '') return undefined;
   const parsed = parseFloat(value);
@@ -40,10 +32,10 @@ const parsePercentValue = (value: string | undefined): number | undefined => {
 /** Build TradeObfuscationConfig from CLI options. Returns undefined if none provided. */
 const buildTradeObfuscationFromCli = (options: { obfuscationSl?: string; obfuscationEntry?: string; obfuscationTp?: string }): TradeObfuscationConfig | undefined => {
   const sl = parsePercentValue(options.obfuscationSl);
-  const entry = parsePercentRange(options.obfuscationEntry);
+  const entry = parsePercentValue(options.obfuscationEntry);
   const tp = parsePercentValue(options.obfuscationTp);
-  if (sl == null && !entry && tp == null) return undefined;
-  return { ...(sl != null && { sl }), ...(entry && { entry }), ...(tp != null && { tp }) };
+  if (sl == null && entry == null && tp == null) return undefined;
+  return { ...(sl != null && { sl }), ...(entry != null && { entry }), ...(tp != null && { tp }) };
 };
 
 // Helper function to log all options
@@ -149,7 +141,7 @@ program
   .option('--entry-timeout-minutes <n>', 'Minutes to wait for entry before cancelling trade (default: 2880 = 2 days)', '2880')
   .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
   .option('--obfuscation-sl <percent>', 'Trade obfuscation for SL: single percent toward worse SL by direction (e.g. "0.2")')
-  .option('--obfuscation-entry <min,max>', 'Trade obfuscation for entry: percent range as "min,max" (e.g. "-0.3,0.3")')
+  .option('--obfuscation-entry <percent>', 'Trade obfuscation for entry: single percent toward worse fill by direction (e.g. "0.2")')
   .option('--obfuscation-tp <percent>', 'Trade obfuscation for TP: single percent offset toward worse TP by direction (e.g. "0.2")')
   .option('--monitor-type <type>', 'Monitor/exchange type: bybit or ctrader (default: bybit)', 'bybit')
   .option('--ctrader-use-tick-data', 'Use tick data instead of M1 candles (ctrader only, more precise)', false)

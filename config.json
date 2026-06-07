@@ -341,6 +341,11 @@
       "maxMessageStalenessMinutes": 5,
       "riskPercentage": 1.4,
       "baseLeverage": 20,
+      "tradeObfuscation": {
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
+      },
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}]
     },
@@ -358,7 +363,9 @@
       "maxMessageStalenessMinutes": 5,
       "_comment": "accountFilters scopes the $100k ctrader_demo_2_100 account to this channel only (won't apply to other channels sharing the ctrader initiator). Prop firm rules live on each account (5k vs 100k) since the two accounts have different challenge sizes; account-level propFirms overrides channel-level.",
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,
@@ -387,7 +394,9 @@
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,
@@ -408,7 +417,9 @@
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
@@ -427,7 +438,9 @@
       "maxMessageStalenessMinutes": 5,
       "_comment": "accountFilters scopes the $100k ctrader_demo_2_100 account to this channel only (won't apply to other channels sharing the ctrader initiator). Prop firm rules live on each account (5k vs 100k) since the two accounts have different challenge sizes; account-level propFirms overrides channel-level.",
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true,
@@ -461,7 +474,9 @@
         }
       ],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}],
       "accountFilters": [
@@ -486,7 +501,8 @@
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "entry": 0.02
       },
       "maxSkippablePastTPs": 0,
       "useMarketRangeForEntry": true
@@ -505,7 +521,9 @@
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,
@@ -525,7 +543,9 @@
       "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
       "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
-        "tp": 0.02
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
       },
       "slAdjustmentTolerancePercent": 0.03,
       "maxSkippablePastTPs": 0,

@@ -102,7 +102,7 @@
       "minRiskReward": 2,
       "tradeObfuscation": {
         "sl": 0.5,
-        "entry": { "minPercent": -0.3, "maxPercent": 0.3 },
+        "entry": 0.3,
         "tp": 0.2
       }
     },

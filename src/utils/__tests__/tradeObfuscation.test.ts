@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { applyTradeObfuscation, resolveObfuscatedStopLossAbsolute } from '../tradeObfuscation.js';
 import type { ParsedOrder } from '../../types/order.js';
 import type { TradeObfuscationConfig } from '../../types/config.js';
@@ -58,15 +58,34 @@ describe('applyTradeObfuscation', () => {
     const result = applyTradeObfuscation(baseOrder, config);
     expect(result.stopLoss).toBeCloseTo(48755, 0); // 49000 * (1 - 0.005)
   });
-  it('applies entry obfuscation when entry config present', () => {
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
+
+  it('applies entry obfuscation toward worse fill for long trades', () => {
     const config: TradeObfuscationConfig = {
-      entry: { minPercent: -0.5, maxPercent: 0.5 },
+      entry: 0.5,
     };
     const result = applyTradeObfuscation(baseOrder, config);
-    expect(result.entryPrice).toBeCloseTo(49750, 0); // 50000 * 0.995
+    expect(result.entryPrice).toBeCloseTo(50250, 0); // 50000 * (1 + 0.005)
     expect(result.stopLoss).toBe(baseOrder.stopLoss);
-    randomSpy.mockRestore();
+  });
+
+  it('applies entry obfuscation toward worse fill for short trades', () => {
+    const shortOrder: ParsedOrder = {
+      ...baseOrder,
+      signalType: 'short',
+    };
+    const config: TradeObfuscationConfig = {
+      entry: 0.5,
+    };
+    const result = applyTradeObfuscation(shortOrder, config);
+    expect(result.entryPrice).toBeCloseTo(49750, 0); // 50000 * (1 - 0.005)
+  });
+
+  it('treats negative entry offset as absolute value', () => {
+    const config: TradeObfuscationConfig = {
+      entry: -0.5,
+    };
+    const result = applyTradeObfuscation(baseOrder, config);
+    expect(result.entryPrice).toBeCloseTo(50250, 0); // 50000 * (1 + 0.005)
   });
 
   it('applies tp obfuscation in worse direction for long trades', () => {
@@ -105,14 +124,12 @@ describe('applyTradeObfuscation', () => {
   });
 
   it('does not mutate the input order', () => {
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.5);
     const config: TradeObfuscationConfig = {
-      entry: { minPercent: 0.5, maxPercent: 0.5 },
+      entry: 0.5,
     };
     const original = { ...baseOrder };
     applyTradeObfuscation(baseOrder, config);
     expect(baseOrder).toEqual(original);
-    randomSpy.mockRestore();
   });
 
   it('handles optional entryPrice and entryTargets', () => {
@@ -121,15 +138,13 @@ describe('applyTradeObfuscation', () => {
       entryPrice: undefined,
       entryTargets: [49900, 50100],
     };
-    const randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0);
     const config: TradeObfuscationConfig = {
-      entry: { minPercent: -0.5, maxPercent: 0.5 },
+      entry: 0.5,
     };
     const result = applyTradeObfuscation(orderNoEntry, config);
     expect(result.entryPrice).toBeUndefined();
     expect(result.entryTargets).toHaveLength(2);
-    expect(result.entryTargets![0]).toBeCloseTo(49650.5, 0); // 49900 * 0.995
-    expect(result.entryTargets![1]).toBeCloseTo(49849.5, 0); // 50100 * 0.995
-    randomSpy.mockRestore();
+    expect(result.entryTargets![0]).toBeCloseTo(50149.5, 0); // 49900 * (1 + 0.005)
+    expect(result.entryTargets![1]).toBeCloseTo(50350.5, 0); // 50100 * (1 + 0.005)
   });
 });
