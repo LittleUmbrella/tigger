@@ -144,6 +144,11 @@ export interface MonitorConfig {
   ctraderSpotPriceTimeoutMs?: number;
   /** cTrader only: max retries for getCurrentPrice (default 3) */
   ctraderSpotPriceMaxRetries?: number;
+  /**
+   * cTrader only: max age in minutes before probing/re-auth on pooled account sessions (default 15).
+   * Set to 0 to disable proactive auth health checks.
+   */
+  ctraderAuthMaxAgeMinutes?: number;
   /** cTrader only: max concurrent trades to monitor per poll (default 2). Limits historical API burst to stay under 5 req/sec. */
   ctraderMonitorConcurrency?: number;
   /**

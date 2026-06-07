@@ -2671,15 +2671,24 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
     });
 
     const failedCount = results.filter(r => r.status === 'rejected').length;
+    const successfulCount = results.filter(r => r.status === 'fulfilled').length;
     logger.info('Trade initiation completed for all accounts', {
       channel,
       totalAccounts: accountsToUse.length,
-      successful: results.filter(r => r.status === 'fulfilled').length,
+      successful: successfulCount,
       failed: failedCount
     });
-    if (failedCount > 0) {
+    if (successfulCount === 0 && failedCount > 0) {
       const firstFailure = results.find(r => r.status === 'rejected') as PromiseRejectedResult;
       throw firstFailure.reason;
+    }
+    if (failedCount > 0) {
+      logger.warn('Trade initiation partially failed — some accounts succeeded', {
+        channel,
+        messageId: message.message_id,
+        successful: successfulCount,
+        failed: failedCount,
+      });
     }
   } catch (error) {
     logger.error('Error in ctraderInitiator', {

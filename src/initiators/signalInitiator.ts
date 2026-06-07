@@ -11,6 +11,7 @@ import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import { isCtraderAuthRetryableMessage } from '../utils/ctraderAuthErrors.js';
 import dayjs from 'dayjs';
 import { parseMessage } from '../parsers/signalParser.js';
 import { getParser } from '../parsers/parserRegistry.js';
@@ -40,6 +41,10 @@ import {
  * - Timeout errors
  */
 const isRetryableError = (error: unknown): boolean => {
+  if (isCtraderAuthRetryableMessage(error)) {
+    return true;
+  }
+
   const errorMessage = error instanceof Error ? error.message : String(error);
   const errorString = errorMessage.toLowerCase();
 

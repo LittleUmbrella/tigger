@@ -40,6 +40,7 @@ import '../strategies/index.js';
 import { getStrategy, getRegisteredStrategyNames } from '../strategies/strategyRegistry.js';
 import { initiateFromStrategy } from '../initiators/signalInitiator.js';
 import { verifyAllCtraderAccountsAtStartup } from '../utils/ctraderStartupAuth.js';
+import { resolveCtraderAuthMaxAgeMs } from '../utils/ctraderAuthErrors.js';
 import {
   buildChannelInitiatorScopeMap,
   isMultiInitiatorTelegramChannel,
@@ -123,6 +124,9 @@ export const startTradeOrchestrator = async (
   const ctraderSymbolMap = Object.assign({}, ...ctraderMonitors.map((m: { ctraderSymbolMap?: Record<string, string> }) => m.ctraderSymbolMap ?? {}));
   const ctraderSpotPriceTimeoutMs = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceTimeoutMs?: number }).ctraderSpotPriceTimeoutMs : undefined;
   const ctraderSpotPriceMaxRetries = ctraderMonitors[0] ? (ctraderMonitors[0] as { ctraderSpotPriceMaxRetries?: number }).ctraderSpotPriceMaxRetries : undefined;
+  const ctraderAuthMaxAgeMs = resolveCtraderAuthMaxAgeMs(
+    (ctraderMonitors[0] as MonitorConfig | undefined)?.ctraderAuthMaxAgeMinutes
+  );
   
   const createBybitClient = (accountName: string | undefined, testnet: boolean = false): RestClientV5 | undefined => {
     const key = accountName || 'default';
@@ -184,7 +188,9 @@ export const startTradeOrchestrator = async (
     const key = accountName || 'default';
     
     if (ctraderClientMap.has(key)) {
-      return ctraderClientMap.get(key);
+      const existing = ctraderClientMap.get(key);
+      existing?.startAuthHealthCheck();
+      return existing;
     }
 
     if (isSimulation) {
@@ -239,7 +245,8 @@ export const startTradeOrchestrator = async (
       environment,
       ...(Object.keys(ctraderSymbolMap).length > 0 && { symbolMap: ctraderSymbolMap }),
       ...(ctraderSpotPriceTimeoutMs != null && { spotPriceTimeoutMs: ctraderSpotPriceTimeoutMs }),
-      ...(ctraderSpotPriceMaxRetries != null && { spotPriceMaxRetries: ctraderSpotPriceMaxRetries })
+      ...(ctraderSpotPriceMaxRetries != null && { spotPriceMaxRetries: ctraderSpotPriceMaxRetries }),
+      authMaxAgeMs: ctraderAuthMaxAgeMs,
     };
 
     const client = new CTraderClient(clientConfig);
@@ -247,6 +254,7 @@ export const startTradeOrchestrator = async (
     try {
       await client.connect();
       await client.authenticate();
+      client.startAuthHealthCheck();
       ctraderClientMap.set(key, client);
       return client;
     } catch (error) {

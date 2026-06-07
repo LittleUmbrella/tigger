@@ -1,5 +1,10 @@
 import { logger } from '../utils/logger.js';
 import { serializeErrorForLog } from '../utils/errorUtils.js';
+import {
+  CTRADER_DEFAULT_AUTH_MAX_AGE_MS,
+  isCtraderAlreadyLoggedInError,
+  isCtraderAuthError,
+} from '../utils/ctraderAuthErrors.js';
 import { withCTraderRateLimitRetry } from '../utils/ctraderRateLimitRetry.js';
 import { getCtraderCachedResponse, setCtraderCachedResponse } from '../utils/bybitCache.js';
 import { CTraderConnection } from '../lib/ctrader/CTraderConnection.js';
@@ -238,6 +243,8 @@ export interface CTraderClientConfig {
   spotPriceTimeoutMs?: number;
   /** Max retries for getCurrentPrice (default 3) */
   spotPriceMaxRetries?: number;
+  /** Max age of verified account auth before probe/re-auth (default 15 min). 0 disables proactive checks. */
+  authMaxAgeMs?: number;
 }
 
 /**
@@ -264,8 +271,11 @@ export class CTraderClient {
   private static readonly SYMBOL_INFO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24h
 
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private authHealthInterval: ReturnType<typeof setInterval> | null = null;
   private static readonly HEARTBEAT_INTERVAL_MS = 25_000;
   private reconnecting: boolean = false;
+  private lastVerifiedAuthAt: number | null = null;
+  private readonly authMaxAgeMs: number;
 
   constructor(config: CTraderClientConfig) {
     this.config = {
@@ -274,6 +284,136 @@ export class CTraderClient {
       port: 5035,
       ...config
     };
+    this.authMaxAgeMs = config.authMaxAgeMs ?? CTRADER_DEFAULT_AUTH_MAX_AGE_MS;
+  }
+
+  private markAuthVerified(): void {
+    this.lastVerifiedAuthAt = Date.now();
+  }
+
+  private isAuthStale(): boolean {
+    if (this.authMaxAgeMs <= 0) return false;
+    if (this.lastVerifiedAuthAt == null) return true;
+    return Date.now() - this.lastVerifiedAuthAt > this.authMaxAgeMs;
+  }
+
+  private invalidateAccountAuth(): void {
+    this.authenticated = false;
+    this.lastVerifiedAuthAt = null;
+  }
+
+  private async probeAccountSession(): Promise<boolean> {
+    if (!this.connection || !this.config.accountId || !this.authenticated) {
+      return false;
+    }
+
+    try {
+      await this.connection.sendCommand('ProtoOATraderReq', {
+        ctidTraderAccountId: parseInt(this.config.accountId, 10),
+      });
+      this.markAuthVerified();
+      return true;
+    } catch (error) {
+      if (isCtraderAuthError(error)) {
+        logger.info('cTrader account session probe failed — auth stale', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+        });
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  private async runWithAuthRetry<T>(operation: () => Promise<T>, operationName: string): Promise<T> {
+    try {
+      await this.ensureConnected();
+      const result = await operation();
+      this.markAuthVerified();
+      return result;
+    } catch (error) {
+      if (!isCtraderAuthError(error)) {
+        throw error;
+      }
+
+      logger.warn('cTrader auth error — reconnecting and retrying once', {
+        accountId: this.config.accountId,
+        operation: operationName,
+        exchange: 'ctrader',
+        error: serializeErrorForLog(error),
+      });
+
+      this.invalidateAccountAuth();
+      await this.reconnectAndAuthenticate();
+      const result = await operation();
+      this.markAuthVerified();
+      return result;
+    }
+  }
+
+  private async reconnectAndAuthenticate(): Promise<void> {
+    if (this.reconnecting) {
+      throw new Error('cTrader reconnection already in progress');
+    }
+
+    this.reconnecting = true;
+    try {
+      logger.info('cTrader auto-reconnecting', {
+        accountId: this.config.accountId,
+        wasConnected: this.connected,
+        wasAuthenticated: this.authenticated,
+        socketAlive: this.connection?.isConnected() ?? false,
+        exchange: 'ctrader',
+      });
+
+      if (this.connection) {
+        try {
+          this.connection.close();
+        } catch {
+          /* already dead */
+        }
+        this.connection = null;
+      }
+      this.connected = false;
+      this.invalidateAccountAuth();
+
+      await this.connect();
+      await this.authenticate();
+
+      logger.info('cTrader auto-reconnect successful', {
+        accountId: this.config.accountId,
+        exchange: 'ctrader',
+      });
+    } finally {
+      this.reconnecting = false;
+    }
+  }
+
+  /** Periodic probe/re-auth for long-lived pooled clients. */
+  startAuthHealthCheck(): void {
+    this.stopAuthHealthCheck();
+    if (this.authMaxAgeMs <= 0) return;
+
+    this.authHealthInterval = setInterval(() => {
+      void this.ensureConnected().catch((error) => {
+        logger.warn('cTrader auth health check failed', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+          error: serializeErrorForLog(error),
+        });
+      });
+    }, this.authMaxAgeMs);
+
+    if (this.authHealthInterval.unref) {
+      this.authHealthInterval.unref();
+    }
+  }
+
+  stopAuthHealthCheck(): void {
+    if (this.authHealthInterval) {
+      clearInterval(this.authHealthInterval);
+      this.authHealthInterval = null;
+    }
   }
 
   /**
@@ -299,6 +439,7 @@ export class CTraderClient {
         });
         this.connected = false;
         this.authenticated = false;
+        this.lastVerifiedAuthAt = null;
         this.stopHeartbeat();
       };
 
@@ -357,12 +498,22 @@ export class CTraderClient {
         });
 
         this.authenticated = true;
+        this.markAuthVerified();
         logger.info('Trading account authenticated', {
           accountId: this.config.accountId,
           response: authResponse
         });
       }
     } catch (error) {
+      if (isCtraderAlreadyLoggedInError(error)) {
+        this.authenticated = true;
+        this.markAuthVerified();
+        logger.info('Trading account already authorized on cTrader OpenAPI', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+        });
+        return;
+      }
       logger.error('Failed to authenticate with cTrader OpenAPI', {
         error: serializeErrorForLog(error),
         errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined,
@@ -404,39 +555,26 @@ export class CTraderClient {
    * Throws if reconnection fails — callers should catch and handle gracefully.
    */
   async ensureConnected(): Promise<void> {
-    const socketAlive = this.connection?.isConnected() ?? false;
-    if (this.authenticated && socketAlive) return;
-
     if (this.reconnecting) {
       throw new Error('cTrader reconnection already in progress');
     }
-    this.reconnecting = true;
-    try {
-      logger.info('cTrader auto-reconnecting', {
-        accountId: this.config.accountId,
-        wasConnected: this.connected,
-        wasAuthenticated: this.authenticated,
-        socketAlive,
-        exchange: 'ctrader'
-      });
 
-      if (this.connection) {
-        try { this.connection.close(); } catch { /* already dead */ }
-        this.connection = null;
+    const socketAlive = this.connection?.isConnected() ?? false;
+    if (this.authenticated && socketAlive) {
+      if (!this.isAuthStale()) {
+        return;
       }
-      this.connected = false;
-      this.authenticated = false;
 
-      await this.connect();
-      await this.authenticate();
+      const probeOk = await this.probeAccountSession();
+      if (probeOk) {
+        return;
+      }
 
-      logger.info('cTrader auto-reconnect successful', {
-        accountId: this.config.accountId,
-        exchange: 'ctrader'
-      });
-    } finally {
-      this.reconnecting = false;
+      await this.reconnectAndAuthenticate();
+      return;
     }
+
+    await this.reconnectAndAuthenticate();
   }
 
   /**
@@ -470,28 +608,27 @@ export class CTraderClient {
    * Uses ProtoOATraderReq to get trader account details including balance
    */
   async getAccountInfo(): Promise<any> {
-    await this.ensureConnected();
-    if (!this.authenticated || !this.connection) {
-      throw new Error('Not authenticated with cTrader OpenAPI');
-    }
-
     if (!this.config.accountId) {
       throw new Error('Account ID is required to get account info');
     }
 
-    try {
-      const response = await this.connection.sendCommand('ProtoOATraderReq', {
-        ctidTraderAccountId: parseInt(this.config.accountId, 10)
-      });
-      // The response should contain trader account information including balance
-      return response;
-    } catch (error) {
-      logger.error('Failed to get account info', {
-        error: serializeErrorForLog(error),
-        errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined
-      });
-      throw error;
-    }
+    return this.runWithAuthRetry(async () => {
+      if (!this.authenticated || !this.connection) {
+        throw new Error('Not authenticated with cTrader OpenAPI');
+      }
+
+      try {
+        return await this.connection.sendCommand('ProtoOATraderReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        });
+      } catch (error) {
+        logger.error('Failed to get account info', {
+          error: serializeErrorForLog(error),
+          errorJson: error && typeof error === 'object' ? JSON.stringify(error, Object.getOwnPropertyNames(error)) : undefined
+        });
+        throw error;
+      }
+    }, 'getAccountInfo');
   }
 
   /**
@@ -1367,62 +1504,65 @@ export class CTraderClient {
    * Get open positions (uses ProtoOAReconcileReq; positions have tradeData.symbolId, we enrich with symbolName)
    */
   async getOpenPositions(): Promise<any[]> {
-    await this.ensureConnected();
-    if (!this.authenticated || !this.connection) {
-      throw new Error('Not authenticated with cTrader OpenAPI');
+    if (!this.config.accountId) {
+      throw new Error('Account ID is required to get open positions');
     }
 
-    try {
-      const response = await this.connection.sendCommand('ProtoOAReconcileReq', {
-        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
-      });
-
-      const positions = response?.position || [];
-      if (positions.length === 0) return positions;
-
-      // Build symbolId -> symbolName map (ProtoOAPosition has tradeData.symbolId, initiator matches by symbolName)
-      const symbolList = await this.connection.sendCommand('ProtoOASymbolsListReq', {
-        ctidTraderAccountId: parseInt(this.config.accountId!, 10)
-      });
-      const symbols = symbolList?.symbol || [];
-      const symbolIdToName = new Map<number, string>();
-      for (const s of symbols) {
-        const id = typeof s.symbolId === 'object' && s.symbolId?.low != null ? s.symbolId.low : s.symbolId;
-        if (s.symbolName != null) symbolIdToName.set(id, s.symbolName);
+    return this.runWithAuthRetry(async () => {
+      if (!this.authenticated || !this.connection) {
+        throw new Error('Not authenticated with cTrader OpenAPI');
       }
 
-      return positions.map((p: any) => {
-        const symbolId = p.tradeData?.symbolId;
-        const id = typeof symbolId === 'object' && symbolId?.low != null ? symbolId.low : symbolId;
-        const symbolName = id != null ? symbolIdToName.get(id) : undefined;
-        const volume = p.tradeData?.volume;
-        const vol = typeof volume === 'object' && volume?.low != null ? volume.low : volume;
-        const tradeSide = p.tradeData?.tradeSide;
-        // ProtoOATradeSide: BUY=1, SELL=2 (1-based enum). Do NOT use as 0-based array index.
-        const side = typeof tradeSide === 'number' ? (tradeSide === 1 ? 'BUY' : tradeSide === 2 ? 'SELL' : undefined) ?? tradeSide : tradeSide;
-        return {
-          ...p,
-          symbolName: symbolName ?? p.symbolName,
-          symbol: symbolName ?? p.symbol,
-          volume: vol ?? p.volume,
-          quantity: vol ?? p.quantity,
-          tradeSide: side ?? p.tradeSide,
-          side: side ?? p.side,
-          positionId: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
-          id: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
-          stopLoss: p.stopLoss,
-          avgPrice: p.price ?? p.avgPrice,
-          averagePrice: p.price ?? p.averagePrice
-        };
-      });
-    } catch (error) {
-      logger.error('Failed to get open positions', {
-        accountId: this.config.accountId,
-        exchange: 'ctrader',
-        error: serializeErrorForLog(error)
-      });
-      throw error;
-    }
+      try {
+        const response = await this.connection.sendCommand('ProtoOAReconcileReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        });
+
+        const positions = response?.position || [];
+        if (positions.length === 0) return positions;
+
+        const symbolList = await this.connection.sendCommand('ProtoOASymbolsListReq', {
+          ctidTraderAccountId: parseInt(this.config.accountId!, 10),
+        });
+        const symbols = symbolList?.symbol || [];
+        const symbolIdToName = new Map<number, string>();
+        for (const s of symbols) {
+          const id = typeof s.symbolId === 'object' && s.symbolId?.low != null ? s.symbolId.low : s.symbolId;
+          if (s.symbolName != null) symbolIdToName.set(id, s.symbolName);
+        }
+
+        return positions.map((p: any) => {
+          const symbolId = p.tradeData?.symbolId;
+          const id = typeof symbolId === 'object' && symbolId?.low != null ? symbolId.low : symbolId;
+          const symbolName = id != null ? symbolIdToName.get(id) : undefined;
+          const volume = p.tradeData?.volume;
+          const vol = typeof volume === 'object' && volume?.low != null ? volume.low : volume;
+          const tradeSide = p.tradeData?.tradeSide;
+          const side = typeof tradeSide === 'number' ? (tradeSide === 1 ? 'BUY' : tradeSide === 2 ? 'SELL' : undefined) ?? tradeSide : tradeSide;
+          return {
+            ...p,
+            symbolName: symbolName ?? p.symbolName,
+            symbol: symbolName ?? p.symbol,
+            volume: vol ?? p.volume,
+            quantity: vol ?? p.quantity,
+            tradeSide: side ?? p.tradeSide,
+            side: side ?? p.side,
+            positionId: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+            id: typeof p.positionId === 'object' && p.positionId?.low != null ? p.positionId.low : p.positionId,
+            stopLoss: p.stopLoss,
+            avgPrice: p.price ?? p.avgPrice,
+            averagePrice: p.price ?? p.averagePrice,
+          };
+        });
+      } catch (error) {
+        logger.error('Failed to get open positions', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+          error: serializeErrorForLog(error),
+        });
+        throw error;
+      }
+    }, 'getOpenPositions');
   }
 
   /**
@@ -2199,6 +2339,7 @@ export class CTraderClient {
    */
   async disconnect(): Promise<void> {
     this.stopHeartbeat();
+    this.stopAuthHealthCheck();
     if (this.connection) {
       try {
         this.connection.onClose = undefined;
@@ -2211,6 +2352,7 @@ export class CTraderClient {
       this.connection = null;
       this.connected = false;
       this.authenticated = false;
+      this.lastVerifiedAuthAt = null;
       this.symbolInfoCache.clear();
     }
   }
