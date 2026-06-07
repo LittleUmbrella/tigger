@@ -80,6 +80,16 @@ describe('parseTpTokens', () => {
       { kind: 'number', value: 4454 },
     ]);
   });
+
+  it('recognizes spaced TP index and price without colon (dgfvip message 15951)', () => {
+    const msg =
+      'SL4416 TP 1 4406 TP 2 4401 TP 3: 4396';
+    expect(parseTpTokens(msg)).toEqual([
+      { kind: 'number', value: 4406 },
+      { kind: 'number', value: 4401 },
+      { kind: 'number', value: 4396 },
+    ]);
+  });
 });
 
 describe('resolveTpTokensWithOpen', () => {

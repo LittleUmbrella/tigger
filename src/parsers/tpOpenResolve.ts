@@ -181,6 +181,10 @@ const normalizeTpIndexedOpenLabels = (content: string): string =>
 const normalizeSpacedTpIndexLabels = (content: string): string =>
   content.replace(/\bT[Pp]\s+(\d+)\s*:/gi, 'TP$1:');
 
+/** TP 1 4406 / TP 2 4401 — space between index and price, no colon (dgfvip message 15951). */
+const normalizeSpacedTpIndexPriceLabels = (content: string): string =>
+  content.replace(/\bT[Pp]\s+(\d+)\s+([\d.]+)/gi, 'TP$1: $2');
+
 /** T1 :4565 / T2 : 4550 (no P) → TP1: for the main TP regex. */
 const normalizeBareTTakeProfitLabels = (content: string): string =>
   content.replace(/(?<![Pp])T(\d+)\s*:/gi, 'TP$1:');
@@ -189,9 +193,11 @@ const normalizeBareTTakeProfitLabels = (content: string): string =>
 export const parseTpTokens = (content: string): TpToken[] => {
   const normalized = normalizeTpArrowAndEmDashLabels(
     normalizeTpIndexedOpenLabels(
-      normalizeSpacedTpIndexLabels(
-        normalizeBareTTakeProfitLabels(
-          normalizeTpSuperscriptLabels(normalizeMathematicalTpLabels(content)),
+      normalizeSpacedTpIndexPriceLabels(
+        normalizeSpacedTpIndexLabels(
+          normalizeBareTTakeProfitLabels(
+            normalizeTpSuperscriptLabels(normalizeMathematicalTpLabels(content)),
+          ),
         ),
       ),
     ),

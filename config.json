@@ -451,7 +451,14 @@
       "entryTimeoutMinutes": 244,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Hyrotrader Bybit leg for dgfvip (same Telegram channel as cTrader config above; shares dgfvip_harvester)",
+      "_comment": "Hyrotrader Bybit leg for dgfvip (same Telegram channel as cTrader config above; shares dgfvip_harvester). Gold is cTrader-only.",
+      "pairRules": [
+        {
+          "_comment": "Gold handled by cTrader leg only",
+          "pairs": ["XAUUSD", "XAU/USD", "XAU", "GOLD"],
+          "skip": true
+        }
+      ],
       "tradeObfuscation": {
         "tp": 0.02
       },

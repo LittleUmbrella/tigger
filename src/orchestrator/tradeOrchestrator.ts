@@ -366,6 +366,7 @@ export const startTradeOrchestrator = async (
       multiInitiator,
       allInitiatorScopes,
       createCTraderClient,
+      channelConfig.pairRules,
     );
   };
 
@@ -1211,6 +1212,7 @@ export const startTradeOrchestrator = async (
           multiInitiator,
           allInitiatorScopes,
           createCTraderClient,
+          channelConfig.pairRules,
         );
       }
     };

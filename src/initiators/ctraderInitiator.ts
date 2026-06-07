@@ -25,6 +25,7 @@ import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidati
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
 import { resolveAllowConcurrentSymbolTrades } from '../utils/allowConcurrentSymbolTrades.js';
 import { assertMinRiskReward, resolveMinRiskReward } from '../utils/minRiskReward.js';
+import { applyPairRulesToContext } from '../utils/pairRules.js';
 import {
   CTraderClient,
   CTraderClientConfig,
@@ -2619,6 +2620,17 @@ const executeTradeForAccount = async (
  */
 export const ctraderInitiator: InitiatorFunction = async (context: InitiatorContext): Promise<void> => {
   const { channel, message, order } = context;
+  const tradeContext = applyPairRulesToContext(context);
+
+  if (!tradeContext) {
+    logger.info('Skipping cTrader trade — matched pairRules skip', {
+      channel,
+      messageId: message.message_id,
+      tradingPair: order.tradingPair,
+      signalType: order.signalType,
+    });
+    return;
+  }
 
   try {
     // Get list of accounts to use
@@ -2642,7 +2654,7 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
     const results = await Promise.allSettled(
       accountsToUse.map(async (account) => {
         const accountName = account?.name || 'default';
-        await executeTradeForAccount(context, account, accountName);
+        await executeTradeForAccount(tradeContext, account, accountName);
       })
     );
 

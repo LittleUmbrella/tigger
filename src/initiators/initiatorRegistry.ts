@@ -1,4 +1,4 @@
-import { InitiatorConfig, AccountConfig, AccountFilter, TradeObfuscationConfig } from '../types/config.js';
+import { InitiatorConfig, AccountConfig, AccountFilter, PairRule, TradeObfuscationConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -52,6 +52,8 @@ export interface InitiatorContext {
   allowConcurrentSymbolTrades?: boolean;
   /** Reuse orchestrator-pooled cTrader clients (avoids connect/auth per trade). */
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>;
+  /** Channel-level per-pair rules (see `ChannelSetConfig.pairRules`). */
+  pairRules?: PairRule[];
 }
 
 /**

@@ -17,6 +17,7 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { validateTradeAgainstPropFirms } from '../utils/propFirmPreTradeValidation.js';
 import { enforceChannelMaxPortfolioRiskConfigured } from '../utils/risk.js';
 import { assertMinRiskReward, resolveMinRiskReward } from '../utils/minRiskReward.js';
+import { applyPairRulesToContext } from '../utils/pairRules.js';
 import dayjs from 'dayjs';
 
 /**
@@ -298,7 +299,7 @@ const executeTradeForAccount = async (
   account: AccountConfig | null,
   accountName: string
 ): Promise<void> => {
-  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, maxRisk, minRiskReward } = context;
+  const { channel, riskPercentage, entryTimeoutMinutes, message, order, db, isSimulation, priceProvider, config, slAdjustmentTolerancePercent, maxRisk, minRiskReward, useLimitOrderForEntry } = context;
 
   try {
     // Log trade initiation start for this account - critical for investigations
@@ -755,7 +756,9 @@ const executeTradeForAccount = async (
     // Determine if this was originally a market order (entry price missing)
     // Even though we convert it to a limit order at current price, we keep this flag
     // for TP placement logic (immediate execution vs waiting for fill)
-    const isMarketOrder = !order.entryPrice || order.entryPrice <= 0;
+    const useMarketStyleEntry = useLimitOrderForEntry === false || order.marketExecution === true;
+    const isMarketOrder =
+      useMarketStyleEntry || !order.entryPrice || order.entryPrice <= 0;
     // Convert market orders to limit orders at current price for predictable cost
     const orderType = 'Limit';
     
@@ -2414,6 +2417,17 @@ const executeTradeForAccount = async (
  */
 export const bybitInitiator: InitiatorFunction = async (context: InitiatorContext): Promise<void> => {
   const { channel, message, order } = context;
+  const tradeContext = applyPairRulesToContext(context);
+
+  if (!tradeContext) {
+    logger.info('Skipping Bybit trade — matched pairRules skip', {
+      channel,
+      messageId: message.message_id,
+      tradingPair: order.tradingPair,
+      signalType: order.signalType,
+    });
+    return;
+  }
 
   try {
     // Get list of accounts to use
@@ -2437,7 +2451,7 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
     const results = await Promise.allSettled(
       accountsToUse.map(async (account) => {
         const accountName = account?.name || 'default';
-        await executeTradeForAccount(context, account, accountName);
+        await executeTradeForAccount(tradeContext, account, accountName);
       })
     );
 

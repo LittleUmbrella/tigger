@@ -284,4 +284,15 @@ TP : 4800.00
     expect(order!.stopLoss).toBe(4715);
     expect(order!.takeProfits).toEqual([4695, 4690, 4685, 4680]);
   });
+
+  it('parses spaced TP index and price without colon (message 15951)', () => {
+    const msg =
+      '🛡XAUUSD SELL 4411 - 4416 💣 SL4416 TP 1 4406 TP 2 4401 TP 3: 4396';
+    const order = ctraderDgfVipParser(msg);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('XAUUSD');
+    expect(order!.signalType).toBe('short');
+    expect(order!.stopLoss).toBe(4416);
+    expect(order!.takeProfits).toEqual([4406, 4401, 4396]);
+  });
 });

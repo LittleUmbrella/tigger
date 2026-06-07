@@ -4,7 +4,8 @@ import {
   AccountFilter,
   CustomPropFirmConfig,
   TradeObfuscationConfig,
-  ChannelSetConfig
+  ChannelSetConfig,
+  PairRule,
 } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
@@ -193,7 +194,8 @@ export const initiateFromStrategy = async (options: {
     maxSkippablePastTPs: channelConfig.maxSkippablePastTPs,
     useMarketRangeForEntry: channelConfig.useMarketRangeForEntry,
     allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades,
-    minRiskReward: channelConfig.minRiskReward
+    minRiskReward: channelConfig.minRiskReward,
+    pairRules: channelConfig.pairRules,
   };
   try {
     logger.info('initiateFromStrategy: running initiator', {
@@ -252,6 +254,7 @@ export const processUnparsedMessages = async (
   multiInitiator?: boolean,
   allInitiatorScopes?: string[],
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
+  pairRules?: PairRule[],
 ): Promise<void> => {
   const initiatorNameForScope = initiatorConfig.name || initiatorConfig.type;
   if (!initiatorNameForScope) {
@@ -382,6 +385,7 @@ export const processUnparsedMessages = async (
     multiInitiator,
     allInitiatorScopes,
     getCTraderClient,
+    pairRules,
   );
   
   logger.debug('Finished processing messages', {
@@ -424,6 +428,7 @@ export const processMessages = async (
   multiInitiator: boolean = false,
   allInitiatorScopes?: string[],
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
+  pairRules?: PairRule[],
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -568,6 +573,7 @@ export const processMessages = async (
           allowConcurrentSymbolTrades,
           minRiskReward,
           getCTraderClient,
+          pairRules,
         };
 
         try {

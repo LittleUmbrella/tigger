@@ -178,6 +178,30 @@ export interface PercentRange {
  * `entry` uses a random percent in range; SL/TP use a single deterministic offset toward a worse price by direction (see field docs).
  * Obfuscation is applied before any rounding for exchange symbol constraints (tick size, etc.).
  */
+/** Per-pair entry overrides merged onto channel defaults when a pairRules row matches. */
+export interface PairRuleEntryOverrides {
+  /**
+   * false → market-style entry; true → limit-at-touch (cTrader) / limit-at-quote (Bybit).
+   * Channel default when omitted on the rule.
+   */
+  useLimitOrderForEntry?: boolean;
+  /** cTrader only — meaningful when useLimitOrderForEntry is false. */
+  useMarketRangeForEntry?: boolean;
+  /** cTrader only — boundary TP index for MARKET_RANGE. */
+  maxSkippablePastTPs?: number;
+}
+
+/** Per-pair rules for a channel initiator (first match wins). */
+export interface PairRule {
+  /** Pairs to match; use "*" as catch-all. Aliases normalize (XAU/USD ≡ XAUUSD). */
+  pairs: string[];
+  /** Skip this initiator for matched pairs without error (multi-initiator continues). */
+  skip?: boolean;
+  entry?: PairRuleEntryOverrides;
+  signalTypes?: ('long' | 'short')[];
+  _comment?: string;
+}
+
 export interface TradeObfuscationConfig {
   /**
    * Single percent offset moving SL toward a worse outcome for the trade (sign ignored; magnitude only):
@@ -253,6 +277,11 @@ export interface ChannelSetConfig {
    * Overrides account-level `minRiskReward` when set.
    */
   minRiskReward?: number;
+  /**
+   * Per-pair overrides for this channel initiator (skip, entry mode, etc.). First match wins;
+   * unmatched pairs use channel-level defaults.
+   */
+  pairRules?: PairRule[];
 }
 
 export interface SimulationConfig {
