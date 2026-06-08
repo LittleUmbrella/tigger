@@ -74,6 +74,19 @@ SL: H4 candle close below 0.02975
     expect(order!.leverage).toBe(20);
   });
 
+  it('parses Entry: price cmp without parens (message 1512120394390311216)', () => {
+    const content =
+      'Short: ENA/USDT (20x leverage) Entry: 0.09810 cmp DCA: 0.10512 ------------- TP ➊: 0.09190 TP ➋: 0.08715 TP ➌: 0.08030 ------------- SL: H4 candle close above 0.10825';
+    const order = cmpDcaSignalParser(content);
+    expect(order).not.toBeNull();
+    expect(order!.tradingPair).toBe('ENAUSDT');
+    expect(order!.signalType).toBe('short');
+    expect(order!.entryPrice).toBeUndefined();
+    expect(order!.takeProfits).toEqual([0.0919, 0.08715, 0.0803]);
+    expect(order!.stopLoss).toBe(0.10825);
+    expect(order!.leverage).toBe(20);
+  });
+
   it('rejects Entry: price (CMP) when TPs are order-of-magnitude typos (message 1506948389177397329)', () => {
     const content =
       'Short: PROMPT/USDT Entry: 0.03670 (CMP) DCA: 0.03900 ------------- TP ➊: 0.003510 TP ➋: 0.003290 TP ➌: 0.003044 ------------- SL: H4 candle close above 0.04044';

@@ -16,6 +16,7 @@ import { ParserOptions } from './parserRegistry.js';
  * Entry at CMP: 0.03155
  * Entry: 0.02 - 0.03 (CMP)
  * Entry: 0.03670 (CMP)
+ * Entry: 0.09810 cmp
  * Entry: 0.02 - 0.03 CMP DCA: …
  *
  * Limit format:
@@ -94,6 +95,7 @@ const parseEntry = (
   const entryRangeCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
   const entryRangeBareCmp = content.match(/Entry\s*:\s*([\d.]+)\s*-\s*([\d.]+)\s+CMP\b/i);
   const entrySingleCmp = content.match(/Entry\s*:\s*([\d.]+)\s*\(\s*CMP\s*\)/i);
+  const entrySingleBareCmp = content.match(/Entry\s*:\s*([\d.]+)\s+CMP\b/i);
 
   let cmpRef: number;
   if (entryAtCmp) {
@@ -110,6 +112,8 @@ const parseEntry = (
     cmpRef = (lo + hi) / 2;
   } else if (entrySingleCmp) {
     cmpRef = parseFloat(entrySingleCmp[1]);
+  } else if (entrySingleBareCmp) {
+    cmpRef = parseFloat(entrySingleBareCmp[1]);
   } else {
     return null;
   }
