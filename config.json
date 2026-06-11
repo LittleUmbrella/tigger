@@ -440,35 +440,6 @@
       "channel": "2845421508",
       "harvester": "dgfvip_harvester",
       "parser": "dgfvip",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 1,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
-      "tradeObfuscation": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true,
-      "allowConcurrentSymbolTrades": true,
-      "minRiskReward": 0.1,
-      "accountFilters": [
-        {
-          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
-          "rules": {}
-        }
-      ]
-    },
-    {
-      "channel": "2845421508",
-      "harvester": "dgfvip_harvester",
-      "parser": "dgfvip",
       "initiator": "bybit",
       "monitor": "bybit",
       "useLimitOrderForBreakeven": true,
