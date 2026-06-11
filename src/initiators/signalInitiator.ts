@@ -25,6 +25,7 @@ import {
   initiatorLockScope,
   maybeMarkMessageFullyProcessed,
 } from '../utils/multiInitiatorChannel.js';
+import { parseManagementCommand } from '../managers/managementParser.js';
 
 /**
  * Determine if an error is retryable (should not mark message as parsed)
@@ -468,6 +469,18 @@ export const processMessages = async (
     };
 
     try {
+      const managementCommand = await parseManagementCommand(message.content, undefined, message, db);
+      if (managementCommand) {
+        logger.info('Skipping trade initiation - management command deferred to management processor', {
+          channel,
+          messageId: message.message_id,
+          commandType: managementCommand.type,
+          parserName: parserName || 'default',
+          initiatorName: resolvedInitiatorName,
+        });
+        return;
+      }
+
       // Log message processing start - critical for tracing flow in Loggly
       logger.info('Processing message for trade initiation', {
         channel,

@@ -133,6 +133,36 @@ describe('Signal Initiator Integration Tests', () => {
     expect(mockDb.markMessageParsed).toHaveBeenCalled();
   });
 
+  it('should not mark management commands as parsed in the initiator', async () => {
+    (parseMessage as any).mockReturnValue(null);
+
+    const managementMessage = {
+      ...mockMessage,
+      message_id: 'mgmt-1',
+      content: 'Scalpers can secure half and set BE',
+    };
+
+    const initiatorConfig: InitiatorConfig = {
+      name: 'bybit',
+      riskPercentage: 3,
+      testnet: false,
+    };
+
+    await processMessages(
+      [managementMessage],
+      initiatorConfig,
+      managementMessage.channel,
+      2,
+      mockDb,
+      true,
+      mockPriceProvider,
+      'default'
+    );
+
+    expect(mockDb.insertTrade).not.toHaveBeenCalled();
+    expect(mockDb.markMessageParsed).not.toHaveBeenCalled();
+  });
+
   it('should process messages in chronological order in simulation mode', async () => {
     // Add multiple messages with different timestamps
     const message1 = {

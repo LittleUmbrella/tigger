@@ -386,6 +386,35 @@ export const startTradeOrchestrator = async (
     }
 
     const parser = parserMap.get(channelConfigs[0].parser!);
+
+    // Match parser-interval ordering: management and edits before signal parse/initiator.
+    // Push-harvested messages only run this wake path (not the parser interval first).
+    await Promise.all(
+      channelConfigs.map(async (channelConfig) => {
+        try {
+          await processManagementMessages(channelConfig);
+        } catch (error) {
+          logger.error('Manager error on channel wake', {
+            channel: channelConfig.channel,
+            initiator: channelConfig.initiator,
+            error: serializeErrorForLog(error),
+          });
+        }
+
+        if (parser) {
+          try {
+            await processEditedMessages(channelConfig, parser.name);
+          } catch (error) {
+            logger.error('Edited message processing error on channel wake', {
+              channel: channelConfig.channel,
+              initiator: channelConfig.initiator,
+              error: serializeErrorForLog(error),
+            });
+          }
+        }
+      }),
+    );
+
     if (parser) {
       try {
         await parseUnparsedMessages(parser, db, channelConfigs[0].maxMessageStalenessMinutes);
