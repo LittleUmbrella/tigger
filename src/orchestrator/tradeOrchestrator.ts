@@ -34,6 +34,7 @@ import { ctraderDgfVipParser } from '../parsers/ctraderDgfVipParser.js';
 import { ctraderFtgParser } from '../parsers/ctraderFtgParser.js';
 import { ctraderVgcParser } from '../parsers/ctraderVgcParser.js';
 import { ctraderKlhParser } from '../parsers/ctraderKlhParser.js';
+import { ctraderVpgParser } from '../parsers/ctraderVpgParser.js';
 import { stevenParser } from '../parsers/stevenParser.js';
 import { fxcmChartParser } from '../parsers/fxcmChartParser.js';
 import '../strategies/index.js';
@@ -62,6 +63,7 @@ registerParser('dgfvip', ctraderDgfVipParser);
 registerParser('ctrader_ftg', ctraderFtgParser);
 registerParser('ctrader_vgc', ctraderVgcParser);
 registerParser('ctrader_klh', ctraderKlhParser);
+registerParser('ctrader_vpg', ctraderVpgParser);
 registerParser('steven', stevenParser);
 registerParser('fxcm_chart', fxcmChartParser);
 
