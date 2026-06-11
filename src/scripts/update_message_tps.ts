@@ -298,7 +298,7 @@ const syncBybitTakeProfits = async (
     await withBybitRateLimitRetry(() => bybitClient.setTradingStop(tradingStopParams));
     console.log(`    Set position best TP to ${bestTpPrice}`);
   } catch (error) {
-    console.warn(`    Failed to set position best TP: ${serializeErrorForLog(error).error}`);
+    console.warn(`    Failed to set position best TP: ${serializeErrorForLog(error)}`);
   }
 
   for (const tpOrder of validTPOrders) {
@@ -335,7 +335,7 @@ const syncBybitTakeProfits = async (
         console.warn(`    Failed to place Bybit TP #${tpOrder.index}: ${JSON.stringify(response)}`);
       }
     } catch (error) {
-      console.warn(`    Error placing Bybit TP #${tpOrder.index}: ${serializeErrorForLog(error).error}`);
+      console.warn(`    Error placing Bybit TP #${tpOrder.index}: ${serializeErrorForLog(error)}`);
     }
   }
 };
@@ -411,7 +411,7 @@ const syncCtraderLegTakeProfit = async (
     });
     console.log(`    Placed cTrader TP @ ${tpPrice} (orderId=${tpOrderId})`);
   } catch (error) {
-    console.warn(`    Failed to place cTrader TP: ${serializeErrorForLog(error).error}`);
+    console.warn(`    Failed to place cTrader TP: ${serializeErrorForLog(error)}`);
   }
 };
 
@@ -469,7 +469,7 @@ const syncCtraderMultiTpTakeProfits = async (
       });
       console.log(`    Placed cTrader TP #${i + 1} @ ${tpPrice} (orderId=${tpOrderId})`);
     } catch (error) {
-      console.warn(`    Failed to place cTrader TP #${i + 1}: ${serializeErrorForLog(error).error}`);
+      console.warn(`    Failed to place cTrader TP #${i + 1}: ${serializeErrorForLog(error)}`);
     }
   }
 };
