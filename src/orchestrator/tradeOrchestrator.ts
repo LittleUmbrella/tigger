@@ -360,7 +360,6 @@ export const startTradeOrchestrator = async (
       channelConfig.riskPercentage,
       channelConfig.maxMessageStalenessMinutes,
       channelConfig.accountFilters,
-      channelConfig.propFirms,
       channelConfig.tradeObfuscation,
       channelConfig.slAdjustmentTolerancePercent,
       channelConfig.useLimitOrderForEntry,
@@ -1206,7 +1205,6 @@ export const startTradeOrchestrator = async (
           channelConfig.riskPercentage, // Pass channel-specific risk percentage (overrides initiator)
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
-          channelConfig.propFirms, // Pass prop firm configurations
           channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
           channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)

@@ -71,19 +71,25 @@ const resolveInitiatorConfig = (botConfig: BotConfig, channelConfig: ChannelSetC
     (i) => i.name === channelConfig.initiator || i.type === channelConfig.initiator
   );
 
-/** Prop firms + initial balance from channel row or first accountFilter account. */
+/** Prop firms + initial balance from the channel's primary trading account. */
 export const resolvePropFirmsFromChannel = (
   botConfig: BotConfig,
   channelConfig: ChannelSetConfig
 ): { propFirms?: (string | CustomPropFirmConfig)[]; initialBalance?: number } => {
-  if (channelConfig.propFirms?.length) {
-    const first = channelConfig.propFirms[0];
-    const initialBalance =
-      typeof first === 'object' && first.initialBalance != null ? first.initialBalance : undefined;
-    return { propFirms: channelConfig.propFirms, initialBalance };
+  const filterAccounts = channelConfig.accountFilters?.[0]?.accounts;
+  let accountName: string | undefined;
+  if (filterAccounts) {
+    accountName = Array.isArray(filterAccounts) ? filterAccounts[0] : filterAccounts;
+  } else {
+    const initiator = botConfig.initiators?.find(
+      (i) => i.name === channelConfig.initiator || i.type === channelConfig.initiator
+    );
+    if (initiator?.accounts) {
+      const names = Array.isArray(initiator.accounts) ? initiator.accounts : [initiator.accounts];
+      accountName = names[0];
+    }
   }
 
-  const accountName = channelConfig.accountFilters?.[0]?.accounts?.[0];
   if (!accountName || !botConfig.accounts?.length) {
     return {};
   }

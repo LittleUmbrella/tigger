@@ -251,13 +251,14 @@
         "apiKey": "BYBIT_DEMO_API_KEY_HYROTRADER_CHALLENGE1",
         "apiSecret": "BYBIT_DEMO_API_SECRET_HYROTRADER_CHALLENGE1"
       },
-      "minRiskReward": 1.11
+      "minRiskReward": 1.11,
+      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
     },
     {
       "name": "ctrader_live_5",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader funded account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials. Per-account propFirms overrides channel-level config so this $5k account can share channels with the $100k account.",
+      "_comment": "cTrader funded account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -265,13 +266,13 @@
         "accountId": "CTRADER_ACCOUNT_ID"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 5000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
     },
     {
       "name": "ctrader_demo_2_100",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_live_5; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
+      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -279,13 +280,13 @@
         "accountId": "CTRADER_ACCOUNT_ID_2_100"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 100000}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 100000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
     },
     {
       "name": "ctrader_demo_2_25",
       "exchange": "ctrader",
       "demo": false,
-      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_live_5; accountId env var differs and propFirms initialBalance is set to 100k for correct drawdown math.",
+      "_comment": "cTrader $25k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
       "envVarNames": {
         "apiKey": "CTRADER_CLIENT_ID",
         "apiSecret": "CTRADER_CLIENT_SECRET",
@@ -293,7 +294,7 @@
         "accountId": "CTRADER_ACCOUNT_ID_2_25"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 25000}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 25000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
     }
   ],
   "initiators": [
@@ -346,8 +347,7 @@
         "sl": 0.02,
         "entry": 0.02
       },
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}]
+      "_comment": "Prop firm rules are on the trading account (hyrotrader_challenge1), not the channel"
     },
     {
       "channel": "3469900302",
@@ -361,7 +361,7 @@
       "entryTimeoutMinutes": 3000,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "accountFilters scopes the $100k ctrader_demo_2_100 account to this channel only (won't apply to other channels sharing the ctrader initiator). Prop firm rules live on each account (5k vs 100k) since the two accounts have different challenge sizes; account-level propFirms overrides channel-level.",
+      "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
@@ -391,8 +391,6 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
@@ -414,8 +412,6 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
@@ -436,7 +432,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "accountFilters scopes the $100k ctrader_demo_2_100 account to this channel only (won't apply to other channels sharing the ctrader initiator). Prop firm rules live on each account (5k vs 100k) since the two accounts have different challenge sizes; account-level propFirms overrides channel-level.",
+      "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
@@ -478,7 +474,6 @@
         "sl": 0.02,
         "entry": 0.02
       },
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "dailyDrawdownMode": "swing"}],
       "accountFilters": [
         {
           "accounts": ["hyrotrader_challenge1"],
@@ -498,8 +493,6 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02,
         "entry": 0.02
@@ -518,8 +511,6 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
@@ -540,8 +531,6 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "_comment": "Prop firm validation: trades will be blocked if total loss would violate prop firm rules",
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000}],
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,

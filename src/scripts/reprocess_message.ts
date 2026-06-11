@@ -221,7 +221,6 @@ program
         wrappedInitiator,
         initiatorName,
         channelConfig.accountFilters,
-        channelConfig.propFirms,
         channelConfig.tradeObfuscation,
         channelConfig.slAdjustmentTolerancePercent,
         channelConfig.useLimitOrderForEntry,

@@ -77,37 +77,25 @@ export interface CTraderInitiatorConfig {
 const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] => {
   const { accounts, accountFilters, config, order } = context;
   
-  // Check account filters first
   if (accountFilters && accountFilters.length > 0 && accounts) {
     for (const filter of accountFilters) {
       const rule = filter.rules;
       let matches = true;
       
-      // Check trading pair match
       if (rule.tradingPairs && rule.tradingPairs.length > 0) {
         const normalizedTradingPair = order.tradingPair.toUpperCase();
         const matchesTradingPair = rule.tradingPairs.some(tp => {
           const normalizedTp = tp.toUpperCase().replace('/', '');
           return normalizedTradingPair.includes(normalizedTp) || normalizedTp.includes(normalizedTradingPair.replace('/', ''));
         });
-        if (!matchesTradingPair) {
-          matches = false;
-        }
+        if (!matchesTradingPair) matches = false;
       }
       
-      // Check leverage range
-      if (rule.minLeverage !== undefined && order.leverage < rule.minLeverage) {
-        matches = false;
-      }
-      if (rule.maxLeverage !== undefined && order.leverage > rule.maxLeverage) {
-        matches = false;
-      }
+      if (rule.minLeverage !== undefined && order.leverage < rule.minLeverage) matches = false;
+      if (rule.maxLeverage !== undefined && order.leverage > rule.maxLeverage) matches = false;
       
-      // Check signal type
       if (rule.signalTypes && rule.signalTypes.length > 0) {
-        if (!rule.signalTypes.includes(order.signalType)) {
-          matches = false;
-        }
+        if (!rule.signalTypes.includes(order.signalType)) matches = false;
       }
       
       if (matches) {
@@ -131,7 +119,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
     }
   }
   
-  // Fallback: use initiator-level accounts configuration
   if (accounts && config.accounts) {
     const accountNames = Array.isArray(config.accounts) ? config.accounts : [config.accounts];
     const accountMap = new Map(accounts.map(acc => [acc.name, acc]));
@@ -144,7 +131,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
     }
   }
   
-  // Final fallback: use default account (null means use env vars)
   return [null];
 };
 
@@ -900,9 +886,7 @@ const executeTradeForAccount = async (
 
     const maxRiskEnabled =
       maxRisk !== undefined && maxRisk !== null && maxRisk >= 0;
-    // Per-account propFirms (when present on AccountConfig) override the channel-level config.
-    // Necessary when accounts of different challenge sizes share a channel.
-    const effectivePropFirms = account?.propFirms ?? context.propFirms;
+    const effectivePropFirms = account?.propFirms;
     const propFirmEnabled = !!(effectivePropFirms && effectivePropFirms.length > 0 && !isSimulation);
 
     let openWorstCaseLoss = 0;
@@ -2650,7 +2634,6 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
       accounts: accountsToUse.map(acc => acc?.name || 'default')
     });
 
-    // Execute trade for each account
     const results = await Promise.allSettled(
       accountsToUse.map(async (account) => {
         const accountName = account?.name || 'default';
@@ -2658,7 +2641,6 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
       })
     );
 
-    // Log any failures
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         const accountName = accountsToUse[index]?.name || 'default';

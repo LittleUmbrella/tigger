@@ -44,7 +44,6 @@ const botConfig = {
       parser: 'dgfvip',
       initiator: 'bybit',
       monitor: 'bybit',
-      propFirms: [{ name: 'hyrotrader', initialBalance: 50000 }],
     },
   ],
 } as BotConfig;
@@ -61,6 +60,31 @@ describe('channelEvalConfig', () => {
     const resolved = resolvePropFirmsFromChannel(botConfig, row);
     expect(resolved.propFirms).toEqual([{ name: 'the5ers', initialBalance: 5000 }]);
     expect(resolved.initialBalance).toBe(5000);
+  });
+
+  it('resolves prop firms from initiator default account when no accountFilters', () => {
+    const cfg = {
+      ...botConfig,
+      accounts: [
+        {
+          name: 'hyro_main',
+          exchange: 'bybit',
+          propFirms: [{ name: 'hyrotrader', initialBalance: 50000 }],
+        },
+      ],
+      initiators: [{ name: 'bybit', riskPercentage: 1, accounts: ['hyro_main'] }],
+      channels: [
+        {
+          channel: '999',
+          parser: 'p',
+          initiator: 'bybit',
+          monitor: 'bybit',
+        },
+      ],
+    } as BotConfig;
+    const row = cfg.channels[0];
+    const resolved = resolvePropFirmsFromChannel(cfg, row);
+    expect(resolved.initialBalance).toBe(50000);
   });
 
   it('builds evaluation config mirroring channel settings', () => {

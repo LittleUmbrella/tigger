@@ -96,7 +96,6 @@ describe('Signal Initiator Integration Tests', () => {
       undefined,
       undefined,
       undefined,
-      undefined,
       'average'
     );
 

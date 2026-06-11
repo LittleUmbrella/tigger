@@ -208,7 +208,6 @@ export async function runEvaluation(
     undefined, // channelRiskPercentage (not used in evaluation mode, use initiatorConfig.riskPercentage instead)
     undefined, // maxStalenessMinutes (evaluation processes all messages by date filter)
     undefined, // accountFilters (not used in evaluation mode)
-    undefined, // propFirms (evaluation validates prop firms after simulation)
     config.tradeObfuscation,
     config.slAdjustmentTolerancePercent,
     config.useLimitOrderForEntry,
@@ -433,7 +432,10 @@ export async function runEvaluation(
       if (propFirmConfig.displayName !== undefined)    overrides.displayName = propFirmConfig.displayName;
       if (propFirmConfig.profitTarget !== undefined)    overrides.profitTarget = propFirmConfig.profitTarget;
       if (propFirmConfig.maxDrawdown !== undefined)     overrides.maxDrawdown = propFirmConfig.maxDrawdown;
+      if (propFirmConfig.maxDrawdownMode !== undefined) overrides.maxDrawdownMode = propFirmConfig.maxDrawdownMode;
+      if (propFirmConfig.maxDrawdownBasis !== undefined) overrides.maxDrawdownBasis = propFirmConfig.maxDrawdownBasis;
       if (propFirmConfig.dailyDrawdown !== undefined)   overrides.dailyDrawdown = propFirmConfig.dailyDrawdown;
+      if (propFirmConfig.dailyDrawdownMode !== undefined) overrides.dailyDrawdownMode = propFirmConfig.dailyDrawdownMode;
       if (propFirmConfig.minTradingDays !== undefined)   overrides.minTradingDays = propFirmConfig.minTradingDays;
       if (propFirmConfig.minTradesPerDay !== undefined)  overrides.minTradesPerDay = propFirmConfig.minTradesPerDay;
       if (propFirmConfig.maxRiskPerTrade !== undefined)  overrides.maxRiskPerTrade = propFirmConfig.maxRiskPerTrade;

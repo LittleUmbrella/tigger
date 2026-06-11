@@ -1,4 +1,9 @@
-import { PropFirmRule, getPropFirmRule, createCustomPropFirmRule } from '../evaluation/propFirmRules.js';
+import {
+  PropFirmRule,
+  getPropFirmRule,
+  createCustomPropFirmRule,
+  resolveMaxDrawdownPercentageBasis,
+} from '../evaluation/propFirmRules.js';
 import { DatabaseManager } from '../db/schema.js';
 import { CustomPropFirmConfig } from '../types/config.js';
 import { logger } from './logger.js';
@@ -39,7 +44,7 @@ function resolveChallengeInitialBalance(
  * Check if a trade would violate prop firm rules if it resulted in total loss
  *
  * @param currentBalanceFromExchange - When provided (live trading), use as source of truth for current balance.
- *   Prop firm drawdown % is always calculated against the challenge initial balance (e.g. $10k), not current balance.
+ *   Max drawdown % uses `maxDrawdownBasis` (initial vs peak balance); daily limits still use challenge initial unless mode says otherwise.
  * @param quantity - Size in **base units** for P&L: Bybit linear = coin qty; cTrader = units per
  *   `calculatePotentialLoss` (e.g. oz for gold) = **lots × (lotSize/100)**, not raw API lots.
  * @param settlementAccountName - When set (e.g. Bybit `account_name` / cTrader account), use **all** completed trades
@@ -89,6 +94,7 @@ export async function validateTradeAgainstPropFirms(
       if (propFirmConfig.profitTarget !== undefined)    overrides.profitTarget = propFirmConfig.profitTarget;
       if (propFirmConfig.maxDrawdown !== undefined)     overrides.maxDrawdown = propFirmConfig.maxDrawdown;
       if (propFirmConfig.maxDrawdownMode !== undefined) overrides.maxDrawdownMode = propFirmConfig.maxDrawdownMode;
+      if (propFirmConfig.maxDrawdownBasis !== undefined) overrides.maxDrawdownBasis = propFirmConfig.maxDrawdownBasis;
       if (propFirmConfig.dailyDrawdown !== undefined)   overrides.dailyDrawdown = propFirmConfig.dailyDrawdown;
       if (propFirmConfig.dailyDrawdownMode !== undefined) overrides.dailyDrawdownMode = propFirmConfig.dailyDrawdownMode;
       if (propFirmConfig.minTradingDays !== undefined)   overrides.minTradingDays = propFirmConfig.minTradingDays;
@@ -151,23 +157,25 @@ export async function validateTradeAgainstPropFirms(
     const simulatedBalance = currentBalance - totalWorstCaseLoss;
     const simulatedPeakBalance = Math.max(peakFromTrades, currentBalance);
 
-    // Check maxDrawdown rule (drawdown % is vs challenge initial balance, e.g. $10k)
+    // Check maxDrawdown rule (% denominator is configurable: initial vs peak balance)
     if (rule.maxDrawdown !== undefined) {
       const maxDrawdownMode = rule.maxDrawdownMode ?? 'trailing';
       const drawdown = maxDrawdownMode === 'static'
         ? Math.max(0, rule.initialBalance - simulatedBalance)
         : simulatedPeakBalance - simulatedBalance;
-      const drawdownPercentage = (drawdown / rule.initialBalance) * 100;
+      const drawdownBasis = resolveMaxDrawdownPercentageBasis(rule, simulatedPeakBalance);
+      const drawdownPercentage = (drawdown / drawdownBasis) * 100;
+      const basisLabel = rule.maxDrawdownBasis ?? 'initialBalance';
 
       if (drawdownPercentage > rule.maxDrawdown) {
         if (maxDrawdownMode === 'static') {
           const staticFloor = rule.initialBalance * (1 - rule.maxDrawdown / 100);
           violations.push(
-            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: static, floor: ${staticFloor.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: static, basis: ${basisLabel}, floor: ${staticFloor.toFixed(2)}, challenge initial: ${rule.initialBalance}, peak equity: ${simulatedPeakBalance.toFixed(2)}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
           );
         } else {
           violations.push(
-            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: trailing, peak equity: ${simulatedPeakBalance.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
+            `Trade would cause maximum drawdown violation: ${drawdownPercentage.toFixed(2)}% > ${rule.maxDrawdown}% (mode: trailing, basis: ${basisLabel}, peak equity: ${simulatedPeakBalance.toFixed(2)}, challenge initial: ${rule.initialBalance}, current balance: ${currentBalance.toFixed(2)}, simulated balance: ${simulatedBalance.toFixed(2)})`
           );
         }
       }

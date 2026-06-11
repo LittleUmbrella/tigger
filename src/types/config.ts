@@ -89,9 +89,8 @@ export interface AccountConfig {
     apiSecret?: string;
   };
   /**
-   * Optional per-account prop firm rules. When set, overrides the channel-level `propFirms`
-   * for trades on this account. Use when accounts of different challenge sizes share a
-   * channel (e.g. one $5k and one $100k account on the same signal source).
+   * Prop firm rules for this trading account (drawdown limits, risk per trade, etc.).
+   * Prop rules apply per account, not per channel — channels only route signals to accounts.
    */
   propFirms?: (string | CustomPropFirmConfig)[];
   /**
@@ -261,7 +260,6 @@ export interface ChannelSetConfig {
    * When false, cTrader places native MARKET orders; other initiators may ignore or reserve this (see initiator implementation).
    */
   useLimitOrderForEntry?: boolean;
-  propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   tradeObfuscation?: TradeObfuscationConfig; // Obfuscate entry/SL/TP (worse-direction %) to deter copy detection
   /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */
   slAdjustmentTolerancePercent?: number;
@@ -329,6 +327,7 @@ export interface CustomPropFirmConfig {
   profitTarget?: number;
   maxDrawdown?: number;
   maxDrawdownMode?: 'trailing' | 'static';
+  maxDrawdownBasis?: 'initialBalance' | 'peakBalance';
   dailyDrawdown?: number;
   dailyDrawdownMode?: 'dayStartPercent' | 'swing' | 'trailing';
   minTradingDays?: number;

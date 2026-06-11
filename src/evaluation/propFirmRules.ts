@@ -23,6 +23,12 @@ export interface PropFirmRule {
    * - 'static': fixed floor from initial balance (initial - maxDrawdown%)
    */
   maxDrawdownMode?: 'trailing' | 'static';
+  /**
+   * Denominator for max drawdown percentage.
+   * - 'initialBalance' (default): % of starting/challenge balance
+   * - 'peakBalance': % of high-water-mark equity at the time of measurement
+   */
+  maxDrawdownBasis?: 'initialBalance' | 'peakBalance';
   dailyDrawdown?: number; // Daily drawdown limit percentage (e.g., 5 = 5% of initial balance)
   /**
    * Daily drawdown calculation mode.
@@ -121,6 +127,20 @@ export const PROP_FIRM_RULES: Record<string, PropFirmRule> = {
     minTradesPerDay: 1, // At least 1 position closed per day with P&L > 0.25% of day start capital
   },
 };
+
+/**
+ * Balance used as the denominator when converting max drawdown $ to %.
+ */
+export function resolveMaxDrawdownPercentageBasis(
+  rule: Pick<PropFirmRule, 'initialBalance' | 'maxDrawdownBasis'>,
+  peakBalance: number
+): number {
+  const basis = rule.maxDrawdownBasis ?? 'initialBalance';
+  if (basis === 'peakBalance') {
+    return Math.max(peakBalance, rule.initialBalance);
+  }
+  return rule.initialBalance;
+}
 
 /**
  * Get a prop firm rule configuration

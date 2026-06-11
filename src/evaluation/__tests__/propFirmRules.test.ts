@@ -3,6 +3,7 @@ import {
   PROP_FIRM_RULES,
   createCustomPropFirmRule,
   getPropFirmRule,
+  resolveMaxDrawdownPercentageBasis,
 } from '../propFirmRules.js';
 
 describe('getPropFirmRule', () => {
@@ -22,6 +23,26 @@ describe('getPropFirmRule', () => {
     const rule = getPropFirmRule('mubite', { initialBalance: 50000 });
     expect(rule!.initialBalance).toBe(50000);
     expect(PROP_FIRM_RULES['mubite'].initialBalance).toBe(base);
+  });
+});
+
+describe('resolveMaxDrawdownPercentageBasis', () => {
+  const rule = { initialBalance: 10000 };
+
+  it('defaults to initial balance', () => {
+    expect(resolveMaxDrawdownPercentageBasis(rule, 12000)).toBe(10000);
+  });
+
+  it('uses peak balance when configured', () => {
+    expect(
+      resolveMaxDrawdownPercentageBasis({ ...rule, maxDrawdownBasis: 'peakBalance' }, 12000)
+    ).toBe(12000);
+  });
+
+  it('never uses a peak below initial balance', () => {
+    expect(
+      resolveMaxDrawdownPercentageBasis({ ...rule, maxDrawdownBasis: 'peakBalance' }, 9500)
+    ).toBe(10000);
   });
 });
 

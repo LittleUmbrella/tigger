@@ -1,4 +1,4 @@
-import { PropFirmRule } from './propFirmRules.js';
+import { PropFirmRule, resolveMaxDrawdownPercentageBasis } from './propFirmRules.js';
 import { Trade, Order, DatabaseManager } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
 import dayjs from 'dayjs';
@@ -110,7 +110,8 @@ function evaluateMaxDrawdown(rule: PropFirmRule, accountState: AccountState): vo
       }
       // Calculate drawdown from current peak
       const drawdown = peakBalance - runningBalance;
-      const drawdownPercentage = (drawdown / accountState.initialBalance) * 100;
+      const drawdownPercentage =
+        (drawdown / resolveMaxDrawdownPercentageBasis(rule, peakBalance)) * 100;
       if (drawdown > maxDrawdown) {
         maxDrawdown = drawdown;
         maxDrawdownPercentage = drawdownPercentage;
@@ -121,7 +122,8 @@ function evaluateMaxDrawdown(rule: PropFirmRule, accountState: AccountState): vo
   // Also check current balance if there are open trades
   if (accountState.currentBalance < peakBalance) {
     const currentDrawdown = peakBalance - accountState.currentBalance;
-    const currentDrawdownPercentage = (currentDrawdown / accountState.initialBalance) * 100;
+    const currentDrawdownPercentage =
+      (currentDrawdown / resolveMaxDrawdownPercentageBasis(rule, peakBalance)) * 100;
     if (currentDrawdown > maxDrawdown) {
       maxDrawdown = currentDrawdown;
       maxDrawdownPercentage = currentDrawdownPercentage;
@@ -483,7 +485,7 @@ function evaluateReverseTrading(rule: PropFirmRule, accountState: AccountState):
   }
 }
 
-function calculateMetrics(accountState: AccountState): EvaluationResult['metrics'] {
+function calculateMetrics(rule: PropFirmRule, accountState: AccountState): EvaluationResult['metrics'] {
   const totalPnL = accountState.currentBalance - accountState.initialBalance;
   const totalPnLPercentage = (totalPnL / accountState.initialBalance) * 100;
 
@@ -504,7 +506,8 @@ function calculateMetrics(accountState: AccountState): EvaluationResult['metrics
         peakBalance = runningBalance;
       }
       const drawdown = peakBalance - runningBalance;
-      const drawdownPercentage = (drawdown / accountState.initialBalance) * 100;
+      const drawdownPercentage =
+        (drawdown / resolveMaxDrawdownPercentageBasis(rule, peakBalance)) * 100;
       if (drawdown > maxDrawdown) {
         maxDrawdown = drawdown;
         maxDrawdownPercentage = drawdownPercentage;
@@ -658,7 +661,7 @@ export function createPropFirmEvaluator(rule: PropFirmRule, db: DatabaseManager)
       evaluateReverseTrading(rule, accountState);
 
       // Calculate metrics
-      const metrics = calculateMetrics(accountState);
+      const metrics = calculateMetrics(rule, accountState);
 
       // Determine if passed (no error-level violations)
       const hasErrors = accountState.violations.some(v => v.severity === 'error');

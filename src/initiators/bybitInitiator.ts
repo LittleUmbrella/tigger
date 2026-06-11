@@ -217,11 +217,9 @@ const matchesFilterRule = (order: ParsedOrder, rule: { tradingPairs?: string[]; 
 const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] => {
   const { config, accounts, accountFilters, order } = context;
   
-  // First, check if accountFilters are provided (channel-level signal-based filtering)
   if (accountFilters && accountFilters.length > 0 && accounts) {
     const accountMap = new Map(accounts.map(acc => [acc.name, acc]));
     
-    // Evaluate filters in order - first match wins
     for (const filter of accountFilters) {
       if (matchesFilterRule(order, filter.rules)) {
         const accountNames = Array.isArray(filter.accounts) ? filter.accounts : [filter.accounts];
@@ -253,7 +251,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
       }
     }
     
-    // No filters matched - log and fall through to initiator-level accounts
     logger.debug('No account filters matched, falling back to initiator accounts', {
       tradingPair: order.tradingPair,
       leverage: order.leverage,
@@ -261,7 +258,6 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
     });
   }
   
-  // Fallback: use initiator-level accounts configuration
   if (accounts && config.accounts) {
     const accountNames = Array.isArray(config.accounts) ? config.accounts : [config.accounts];
     const accountMap = new Map(accounts.map(acc => [acc.name, acc]));
@@ -284,10 +280,7 @@ const getAccountsToUse = (context: InitiatorContext): (AccountConfig | null)[] =
     }
   }
   
-  // Final fallback: use default account (null means use env vars)
-  // For backward compatibility, if testnet is set in config, preserve it
-  // We'll pass it to getAccountCredentials when account is null
-  return [null]; // null means use environment variables
+  return [null];
 };
 
 
@@ -772,9 +765,7 @@ const executeTradeForAccount = async (
 
     const maxRiskEnabled =
       maxRisk !== undefined && maxRisk !== null && maxRisk >= 0;
-    // Per-account propFirms (when present on AccountConfig) override the channel-level config.
-    // Necessary when accounts of different challenge sizes share a channel.
-    const effectivePropFirms = account?.propFirms ?? context.propFirms;
+    const effectivePropFirms = account?.propFirms;
     const propFirmEnabled = !!(effectivePropFirms && effectivePropFirms.length > 0 && !isSimulation);
 
     let openWorstCaseLoss = 0;
@@ -2447,7 +2438,6 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
       accounts: accountsToUse.map(acc => acc?.name || 'default')
     });
 
-    // Execute trade for each account
     const results = await Promise.allSettled(
       accountsToUse.map(async (account) => {
         const accountName = account?.name || 'default';
@@ -2455,7 +2445,6 @@ export const bybitInitiator: InitiatorFunction = async (context: InitiatorContex
       })
     );
 
-    // Log any failures
     results.forEach((result, index) => {
       if (result.status === 'rejected') {
         const accountName = accountsToUse[index]?.name || 'default';

@@ -5,8 +5,6 @@ import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { logger } from '../utils/logger.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
 
-import { CustomPropFirmConfig } from '../types/config.js';
-
 /**
  * Context passed to initiator functions
  */
@@ -23,7 +21,6 @@ export interface InitiatorContext {
   accounts?: AccountConfig[]; // Available accounts configuration
   accountFilters?: AccountFilter[]; // Channel-level account filtering rules
   currentBalance?: number; // Current account balance at the time of trade creation (for evaluation mode)
-  propFirms?: (string | CustomPropFirmConfig)[]; // Prop firm names or custom configurations to validate trades against
   /**
    * Human percent (1 = 1%): max total worst-case loss (existing open exposure + this trade) vs account balance.
    * Same exposure math as drawdown pre-trade (`additionalWorstCaseLoss` + `calculatePotentialLoss` in `risk.ts`).

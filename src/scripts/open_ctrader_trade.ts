@@ -207,7 +207,6 @@ program
     let mergedConfig: InitiatorConfig = { ...initiatorConfig };
     let contextAccounts = config.accounts || [];
     let accountFilters = undefined;
-    let propFirms: InitiatorContext['propFirms'] = [];
     let slAdjustmentTolerancePercent: number | undefined;
     let useLimitOrderForEntry: boolean | undefined;
     let maxSkippablePastTPs: number | undefined;
@@ -242,7 +241,6 @@ program
         baseLeverage: channelConfig.baseLeverage ?? initiatorConfig.baseLeverage
       };
       accountFilters = channelConfig.accountFilters;
-      propFirms = channelConfig.propFirms;
       slAdjustmentTolerancePercent = channelConfig.slAdjustmentTolerancePercent;
       useLimitOrderForEntry = channelConfig.useLimitOrderForEntry;
       maxSkippablePastTPs = channelConfig.maxSkippablePastTPs;
@@ -329,7 +327,6 @@ program
       config: mergedConfig,
       accounts: contextAccounts,
       accountFilters,
-      propFirms,
       maxRisk,
       slAdjustmentTolerancePercent,
       useLimitOrderForEntry,

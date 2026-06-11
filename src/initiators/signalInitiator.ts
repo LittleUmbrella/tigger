@@ -190,7 +190,6 @@ export const initiateFromStrategy = async (options: {
     config: mergedInitiatorConfig,
     accounts,
     accountFilters: channelConfig.accountFilters,
-    propFirms: channelConfig.propFirms,
     tradeObfuscation: channelConfig.tradeObfuscation,
     signalStopLoss,
     maxRisk: channelConfig.maxRisk,
@@ -245,7 +244,6 @@ export const processUnparsedMessages = async (
   channelRiskPercentage?: number, // Per-channel override for risk percentage (overrides initiator config)
   maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
-  propFirms?: (string | CustomPropFirmConfig)[], // Prop firm names or custom configurations
   tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   useLimitOrderForEntry?: boolean, // From channel config; each initiator interprets (not cTrader-specific).
@@ -376,7 +374,6 @@ export const processUnparsedMessages = async (
     initiatorFunction,
     initiatorName,
     accountFilters,
-    propFirms,
     tradeObfuscation,
     slAdjustmentTolerancePercent,
     useLimitOrderForEntry,
@@ -418,7 +415,6 @@ export const processMessages = async (
   initiatorFunction?: (context: InitiatorContext) => Promise<void>,
   initiatorName?: string,
   accountFilters?: AccountFilter[],
-  propFirms?: (string | CustomPropFirmConfig)[],
   tradeObfuscation?: TradeObfuscationConfig,
   slAdjustmentTolerancePercent?: number,
   useLimitOrderForEntry?: boolean,
@@ -567,7 +563,6 @@ export const processMessages = async (
           config: mergedInitiatorConfig,
           accounts,
           accountFilters,
-          propFirms,
           tradeObfuscation,
           signalStopLoss,
           maxRisk,
