@@ -99,6 +99,18 @@
       "maxMessageAgeMinutes": 5
     },
     {
+      "name": "trader_su_harvester",
+      "channel": "7920766559",
+      "envVarNames": {
+        "apiId": "TG_API_ID",
+        "accessHash": "TG_ACCESS_HASH_TRADER_SU"
+      },
+      "pollInterval": 4000,
+      "downloadImages": false,
+      "skipOldMessagesOnStartup": true,
+      "maxMessageAgeMinutes": 5
+    },
+    {
       "name": "steven_harvester",
       "channel": "2120484771",
       "envVarNames": {
@@ -244,6 +256,10 @@
     {
       "name": "ctrader_vpg",
       "channel": "3245475213"
+    },
+    {
+      "name": "trader_su",
+      "channel": "7920766559"
     }
   ],
   "accounts": [
@@ -378,6 +394,36 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
+      "tradeObfuscation": {
+        "tp": 0.02,
+        "sl": 0.02,
+        "entry": 0.02
+      },
+      "slAdjustmentTolerancePercent": 0.03,
+      "maxSkippablePastTPs": 0,
+      "useMarketRangeForEntry": true,
+      "allowConcurrentSymbolTrades": true,
+      "minRiskReward": 0.1,
+      "accountFilters": [
+        {
+          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
+          "rules": {}
+        }
+      ]
+    },
+    {
+      "channel": "7920766559",
+      "harvester": "trader_su_harvester",
+      "parser": "trader_su",
+      "initiator": "ctrader",
+      "monitor": "ctrader",
+      "useLimitOrderForBreakeven": false,
+      "useLimitOrderForEntry": true,
+      "riskPercentage": 1,
+      "entryTimeoutMinutes": 3000,
+      "baseLeverage": 20,
+      "maxMessageStalenessMinutes": 5,
+      "_comment": "Trader Su (private chat); trader_su parser — limit at parsed entry, NOW → MARKET_RANGE via useMarketRangeForEntry.",
       "tradeObfuscation": {
         "tp": 0.02,
         "sl": 0.02,
