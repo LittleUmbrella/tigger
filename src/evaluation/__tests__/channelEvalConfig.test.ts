@@ -34,7 +34,7 @@ const botConfig = {
       entryTimeoutMinutes: 10,
       allowConcurrentSymbolTrades: true,
       useLimitOrderForEntry: true,
-      tradeObfuscation: { tp: 0.02 },
+      tradeTolerance: { tp: 0.02 },
       maxSkippablePastTPs: 0,
       minRiskReward: 1.5,
       accountFilters: [{ accounts: ['ctrader_demo_2'], rules: {} }],
@@ -103,7 +103,7 @@ describe('channelEvalConfig', () => {
     expect(config.monitor.entryTimeoutMinutes).toBe(10);
     expect(config.allowConcurrentSymbolTrades).toBe(true);
     expect(config.useLimitOrderForEntry).toBe(true);
-    expect(config.tradeObfuscation).toEqual({ tp: 0.02 });
+    expect(config.tradeTolerance).toEqual({ tp: 0.02 });
     expect(config.initiator.riskPercentage).toBe(1);
     expect(config.minRiskReward).toBe(1.5);
     expect(config.initiator.baseLeverage).toBe(20);

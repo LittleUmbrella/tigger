@@ -374,7 +374,7 @@
       "maxMessageStalenessMinutes": 5,
       "riskPercentage": 1.4,
       "baseLeverage": 20,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -394,7 +394,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -424,7 +424,7 @@
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
       "_comment": "Trader Su (private chat); trader_su parser — limit at parsed entry, NOW → MARKET_RANGE via useMarketRangeForEntry.",
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -453,7 +453,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -474,7 +474,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -502,7 +502,7 @@
           "skip": true
         }
       ],
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -526,7 +526,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "entry": 0.02
       },
@@ -544,7 +544,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02
@@ -564,7 +564,7 @@
       "entryTimeoutMinutes": 10,
       "baseLeverage": 20,
       "maxMessageStalenessMinutes": 5,
-      "tradeObfuscation": {
+      "tradeTolerance": {
         "tp": 0.02,
         "sl": 0.02,
         "entry": 0.02

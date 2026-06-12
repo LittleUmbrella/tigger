@@ -6,7 +6,7 @@ import { calculatePositionSize, calculateQuantity, getDecimalPrecision, getQuant
 import { protobufLongToNumber } from '../utils/protobufLong.js';
 import { validateTradePrices } from '../utils/tradeValidation.js';
 import { tryAdjustStopLossWhenPastSL } from '../utils/slAdjustment.js';
-import { resolveObfuscatedStopLossAbsolute } from '../utils/tradeObfuscation.js';
+import { resolveObfuscatedStopLossAbsolute } from '../utils/tradeTolerance.js';
 import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { isCtraderGoldSymbol } from '../utils/ctraderGoldSymbol.js';
@@ -227,7 +227,7 @@ const executeTradeForAccount = async (
     maxSkippablePastTPs,
     useMarketRangeForEntry,
     maxRisk,
-    tradeObfuscation,
+    tradeTolerance,
     signalStopLoss,
     minRiskReward,
   } = context;
@@ -1206,7 +1206,7 @@ const executeTradeForAccount = async (
     const obfuscatedAbsoluteStopLoss = resolveObfuscatedStopLossAbsolute(
       signalStopLoss ?? order.stopLoss,
       order.signalType,
-      tradeObfuscation,
+      tradeTolerance,
       roundSlForExchange
     );
 

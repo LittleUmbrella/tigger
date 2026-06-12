@@ -3,7 +3,7 @@
  * evaluate with an existing parser over a 1–5 month window.
  *
  * When config.json contains a matching channel row, evaluation defaults mirror live bot settings
- * (entry timeout, concurrent symbols, obfuscation, prop firms, etc.). CLI flags override config.
+ * (entry timeout, concurrent symbols, tolerance, prop firms, etc.). CLI flags override config.
  */
 
 import '../initiators/index.js';
@@ -350,7 +350,7 @@ export async function runChannelEvalWizard(cli: ChannelEvalWizardOptions): Promi
       `  entryTimeout=${evalConfig.monitor.entryTimeoutMinutes}m` +
         ` minRR=${evalConfig.minRiskReward ?? 'none'}` +
         ` concurrentSymbols=${evalConfig.allowConcurrentSymbolTrades ?? false}` +
-        (evalConfig.tradeObfuscation ? ` obfuscation=${JSON.stringify(evalConfig.tradeObfuscation)}` : '')
+        (evalConfig.tradeTolerance ? ` tolerance=${JSON.stringify(evalConfig.tradeTolerance)}` : '')
     );
     const result = await runEvaluation(db, evalConfig, channel, parserName, evalConfig.initiator, evalConfig.monitor);
 

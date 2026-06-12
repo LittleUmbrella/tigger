@@ -16,7 +16,7 @@ import { emojiHeavyParser } from '../parsers/emojiHeavyParser.js';
 import '../initiators/index.js'; // Register built-in initiators
 import '../managers/index.js'; // Register built-in managers
 import { parseManagementCommand, getManager, ManagerContext } from '../managers/index.js';
-import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
+import { applyTradeTolerance } from '../utils/tradeTolerance.js';
 import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
@@ -364,7 +364,7 @@ export const startTradeOrchestrator = async (
       channelConfig.riskPercentage,
       channelConfig.maxMessageStalenessMinutes,
       channelConfig.accountFilters,
-      channelConfig.tradeObfuscation,
+      channelConfig.tradeTolerance,
       channelConfig.slAdjustmentTolerancePercent,
       channelConfig.useLimitOrderForEntry,
       channelConfig.maxSkippablePastTPs,
@@ -729,8 +729,8 @@ export const startTradeOrchestrator = async (
         const parserConfig = parserMap.get(parserName);
         const parserOptions = parserConfig?.entryPriceStrategy ? { entryPriceStrategy: parserConfig.entryPriceStrategy } : undefined;
         let newParsed = parseMessage(message.content, parserName, parserOptions);
-        if (newParsed && channelConfig?.tradeObfuscation) {
-          newParsed = applyTradeObfuscation(newParsed, channelConfig.tradeObfuscation);
+        if (newParsed && channelConfig?.tradeTolerance) {
+          newParsed = applyTradeTolerance(newParsed, channelConfig.tradeTolerance);
         }
         if (!newParsed) {
           // Not a trade signal either, mark as parsed and skip
@@ -964,8 +964,8 @@ export const startTradeOrchestrator = async (
                 }
                 const parserOptions = parser.entryPriceStrategy ? { entryPriceStrategy: parser.entryPriceStrategy } : undefined;
                 let newParsed = parseMessage(message.content, parser.name, parserOptions);
-                if (newParsed && channelConfig.tradeObfuscation) {
-                  newParsed = applyTradeObfuscation(newParsed, channelConfig.tradeObfuscation);
+                if (newParsed && channelConfig.tradeTolerance) {
+                  newParsed = applyTradeTolerance(newParsed, channelConfig.tradeTolerance);
                 }
                 if (newParsed) {
                   const existingTrades = await db.getTradesByMessageId(message.message_id, channelConfig.channel);
@@ -1238,7 +1238,7 @@ export const startTradeOrchestrator = async (
           channelConfig.riskPercentage, // Pass channel-specific risk percentage (overrides initiator)
           channelConfig.maxMessageStalenessMinutes, // Pass channel-specific message staleness limit
           channelConfig.accountFilters, // Pass channel-level account filtering rules
-          channelConfig.tradeObfuscation, // Pass trade obfuscation for sl/entry/tp
+          channelConfig.tradeTolerance, // Pass trade tolerance for sl/entry/tp
           channelConfig.slAdjustmentTolerancePercent, // Pass SL adjustment tolerance when price past SL
           channelConfig.useLimitOrderForEntry, // Channel: passed through; initiators interpret (not cTrader-specific)
           channelConfig.maxSkippablePastTPs, // Pass cTrader: max TPs to skip if already past price

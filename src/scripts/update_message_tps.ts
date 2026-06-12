@@ -21,7 +21,7 @@ import { DatabaseManager, Message, Trade } from '../db/schema.js';
 import { BotConfig, AccountConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { parseMessage } from '../parsers/signalParser.js';
-import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
+import { applyTradeTolerance } from '../utils/tradeTolerance.js';
 import { getManager, ManagerContext } from '../managers/managerRegistry.js';
 import '../managers/index.js';
 import { logger } from '../utils/logger.js';
@@ -156,8 +156,8 @@ const resolveTakeProfits = (
     ? { entryPriceStrategy: parserConfig.entryPriceStrategy }
     : undefined;
   let parsed = parseMessage(message.content, channelConfig.parser, parserOptions);
-  if (parsed && channelConfig.tradeObfuscation) {
-    parsed = applyTradeObfuscation(parsed, channelConfig.tradeObfuscation);
+  if (parsed && channelConfig.tradeTolerance) {
+    parsed = applyTradeTolerance(parsed, channelConfig.tradeTolerance);
   }
   if (!parsed?.takeProfits?.length) {
     throw new Error(

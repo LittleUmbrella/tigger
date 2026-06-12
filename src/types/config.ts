@@ -170,9 +170,9 @@ export interface AccountFilter {
 }
 
 /**
- * Per-channel trade obfuscation to deter copy trading detection.
+ * Per-channel trade tolerance to improve order fill rates.
  * SL, entry, and TP use a single deterministic offset toward a worse price by direction (see field docs).
- * Obfuscation is applied before any rounding for exchange symbol constraints (tick size, etc.).
+ * Tolerance is applied before any rounding for exchange symbol constraints (tick size, etc.).
  */
 /** Per-pair entry overrides merged onto channel defaults when a pairRules row matches. */
 export interface PairRuleEntryOverrides {
@@ -198,7 +198,7 @@ export interface PairRule {
   _comment?: string;
 }
 
-export interface TradeObfuscationConfig {
+export interface TradeToleranceConfig {
   /**
    * Single percent offset moving SL toward a worse outcome for the trade (sign ignored; magnitude only):
    * - long: SL is reduced (farther below entry)
@@ -260,7 +260,7 @@ export interface ChannelSetConfig {
    * When false, cTrader places native MARKET orders; other initiators may ignore or reserve this (see initiator implementation).
    */
   useLimitOrderForEntry?: boolean;
-  tradeObfuscation?: TradeObfuscationConfig; // Obfuscate entry/SL/TP (worse-direction %) to deter copy detection
+  tradeTolerance?: TradeToleranceConfig; // Adjust entry/SL/TP (worse-direction %) to increase order fill likelihood
   /** When current price is past message SL: max overshoot (as % of original entry-to-SL distance) to allow. If within tolerance, SL is moved proportionally. 0 or undefined = reject (default). E.g. 10 = allow up to 10% past SL */
   slAdjustmentTolerancePercent?: number;
   /** cTrader market orders only: max number of TPs to skip when price has already moved past them. Skipped TP quantity is redistributed to remaining valid TPs. 0 or undefined = reject if any TP is past price (default). Same index selects the MARKET_RANGE boundary TP when useMarketRangeForEntry is true (0 = TP1, 1 = TP2, …). */
@@ -360,7 +360,7 @@ export interface EvaluationConfig {
   endDate?: string;
   speedMultiplier?: number; // How fast to play back (0 or Infinity = maximum speed, no delays)
   maxTradeDurationDays?: number; // Maximum days to track a trade before closing (default: 7)
-  tradeObfuscation?: TradeObfuscationConfig; // Same shape as channel tradeObfuscation
+  tradeTolerance?: TradeToleranceConfig; // Same shape as channel tradeTolerance
   slAdjustmentTolerancePercent?: number; // When price past SL, max overshoot % to allow proportional adjustment (0 = reject)
   /** Portfolio worst-case exposure cap — same semantics as {@link ChannelSetConfig.maxRisk} */
   maxRisk?: number;

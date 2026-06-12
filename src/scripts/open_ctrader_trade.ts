@@ -36,7 +36,7 @@ import { BotConfig, ChannelSetConfig, InitiatorConfig } from '../types/config.js
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
 import { parseMessage } from '../parsers/signalParser.js';
-import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
+import { applyTradeTolerance } from '../utils/tradeTolerance.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -129,8 +129,8 @@ const parseSignalContent = (
     process.exit(1);
   }
 
-  if (channelConfig.tradeObfuscation) {
-    order = applyTradeObfuscation(order, channelConfig.tradeObfuscation);
+  if (channelConfig.tradeTolerance) {
+    order = applyTradeTolerance(order, channelConfig.tradeTolerance);
   }
 
   return order;

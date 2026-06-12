@@ -1,6 +1,6 @@
 /**
  * Resolve evaluation defaults from config.json channel entries so wizard/CLI
- * mirror live bot settings (entry timeout, concurrent symbols, obfuscation, etc.).
+ * mirror live bot settings (entry timeout, concurrent symbols, tolerance, etc.).
  */
 
 import fs from 'fs-extra';
@@ -23,7 +23,7 @@ export interface ChannelEvalDefaults {
   dynamicBreakevenAfterTPs?: boolean;
   propFirms?: (string | CustomPropFirmConfig)[];
   initialBalance?: number;
-  tradeObfuscation?: EvaluationConfig['tradeObfuscation'];
+  tradeTolerance?: EvaluationConfig['tradeTolerance'];
   slAdjustmentTolerancePercent?: number;
   maxRisk?: number;
   allowConcurrentSymbolTrades?: boolean;
@@ -136,7 +136,7 @@ export const resolveChannelEvalDefaults = (
       channelConfig.dynamicBreakevenAfterTPs ?? monitorConfig?.dynamicBreakevenAfterTPs,
     propFirms,
     initialBalance,
-    tradeObfuscation: channelConfig.tradeObfuscation,
+    tradeTolerance: channelConfig.tradeTolerance,
     slAdjustmentTolerancePercent: channelConfig.slAdjustmentTolerancePercent,
     maxRisk: channelConfig.maxRisk,
     allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades,
@@ -160,7 +160,7 @@ export interface BuildEvaluationConfigInput {
   entryTimeoutMinutes?: number;
   breakevenAfterTPs?: number;
   dynamicBreakevenAfterTPs?: boolean;
-  tradeObfuscation?: EvaluationConfig['tradeObfuscation'];
+  tradeTolerance?: EvaluationConfig['tradeTolerance'];
   slAdjustmentTolerancePercent?: number;
   maxRisk?: number;
   allowConcurrentSymbolTrades?: boolean;
@@ -209,7 +209,7 @@ export const buildEvaluationConfig = (
     endDate: input.endDate,
     speedMultiplier: input.speedMultiplier ?? 0,
     maxTradeDurationDays: input.maxTradeDurationDays ?? 7,
-    tradeObfuscation: input.tradeObfuscation ?? channelDefaults?.tradeObfuscation,
+    tradeTolerance: input.tradeTolerance ?? channelDefaults?.tradeTolerance,
     slAdjustmentTolerancePercent:
       input.slAdjustmentTolerancePercent ?? channelDefaults?.slAdjustmentTolerancePercent,
     maxRisk: input.maxRisk ?? channelDefaults?.maxRisk,
@@ -237,7 +237,7 @@ export const formatChannelEvalDefaultsSummary = (defaults: ChannelEvalDefaults):
   if (defaults.useLimitOrderForEntry != null) {
     parts.push(`useLimitOrderForEntry=${defaults.useLimitOrderForEntry}`);
   }
-  if (defaults.tradeObfuscation) parts.push(`tradeObfuscation=${JSON.stringify(defaults.tradeObfuscation)}`);
+  if (defaults.tradeTolerance) parts.push(`tradeTolerance=${JSON.stringify(defaults.tradeTolerance)}`);
   if (defaults.propFirms?.length) {
     const names = defaults.propFirms.map((f) => (typeof f === 'string' ? f : f.name)).join(',');
     parts.push(`propFirms=${names}`);

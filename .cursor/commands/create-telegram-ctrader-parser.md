@@ -46,7 +46,7 @@ Create a new parser **like** `ctrader_gold` (`src/parsers/ctraderGoldParser.ts`)
 
 - **Harvester**: same shape as `ctrader_gold_harvester` in `config.json` (`pollInterval`, `downloadImages`, `skipOldMessagesOnStartup`, `maxMessageAgeMinutes`, `envVarNames.apiId` + `envVarNames.accessHash`), but with a **new unique `name`**, **`channel`**: the user-provided channel id string, and the user-provided `accessHash` env var name.
 - **Parser list entry**: `{ "name": "<parser_name>", "channel": "<user_channel_id>" }` — same pattern as `ctrader_gold` under `parsers`.
-- **Channels entry**: same structure as an existing cTrader Telegram channel block in `config.json` — use **`2385521106`** (“big”) as the reference shape (ctrader initiator/monitor, breakeven, risk, leverage, propFirms, tradeObfuscation, etc.). `3469900302` (ctrader_gold VIP) is another valid template if you need extra fields. Set **`channel`** to the user’s id and **`harvester`** / **`parser`** to the new harvester and parser names.
+- **Channels entry**: same structure as an existing cTrader Telegram channel block in `config.json` — use **`2385521106`** (“big”) as the reference shape (ctrader initiator/monitor, breakeven, risk, leverage, propFirms, tradeTolerance, etc.). `3469900302` (ctrader_gold VIP) is another valid template if you need extra fields. Set **`channel`** to the user’s id and **`harvester`** / **`parser`** to the new harvester and parser names.
 
 **Note:** If that channel id already has a harvester/parser pair, explain that only one harvester should own that channel id in practice; the user may need to remove or rename the old pair, or pick a different channel. Do not silently duplicate conflicting harvesters for the same channel without calling this out.
 

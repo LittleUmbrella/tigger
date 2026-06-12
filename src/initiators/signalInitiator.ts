@@ -3,7 +3,7 @@ import {
   AccountConfig,
   AccountFilter,
   CustomPropFirmConfig,
-  TradeObfuscationConfig,
+  TradeToleranceConfig,
   ChannelSetConfig,
   PairRule,
 } from '../types/config.js';
@@ -15,7 +15,7 @@ import { isCtraderAuthRetryableMessage } from '../utils/ctraderAuthErrors.js';
 import dayjs from 'dayjs';
 import { parseMessage } from '../parsers/signalParser.js';
 import { getParser } from '../parsers/parserRegistry.js';
-import { applyTradeObfuscation } from '../utils/tradeObfuscation.js';
+import { applyTradeTolerance } from '../utils/tradeTolerance.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
 import { getInitiator, InitiatorContext, getRegisteredInitiators } from './initiatorRegistry.js';
 import type { CTraderClient } from '../clients/ctraderClient.js';
@@ -153,8 +153,8 @@ export const initiateFromStrategy = async (options: {
   }
   const signalStopLoss = inputOrder.stopLoss;
   let order = inputOrder;
-  if (channelConfig.tradeObfuscation) {
-    order = applyTradeObfuscation(order, channelConfig.tradeObfuscation);
+  if (channelConfig.tradeTolerance) {
+    order = applyTradeTolerance(order, channelConfig.tradeTolerance);
   }
   const messageId = `strategy:${strategyName}:${signalId}`;
   const placeholder = `[strategy:${strategyName}]`;
@@ -191,7 +191,7 @@ export const initiateFromStrategy = async (options: {
     config: mergedInitiatorConfig,
     accounts,
     accountFilters: channelConfig.accountFilters,
-    tradeObfuscation: channelConfig.tradeObfuscation,
+    tradeTolerance: channelConfig.tradeTolerance,
     signalStopLoss,
     maxRisk: channelConfig.maxRisk,
     slAdjustmentTolerancePercent: channelConfig.slAdjustmentTolerancePercent,
@@ -245,7 +245,7 @@ export const processUnparsedMessages = async (
   channelRiskPercentage?: number, // Per-channel override for risk percentage (overrides initiator config)
   maxStalenessMinutes?: number, // Maximum age of messages to process in minutes
   accountFilters?: AccountFilter[], // Channel-level account filtering rules
-  tradeObfuscation?: TradeObfuscationConfig, // Random percent adjustment for sl/entry/tp
+  tradeTolerance?: TradeToleranceConfig, // Random percent adjustment for sl/entry/tp
   slAdjustmentTolerancePercent?: number, // When price past SL, max overshoot % to allow proportional SL adjustment (0 = reject)
   useLimitOrderForEntry?: boolean, // From channel config; each initiator interprets (not cTrader-specific).
   maxSkippablePastTPs?: number, // cTrader market orders: max TPs to skip if already past current price (0 = reject, default)
@@ -375,7 +375,7 @@ export const processUnparsedMessages = async (
     initiatorFunction,
     initiatorName,
     accountFilters,
-    tradeObfuscation,
+    tradeTolerance,
     slAdjustmentTolerancePercent,
     useLimitOrderForEntry,
     maxSkippablePastTPs,
@@ -416,7 +416,7 @@ export const processMessages = async (
   initiatorFunction?: (context: InitiatorContext) => Promise<void>,
   initiatorName?: string,
   accountFilters?: AccountFilter[],
-  tradeObfuscation?: TradeObfuscationConfig,
+  tradeTolerance?: TradeToleranceConfig,
   slAdjustmentTolerancePercent?: number,
   useLimitOrderForEntry?: boolean,
   maxSkippablePastTPs?: number,
@@ -521,8 +521,8 @@ export const processMessages = async (
       if (parsed) {
         const signalStopLoss = parsed.stopLoss;
         // Obfuscate before any rounding for exchange constraints (must stay first)
-        if (tradeObfuscation) {
-          parsed = applyTradeObfuscation(parsed, tradeObfuscation);
+        if (tradeTolerance) {
+          parsed = applyTradeTolerance(parsed, tradeTolerance);
         }
         // Log successful parsing - critical for investigations
         logger.info('Message parsed successfully', {
@@ -576,7 +576,7 @@ export const processMessages = async (
           config: mergedInitiatorConfig,
           accounts,
           accountFilters,
-          tradeObfuscation,
+          tradeTolerance,
           signalStopLoss,
           maxRisk,
           slAdjustmentTolerancePercent,

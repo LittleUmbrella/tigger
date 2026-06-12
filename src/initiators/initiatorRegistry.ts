@@ -1,4 +1,4 @@
-import { InitiatorConfig, AccountConfig, AccountFilter, PairRule, TradeObfuscationConfig } from '../types/config.js';
+import { InitiatorConfig, AccountConfig, AccountFilter, PairRule, TradeToleranceConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -34,9 +34,9 @@ export interface InitiatorContext {
   maxSkippablePastTPs?: number;
   /** cTrader: MARKET_RANGE entry; boundary TP index follows maxSkippablePastTPs */
   useMarketRangeForEntry?: boolean;
-  /** Channel trade obfuscation (SL amend uses signalStopLoss + sl config, not double-applied). */
-  tradeObfuscation?: TradeObfuscationConfig;
-  /** Parser stop loss before tradeObfuscation (for absolute SL reconcile on exchange). */
+  /** Channel trade tolerance (SL amend uses signalStopLoss + sl config, not double-applied). */
+  tradeTolerance?: TradeToleranceConfig;
+  /** Parser stop loss before tradeTolerance (for absolute SL reconcile on exchange). */
   signalStopLoss?: number;
   /**
    * Channel-level minimum reward-to-risk ratio (reward / risk). Account-level overrides when set.

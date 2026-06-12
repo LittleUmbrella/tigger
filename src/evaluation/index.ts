@@ -9,7 +9,7 @@ import { Command } from 'commander';
 import { DatabaseManager } from '../db/schema.js';
 import { harvestMessages, HarvestOptions } from './messageHarvester.js';
 import { runEvaluation } from './evaluationOrchestrator.js';
-import { EvaluationConfig, TradeObfuscationConfig } from '../types/config.js';
+import { EvaluationConfig, TradeToleranceConfig } from '../types/config.js';
 import { logger } from '../utils/logger.js';
 import fs from 'fs-extra';
 import path from 'path';
@@ -29,11 +29,11 @@ const parsePercentValue = (value: string | undefined): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-/** Build TradeObfuscationConfig from CLI options. Returns undefined if none provided. */
-const buildTradeObfuscationFromCli = (options: { obfuscationSl?: string; obfuscationEntry?: string; obfuscationTp?: string }): TradeObfuscationConfig | undefined => {
-  const sl = parsePercentValue(options.obfuscationSl);
-  const entry = parsePercentValue(options.obfuscationEntry);
-  const tp = parsePercentValue(options.obfuscationTp);
+/** Build TradeToleranceConfig from CLI options. Returns undefined if none provided. */
+const buildTradeToleranceFromCli = (options: { toleranceSl?: string; toleranceEntry?: string; toleranceTp?: string }): TradeToleranceConfig | undefined => {
+  const sl = parsePercentValue(options.toleranceSl);
+  const entry = parsePercentValue(options.toleranceEntry);
+  const tp = parsePercentValue(options.toleranceTp);
   if (sl == null && entry == null && tp == null) return undefined;
   return { ...(sl != null && { sl }), ...(entry != null && { entry }), ...(tp != null && { tp }) };
 };
@@ -140,9 +140,9 @@ program
   .option('--dynamic-breakeven-after-tps', 'Scale breakeven threshold from total TP count (see computeDynamicBreakevenAfterTPs)', false)
   .option('--entry-timeout-minutes <n>', 'Minutes to wait for entry before cancelling trade (default: 2880 = 2 days)', '2880')
   .option('--sl-adjustment-tolerance-percent <n>', 'When price past SL, max overshoot % to allow proportional adjustment (0 = reject)')
-  .option('--obfuscation-sl <percent>', 'Trade obfuscation for SL: single percent toward worse SL by direction (e.g. "0.2")')
-  .option('--obfuscation-entry <percent>', 'Trade obfuscation for entry: single percent toward worse fill by direction (e.g. "0.2")')
-  .option('--obfuscation-tp <percent>', 'Trade obfuscation for TP: single percent offset toward worse TP by direction (e.g. "0.2")')
+  .option('--tolerance-sl <percent>', 'Trade tolerance for SL: single percent toward worse SL by direction (e.g. "0.2")')
+  .option('--tolerance-entry <percent>', 'Trade tolerance for entry: single percent toward worse fill by direction (e.g. "0.2")')
+  .option('--tolerance-tp <percent>', 'Trade tolerance for TP: single percent offset toward worse TP by direction (e.g. "0.2")')
   .option('--monitor-type <type>', 'Monitor/exchange type: bybit or ctrader (default: bybit)', 'bybit')
   .option('--ctrader-use-tick-data', 'Use tick data instead of M1 candles (ctrader only, more precise)', false)
   .option('--ctrader-symbol-map <json>', 'cTrader symbol map JSON, e.g. \'{"XAUUSD":"GOLD"}\' when broker uses different names')
@@ -207,7 +207,7 @@ program
           speedMultiplier: parseFloat(options.speedMultiplier) || 0,
           maxTradeDurationDays: parseFloat(options.maxTradeDuration) || 7,
           slAdjustmentTolerancePercent: options.slAdjustmentTolerancePercent != null ? parseFloat(options.slAdjustmentTolerancePercent) : undefined,
-          tradeObfuscation: buildTradeObfuscationFromCli(options),
+          tradeTolerance: buildTradeToleranceFromCli(options),
         };
       }
 

@@ -208,7 +208,7 @@ export async function runEvaluation(
     undefined, // channelRiskPercentage (not used in evaluation mode, use initiatorConfig.riskPercentage instead)
     undefined, // maxStalenessMinutes (evaluation processes all messages by date filter)
     undefined, // accountFilters (not used in evaluation mode)
-    config.tradeObfuscation,
+    config.tradeTolerance,
     config.slAdjustmentTolerancePercent,
     config.useLimitOrderForEntry,
     config.maxSkippablePastTPs,
