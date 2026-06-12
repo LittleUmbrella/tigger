@@ -298,7 +298,7 @@
         "accountId": "CTRADER_ACCOUNT_ID"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 5000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
     },
     {
       "name": "ctrader_demo_2_100",
@@ -312,7 +312,7 @@
         "accountId": "CTRADER_ACCOUNT_ID_2_100"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 100000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 100000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
     },
     {
       "name": "ctrader_demo_2_25",
@@ -326,7 +326,7 @@
         "accountId": "CTRADER_ACCOUNT_ID_2_25"
       },
       "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 25000, "dailyDrawdownMode": "swing", "maxDrawdownBasis": "initialBalance"}]
+      "propFirms": [{"name": "the5ers", "initialBalance": 25000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
     }
   ],
   "initiators": [
