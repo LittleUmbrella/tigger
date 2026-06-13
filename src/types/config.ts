@@ -114,6 +114,24 @@ export interface AccountConfig {
    * Used when channel `minRiskReward` is unset; channel overrides when set.
    */
   minRiskReward?: number;
+  /**
+   * When true, skip new trade initiation on this account (live mode only).
+   * Also pausable via top-level `tradingPause` env vars.
+   */
+  paused?: boolean;
+}
+
+/** Global pause for new trade initiation (live mode only; monitors keep running). */
+export interface TradingPauseConfig {
+  /** Names of env vars holding comma-delimited exchange types and/or account names to pause. */
+  envVarNames?: {
+    exchanges?: string;
+    accounts?: string;
+  };
+  /** @deprecated Use envVarNames — inline lists for local/testing only. */
+  exchanges?: string[];
+  /** @deprecated Use envVarNames — inline lists for local/testing only. */
+  accounts?: string[];
 }
 
 export interface InitiatorConfig {
@@ -307,6 +325,8 @@ export interface BotConfig {
   initiators: InitiatorConfig[];
   monitors: MonitorConfig[];
   channels: ChannelSetConfig[];
+  /** Pause new trade initiation by exchange type and/or account name (live mode only). */
+  tradingPause?: TradingPauseConfig;
   simulation?: SimulationConfig;
   evaluation?: EvaluationConfig;
   orchestrator?: OrchestratorConfig;

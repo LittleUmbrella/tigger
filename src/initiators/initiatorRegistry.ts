@@ -1,4 +1,5 @@
 import { InitiatorConfig, AccountConfig, AccountFilter, PairRule, TradeToleranceConfig } from '../types/config.js';
+import type { ResolvedTradingPause } from '../utils/tradingPause.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -51,6 +52,8 @@ export interface InitiatorContext {
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>;
   /** Channel-level per-pair rules (see `ChannelSetConfig.pairRules`). */
   pairRules?: PairRule[];
+  /** Resolved pause lists from BotConfig; skipped in simulation. Empty lists = no pauses. */
+  tradingPause?: ResolvedTradingPause;
 }
 
 /**

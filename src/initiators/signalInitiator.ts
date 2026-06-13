@@ -7,6 +7,7 @@ import {
   ChannelSetConfig,
   PairRule,
 } from '../types/config.js';
+import type { ResolvedTradingPause } from '../utils/tradingPause.js';
 import { ParsedOrder } from '../types/order.js';
 import { DatabaseManager, Message } from '../db/schema.js';
 import { logger } from '../utils/logger.js';
@@ -123,6 +124,7 @@ export const initiateFromStrategy = async (options: {
   isSimulation: boolean;
   priceProvider?: HistoricalPriceProvider;
   accounts?: AccountConfig[];
+  tradingPause?: ResolvedTradingPause;
 }): Promise<void> => {
   const {
     strategyName,
@@ -134,7 +136,8 @@ export const initiateFromStrategy = async (options: {
     db,
     isSimulation,
     priceProvider,
-    accounts
+    accounts,
+    tradingPause,
   } = options;
   const channel = channelConfig.channel;
   const initiatorName = initiatorConfig.name || initiatorConfig.type;
@@ -201,6 +204,7 @@ export const initiateFromStrategy = async (options: {
     allowConcurrentSymbolTrades: channelConfig.allowConcurrentSymbolTrades,
     minRiskReward: channelConfig.minRiskReward,
     pairRules: channelConfig.pairRules,
+    tradingPause,
   };
   try {
     logger.info('initiateFromStrategy: running initiator', {
@@ -259,6 +263,7 @@ export const processUnparsedMessages = async (
   allInitiatorScopes?: string[],
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
   pairRules?: PairRule[],
+  tradingPause?: ResolvedTradingPause,
 ): Promise<void> => {
   const initiatorNameForScope = initiatorConfig.name || initiatorConfig.type;
   if (!initiatorNameForScope) {
@@ -389,6 +394,7 @@ export const processUnparsedMessages = async (
     allInitiatorScopes,
     getCTraderClient,
     pairRules,
+    tradingPause,
   );
   
   logger.debug('Finished processing messages', {
@@ -431,6 +437,7 @@ export const processMessages = async (
   allInitiatorScopes?: string[],
   getCTraderClient?: (accountName?: string) => Promise<CTraderClient | undefined>,
   pairRules?: PairRule[],
+  tradingPause?: ResolvedTradingPause,
 ): Promise<void> => {
   // Get initiator function if not provided
   if (!initiatorFunction) {
@@ -587,6 +594,7 @@ export const processMessages = async (
           minRiskReward,
           getCTraderClient,
           pairRules,
+          tradingPause,
         };
 
         try {

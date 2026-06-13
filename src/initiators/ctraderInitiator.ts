@@ -1,4 +1,5 @@
 import { InitiatorContext, InitiatorFunction } from './initiatorRegistry.js';
+import { filterTradableAccounts, getPausedAccountNames, EMPTY_TRADING_PAUSE } from '../utils/tradingPause.js';
 import { AccountConfig } from '../types/config.js';
 import { ParsedOrder } from '../types/order.js';
 import { logger } from '../utils/logger.js';
@@ -2618,9 +2619,30 @@ export const ctraderInitiator: InitiatorFunction = async (context: InitiatorCont
 
   try {
     // Get list of accounts to use
-    const accountsToUse = getAccountsToUse(context);
-    
+    const rawAccounts = getAccountsToUse(context);
+    const pause = context.tradingPause ?? EMPTY_TRADING_PAUSE;
+    const accountsToUse = filterTradableAccounts(rawAccounts, pause, {
+      isSimulation: context.isSimulation,
+    });
+    const pausedAccounts = getPausedAccountNames(rawAccounts, pause);
+    if (pausedAccounts.length > 0) {
+      logger.info('Trading paused for cTrader accounts', {
+        channel,
+        messageId: message.message_id,
+        pausedAccounts,
+        tradableAccounts: accountsToUse.map((acc) => acc?.name || 'default'),
+      });
+    }
+
     if (accountsToUse.length === 0) {
+      if (rawAccounts.length > 0 && pausedAccounts.length === rawAccounts.filter(Boolean).length) {
+        logger.info('Skipping cTrader trade — all configured accounts are paused', {
+          channel,
+          messageId: message.message_id,
+          pausedAccounts,
+        });
+        return;
+      }
       logger.error('No accounts configured for initiator', {
         channel,
         initiatorName: context.config.name

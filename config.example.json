@@ -117,6 +117,13 @@
       "slAdjustmentTolerancePercent": 10
     }
   ],
+  "tradingPause": {
+    "_comment": "Optional. Pause new trade initiation (live only; monitors still run). envVarNames point at comma-delimited env vars; blank/unset = no pauses.",
+    "envVarNames": {
+      "exchanges": "TRADING_PAUSE_EXCHANGES",
+      "accounts": "TRADING_PAUSE_ACCOUNTS"
+    }
+  },
   "database": {
     "type": "sqlite",
     "path": "data/trading_bot.db"

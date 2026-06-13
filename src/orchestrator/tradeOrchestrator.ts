@@ -48,6 +48,7 @@ import {
   isMultiInitiatorTelegramChannel,
 } from '../utils/multiInitiatorChannel.js';
 import { createChannelWake } from '../utils/channelWake.js';
+import { resolveTradingPause } from '../utils/tradingPause.js';
 
 // Register built-in parsers
 registerParser('emoji_heavy', emojiHeavyParser);
@@ -83,7 +84,8 @@ export const startTradeOrchestrator = async (
   config: BotConfig
 ): Promise<() => Promise<void>> => {
   const isSimulation = config.simulation?.enabled || false;
-  logger.info('Starting trade orchestrator', { simulation: isSimulation });
+  const tradingPause = resolveTradingPause(config.tradingPause);
+  logger.info('Starting trade orchestrator', { simulation: isSimulation, tradingPause });
   
   const db = new DatabaseManager({
     type: config.database?.type,
@@ -378,6 +380,7 @@ export const startTradeOrchestrator = async (
       allInitiatorScopes,
       createCTraderClient,
       channelConfig.pairRules,
+      tradingPause,
     );
   };
 
@@ -558,7 +561,8 @@ export const startTradeOrchestrator = async (
               db,
               isSimulation,
               priceProvider,
-              accounts: config.accounts
+              accounts: config.accounts,
+              tradingPause: tradingPause,
             })
         });
         state.stopStrategies.push(stopStrategy);

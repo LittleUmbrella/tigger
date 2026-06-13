@@ -57,7 +57,7 @@ if (!config.channels || !Array.isArray(config.channels) || config.channels.lengt
 }
 
 logger.info('Configuration loaded', {
-  channels: config.channels.length
+  channels: config.channels.length,
 });
 
 // Start health check server first so it's available even if orchestrator fails
