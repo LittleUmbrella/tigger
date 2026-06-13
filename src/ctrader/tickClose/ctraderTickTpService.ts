@@ -36,10 +36,13 @@ const inferPrecision = (volumeStep: number | undefined, quantity: number | undef
   return 2;
 };
 
+const REGISTRY_DIAGNOSTIC_INTERVAL_MS = 5 * 60 * 1000;
+
 export class CTraderTickTpService {
   public readonly registry = new TickTpRegistry();
   private readonly spotStream: CTraderSpotStream;
   private isStarted = false;
+  private diagnosticInterval?: ReturnType<typeof setInterval>;
 
   constructor(
     private readonly accountName: string,
@@ -125,6 +128,11 @@ export class CTraderTickTpService {
         });
       }
     }
+
+    this.diagnosticInterval = setInterval(() => {
+      this.logRegistrySnapshot();
+    }, REGISTRY_DIAGNOSTIC_INTERVAL_MS);
+    this.logRegistrySnapshot();
   }
 
   register(watch: TickTpWatch): void {
@@ -163,6 +171,10 @@ export class CTraderTickTpService {
   }
 
   async stop(): Promise<void> {
+    if (this.diagnosticInterval) {
+      clearInterval(this.diagnosticInterval);
+      this.diagnosticInterval = undefined;
+    }
     const symbolIds = this.registry.allSymbolIds();
     this.spotStream.stop();
     await Promise.all(
@@ -180,6 +192,35 @@ export class CTraderTickTpService {
       })
     );
     this.isStarted = false;
+  }
+
+  private logRegistrySnapshot(): void {
+    const watches = this.registry.allWatches();
+    logger.info('Tick-close registry snapshot', {
+      accountName: this.accountName,
+      watchCount: watches.length,
+      subscribedSymbolIds: this.registry.allSymbolIds(),
+      watches: watches.map((w) => ({
+        tradeId: w.tradeId,
+        positionId: w.positionId,
+        channel: w.channel,
+        messageId: w.messageId,
+        symbol: w.symbol,
+        symbolId: w.symbolId,
+        direction: w.direction,
+        remainingVolumeLots: w.remainingVolumeLots,
+        closingInFlight: w.closingInFlight,
+        filledTpCount: w.levels.filter((l) => l.status === 'filled').length,
+        levels: w.levels.map((l) => ({
+          index: l.index,
+          price: l.price,
+          volumeLots: l.volumeLots,
+          status: l.status,
+        })),
+        lastSpotAtMs: this.spotStream.getLastSpotAt(w.symbolId),
+      })),
+      exchange: 'ctrader',
+    });
   }
 
   private async handleQuote(symbolId: number, bid: number, ask: number): Promise<void> {

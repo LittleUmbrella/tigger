@@ -41,4 +41,8 @@ export class TickTpRegistry {
   allSymbolIds(): number[] {
     return [...this.bySymbolId.keys()];
   }
+
+  allWatches(): TickTpWatch[] {
+    return [...this.byTradeId.values()];
+  }
 }

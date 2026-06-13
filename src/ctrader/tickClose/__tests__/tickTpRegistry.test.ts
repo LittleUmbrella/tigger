@@ -57,4 +57,10 @@ describe('TickTpRegistry', () => {
     registry.register(baseWatch({ tradeId: 2, positionId: '101' }));
     expect(registry.getBySymbolId(42)).toHaveLength(2);
   });
+
+  it('allWatches returns all registered watches', () => {
+    registry.register(baseWatch({ tradeId: 1 }));
+    registry.register(baseWatch({ tradeId: 2, positionId: '101' }));
+    expect(registry.allWatches()).toHaveLength(2);
+  });
 });
