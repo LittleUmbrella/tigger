@@ -119,6 +119,14 @@ export interface AccountConfig {
    * Also pausable via top-level `tradingPause` env vars.
    */
   paused?: boolean;
+  /**
+   * cTrader only. How intermediate take-profits are executed when a signal has multiple TPs.
+   * - `multi-order` (default): N-trades or limit TP orders (current behavior).
+   * - `tick-close`: single position; intermediate TPs via live tick + closePosition API.
+   */
+  ctraderTpStrategy?: 'multi-order' | 'tick-close';
+  /** cTrader tick-close only: seconds without spot events before stale warning (default 30). */
+  ctraderTickStaleSeconds?: number;
 }
 
 /** Global pause for new trade initiation (live mode only; monitors keep running). */

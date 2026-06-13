@@ -165,6 +165,8 @@ export const getCtraderOrderExecutionPrice = (order: any): number | undefined =>
  * Do NOT use symbol.digits for scale - that causes wrong prices for symbols like XAUUSD (digits=2).
  */
 const CTRADER_PRICE_SCALE = 100000;
+/** Scale for ProtoOASpotEvent bid/ask (1/100_000 of price unit). */
+export const CTRADER_SPOT_PRICE_SCALE = CTRADER_PRICE_SCALE;
 
 /**
  * Convert lots → cTrader API volume (int64 "cents"), aligning to stepVolume.
@@ -256,6 +258,13 @@ export interface CTraderClientConfig {
 /** Result of a spot price fetch - used to coalesce concurrent requests */
 type SpotPriceResult = { bid: number; ask: number } | null;
 
+export type CTraderSpotQuoteHandler = (event: {
+  symbolId: number;
+  bid: number;
+  ask: number;
+  timestampMs?: number;
+}) => void;
+
 export class CTraderClient {
   private config: CTraderClientConfig;
   private connection: CTraderConnection | null = null;
@@ -263,6 +272,9 @@ export class CTraderClient {
   private authenticated: boolean = false;
   /** Coalesce concurrent getCurrentPrice calls per symbol - one subscription, all callers share result */
   private inFlightSpotRequests = new Map<string, Promise<SpotPriceResult>>();
+  private spotQuoteHandlers = new Set<CTraderSpotQuoteHandler>();
+  private persistentSpotRefCounts = new Map<number, number>();
+  private spotListenerId?: string;
   /**
    * Broker symbol metadata (id, volumes, etc.) rarely changes for an account; long TTL avoids repeat SymbolsList/SymbolById
    * traffic. Cleared on disconnect.
@@ -379,6 +391,13 @@ export class CTraderClient {
 
       await this.connect();
       await this.authenticate();
+      await this.resubscribePersistentSpots().catch((error) => {
+        logger.warn('Failed to resubscribe persistent spots after reconnect', {
+          accountId: this.config.accountId,
+          exchange: 'ctrader',
+          error: serializeErrorForLog(error),
+        });
+      });
 
       logger.info('cTrader auto-reconnect successful', {
         accountId: this.config.accountId,
@@ -431,6 +450,7 @@ export class CTraderClient {
         host: this.config.host!,
         port: this.config.port!
       });
+      this.spotListenerId = undefined;
 
       this.connection.onClose = () => {
         logger.warn('cTrader connection lost — marking client disconnected for auto-reconnect', {
@@ -440,6 +460,7 @@ export class CTraderClient {
         this.connected = false;
         this.authenticated = false;
         this.lastVerifiedAuthAt = null;
+        this.spotListenerId = undefined;
         this.stopHeartbeat();
       };
 
@@ -2119,6 +2140,121 @@ export class CTraderClient {
     return (result.bid + result.ask) / 2;
   }
 
+  /** Register handler for all ProtoOASpotEvent on this account connection. Returns unsubscribe. */
+  onSpotQuote(handler: CTraderSpotQuoteHandler): () => void {
+    this.spotQuoteHandlers.add(handler);
+    this.ensureSpotEventListener();
+    return () => {
+      this.spotQuoteHandlers.delete(handler);
+    };
+  }
+
+  /** Increment ref-count and subscribe to spot for symbolId when first ref. */
+  async addPersistentSpotSubscription(symbolId: number): Promise<void> {
+    await this.ensureConnected();
+    if (!this.authenticated || !this.connection || !this.config.accountId) {
+      throw new Error('Not authenticated with cTrader OpenAPI');
+    }
+
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) {
+      throw new Error(`Invalid account ID: ${this.config.accountId}`);
+    }
+
+    const prev = this.persistentSpotRefCounts.get(symbolId) ?? 0;
+    this.persistentSpotRefCounts.set(symbolId, prev + 1);
+    if (prev > 0) return;
+
+    this.ensureSpotEventListener();
+    await this.connection.sendCommand('ProtoOASubscribeSpotsReq', {
+      ctidTraderAccountId: accountIdNum,
+      symbolId: [symbolId],
+    });
+  }
+
+  /** Decrement ref-count; unsubscribe when zero. */
+  async removePersistentSpotSubscription(symbolId: number): Promise<void> {
+    const prev = this.persistentSpotRefCounts.get(symbolId) ?? 0;
+    if (prev <= 0) return;
+
+    const next = prev - 1;
+    if (next > 0) {
+      this.persistentSpotRefCounts.set(symbolId, next);
+      return;
+    }
+    this.persistentSpotRefCounts.delete(symbolId);
+
+    if (!this.connection || !this.config.accountId) return;
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) return;
+
+    try {
+      await this.connection.sendCommand('ProtoOAUnsubscribeSpotsReq', {
+        ctidTraderAccountId: accountIdNum,
+        symbolId: [symbolId],
+      });
+    } catch {
+      // Best-effort unsubscribe.
+    }
+  }
+
+  /** Re-subscribe all symbolIds after reconnect. */
+  async resubscribePersistentSpots(): Promise<void> {
+    if (!this.connection || !this.config.accountId) return;
+    const accountIdNum = parseInt(this.config.accountId, 10);
+    if (isNaN(accountIdNum)) {
+      throw new Error(`Invalid account ID: ${this.config.accountId}`);
+    }
+
+    const ids = [...this.persistentSpotRefCounts.entries()]
+      .filter(([, refCount]) => refCount > 0)
+      .map(([symbolId]) => symbolId);
+    if (ids.length === 0) return;
+
+    this.ensureSpotEventListener();
+    await this.connection.sendCommand('ProtoOASubscribeSpotsReq', {
+      ctidTraderAccountId: accountIdNum,
+      symbolId: ids,
+    });
+  }
+
+  private ensureSpotEventListener(): void {
+    if (this.spotListenerId || !this.connection) return;
+
+    const connection = this.connection;
+    const id = connection.on('ProtoOASpotEvent', (ctraderEvent: unknown) => {
+      const event = (ctraderEvent as { descriptor?: unknown })?.descriptor ?? ctraderEvent;
+      const raw = event as Record<string, unknown>;
+
+      const symbolId = protobufLongToNumber(raw.symbolId);
+      if (symbolId == null) return;
+
+      const bidRaw = raw.bid != null ? Number(raw.bid) : NaN;
+      const askRaw = raw.ask != null ? Number(raw.ask) : NaN;
+      const bid = Number.isFinite(bidRaw) ? bidRaw / CTRADER_SPOT_PRICE_SCALE : NaN;
+      const ask = Number.isFinite(askRaw) ? askRaw / CTRADER_SPOT_PRICE_SCALE : NaN;
+      if (!Number.isFinite(bid) && !Number.isFinite(ask)) return;
+
+      const normalizedBid = Number.isFinite(bid) ? bid : ask;
+      const normalizedAsk = Number.isFinite(ask) ? ask : bid;
+      const timestampMs = protobufLongToNumber(raw.timestamp) ?? undefined;
+
+      for (const handler of this.spotQuoteHandlers) {
+        try {
+          handler({ symbolId, bid: normalizedBid, ask: normalizedAsk, timestampMs });
+        } catch (error) {
+          logger.warn('cTrader spot quote handler threw', {
+            accountId: this.config.accountId,
+            symbolId,
+            exchange: 'ctrader',
+            error: serializeErrorForLog(error),
+          });
+        }
+      }
+    });
+    this.spotListenerId = typeof id === 'string' ? id : undefined;
+  }
+
   /**
    * Fetch spot bid/ask with retries and diagnostics.
    * Used internally by getCurrentPrice (coalesced per symbol).
@@ -2353,6 +2489,7 @@ export class CTraderClient {
       this.connected = false;
       this.authenticated = false;
       this.lastVerifiedAuthAt = null;
+      this.spotListenerId = undefined;
       this.symbolInfoCache.clear();
     }
   }

@@ -23,6 +23,7 @@ import {
   updateOrderToFilled,
   updateTradeOnPositionClosed,
   updateTradeOnStopLossHit,
+  countFilledTakeProfits,
   cancelTrade,
   sleep,
   MONITOR_TRADE_TIMEOUT_MS,
@@ -47,12 +48,15 @@ import {
   readExchangePositionStopLoss,
   stopLossMatchesTarget,
 } from './ctraderBreakeven.js';
+import { getTickTpService } from '../ctrader/tickClose/tickTpServiceManager.js';
+import { isTickCloseStrategy } from '../utils/ctraderTpStrategy.js';
 import {
   parseCtraderOrderLabel,
   resolveCtraderPositionEntryLabel,
   tradeMatchesCtraderOrderLabel,
   verifyCtraderEntryOrderLabel,
 } from '../utils/ctraderOrderLabel.js';
+import type { AccountConfig } from '../types/config.js';
 
 /** Max deal history window (7 days) - caps slow API scans when trade already closed */
 const DEAL_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -173,15 +177,21 @@ const countCtraderSiblingsClosedAtTakeProfit = async (
 type CTraderBreakevenContext = {
   breakevenAfterTPs: number;
   dynamicBreakevenAfterTPs: boolean;
+  getAccountConfig?: (name?: string) => AccountConfig | undefined;
 };
 
-const checkAndApplyBreakeven = async (
+export const checkAndApplyBreakeven = async (
   trade: Trade,
   db: DatabaseManager,
   ctraderClient: CTraderClient | undefined,
   breakevenAfterTPs: number,
   dynamicBreakevenAfterTPs: boolean,
-  options?: { extraClosedTpWeight?: number; openSnapshot?: CtraderOpenPositionsSnapshot }
+  options?: {
+    extraClosedTpWeight?: number;
+    openSnapshot?: CtraderOpenPositionsSnapshot;
+    filledTpCountOverride?: number;
+    getAccountConfig?: (name?: string) => AccountConfig | undefined;
+  }
 ): Promise<void> => {
   if (!ctraderClient || !trade.position_id) {
     logger.debug('Skipping cTrader breakeven — need client and position_id', {
@@ -204,20 +214,37 @@ const checkAndApplyBreakeven = async (
     breakevenAfterTPs,
     dynamicBreakevenAfterTPs
   });
-  const siblingsHitTp =
-    (await countCtraderSiblingsClosedAtTakeProfit(allSiblings, trade.id, ctraderClient)) +
-    (options?.extraClosedTpWeight ?? 0);
+  const accountConfig = options?.getAccountConfig?.(trade.account_name);
+  const useTickCloseGate = isTickCloseStrategy(accountConfig);
+  let siblingsHitTp = 0;
+  let closedSiblingCount = 0;
+  let filledTpCount: number | undefined;
+  let tpGateMet = false;
+  let siblingCloseGateMet = false;
 
-  const messageCtraderSiblings = allSiblings.filter((t) => t.exchange === 'ctrader');
-  const closedSiblingCount = messageCtraderSiblings.filter(
-    (s) =>
-      s.id !== trade.id &&
-      (s.status === 'closed' || s.status === 'stopped' || s.status === 'completed')
-  ).length;
+  if (useTickCloseGate) {
+    filledTpCount =
+      options?.filledTpCountOverride ??
+      getTickTpService(trade.account_name ?? '')?.getFilledTpCount(trade.id) ??
+      (await countFilledTakeProfits(trade, db));
+    tpGateMet = filledTpCount >= effectiveBreakevenAfterTPs;
+    if (!tpGateMet) return;
+  } else {
+    siblingsHitTp =
+      (await countCtraderSiblingsClosedAtTakeProfit(allSiblings, trade.id, ctraderClient)) +
+      (options?.extraClosedTpWeight ?? 0);
 
-  const tpGateMet = siblingsHitTp >= effectiveBreakevenAfterTPs;
-  const siblingCloseGateMet = closedSiblingCount >= effectiveBreakevenAfterTPs;
-  if (!tpGateMet && !siblingCloseGateMet) return;
+    const messageCtraderSiblings = allSiblings.filter((t) => t.exchange === 'ctrader');
+    closedSiblingCount = messageCtraderSiblings.filter(
+      (s) =>
+        s.id !== trade.id &&
+        (s.status === 'closed' || s.status === 'stopped' || s.status === 'completed')
+    ).length;
+
+    tpGateMet = siblingsHitTp >= effectiveBreakevenAfterTPs;
+    siblingCloseGateMet = closedSiblingCount >= effectiveBreakevenAfterTPs;
+    if (!tpGateMet && !siblingCloseGateMet) return;
+  }
 
   let plan: Awaited<ReturnType<typeof computeCtraderBreakevenSlPlan>>;
   try {
@@ -346,6 +373,8 @@ const checkAndApplyBreakeven = async (
 
     logger.info('Required take profits hit - moved cTrader stop loss to breakeven', {
       tradeId: trade.id,
+      useTickCloseGate,
+      filledTpCount,
       siblingsHitTp,
       closedSiblingCount,
       tpGateMet,
@@ -361,6 +390,8 @@ const checkAndApplyBreakeven = async (
   } catch (beError) {
     logger.error('Error moving stop loss to breakeven on cTrader', {
       tradeId: trade.id,
+      useTickCloseGate,
+      filledTpCount,
       siblingsHitTp,
       breakevenAfterTPs: effectiveBreakevenAfterTPs,
       totalTpLevels,
@@ -654,7 +685,8 @@ const reconcileOrphanCtraderPositionsForAccount = async (
   accountName: string | undefined,
   ctraderClient: CTraderClient,
   breakevenAfterTPs: number,
-  dynamicBreakevenAfterTPs: boolean
+  dynamicBreakevenAfterTPs: boolean,
+  getAccountConfig?: (name?: string) => AccountConfig | undefined
 ): Promise<void> => {
   const accNorm = accountName ?? '';
 
@@ -898,7 +930,9 @@ const reconcileOrphanCtraderPositionsForAccount = async (
 
   for (const { trade } of relinkResults) {
     try {
-      await checkAndApplyBreakeven(trade, db, ctraderClient, breakevenAfterTPs, dynamicBreakevenAfterTPs);
+      await checkAndApplyBreakeven(trade, db, ctraderClient, breakevenAfterTPs, dynamicBreakevenAfterTPs, {
+        getAccountConfig
+      });
     } catch (err) {
       logger.warn('cTrader orphan reconcile: breakeven after relink failed', {
         tradeId: trade.id,
@@ -919,7 +953,8 @@ const runCtraderLabelAuditSweepForAccount = async (
   accountName: string | undefined,
   ctraderClient: CTraderClient,
   breakevenAfterTPs: number,
-  dynamicBreakevenAfterTPs: boolean
+  dynamicBreakevenAfterTPs: boolean,
+  getAccountConfig?: (name?: string) => AccountConfig | undefined
 ): Promise<void> => {
   const accNorm = accountName ?? '';
   let open: any[];
@@ -1021,7 +1056,7 @@ const runCtraderLabelAuditSweepForAccount = async (
         ctraderClient,
         breakevenAfterTPs,
         dynamicBreakevenAfterTPs,
-        { openSnapshot }
+        { openSnapshot, getAccountConfig }
       );
     } catch (beErr) {
       logger.warn('cTrader label audit: breakeven after relink failed', {
@@ -1144,7 +1179,10 @@ const applyBreakevenToActiveSiblingsBeforeTpClose = async (
         ctraderClient,
         beContext.breakevenAfterTPs,
         beContext.dynamicBreakevenAfterTPs,
-        { extraClosedTpWeight: closingWeight }
+        {
+          extraClosedTpWeight: closingWeight,
+          getAccountConfig: beContext.getAccountConfig
+        }
       );
     } catch (err) {
       logger.warn('Breakeven for active sibling failed (pre-close TP trigger)', {
@@ -1207,6 +1245,7 @@ const applyCtraderReconciledClose = async (
   } else {
     await updateTradeOnPositionClosed(trade, db, exitPrice, allocatedPnl);
   }
+  getTickTpService(trade.account_name ?? '')?.unregister(trade.id);
 };
 
 const withCtraderApiTimeout = async <T>(promise: Promise<T>, ms: number, label: string): Promise<T> => {
@@ -3327,6 +3366,7 @@ const monitorTrade = async (
 
           if (order.order_type === 'stop_loss') {
             await updateTradeOnStopLossHit(trade, db, orderResult.filledPrice);
+            getTickTpService(trade.account_name ?? '')?.unregister(trade.id);
           }
         }
       }
@@ -3437,6 +3477,7 @@ export type CTraderMonitorStartExtras = {
   getCtraderOrphanReconcileIntervalSeconds?: (accountName: string) => number;
   /** Interval in seconds for label-vs-DB audit sweep per account (0 = disabled). */
   getCtraderLabelAuditSweepSeconds?: (accountName: string) => number;
+  getAccountConfig?: (accountName?: string) => AccountConfig | undefined;
 };
 
 /**
@@ -3525,7 +3566,8 @@ export const startCTraderMonitor = async (
 
         const beContext: CTraderBreakevenContext = {
           breakevenAfterTPs,
-          dynamicBreakevenAfterTPs
+          dynamicBreakevenAfterTPs,
+          getAccountConfig: extras?.getAccountConfig
         };
 
         // Process trades with limited concurrency - avoids bursting cTrader historical API (5 req/sec limit)
@@ -3629,7 +3671,10 @@ export const startCTraderMonitor = async (
                   accountCTraderClient,
                   breakevenAfterTPs,
                   dynamicBreakevenAfterTPs,
-                  { openSnapshot }
+                  {
+                    openSnapshot,
+                    getAccountConfig: extras?.getAccountConfig
+                  }
                 );
               } catch (err) {
                 logger.warn('Breakeven check failed for trade', {
@@ -3665,7 +3710,8 @@ export const startCTraderMonitor = async (
                 accNm,
                 oc,
                 breakevenAfterTPs,
-                dynamicBreakevenAfterTPs
+                dynamicBreakevenAfterTPs,
+                extras?.getAccountConfig
               );
               const labelAuditSec = extras?.getCtraderLabelAuditSweepSeconds?.(accNm) ?? 0;
               if (Number.isFinite(labelAuditSec) && labelAuditSec > 0) {
@@ -3678,7 +3724,8 @@ export const startCTraderMonitor = async (
                     accNm,
                     oc,
                     breakevenAfterTPs,
-                    dynamicBreakevenAfterTPs
+                    dynamicBreakevenAfterTPs,
+                    extras?.getAccountConfig
                   );
                 }
               }
@@ -3704,7 +3751,8 @@ export const startCTraderMonitor = async (
                 undefined,
                 ctraderClient,
                 breakevenAfterTPs,
-                dynamicBreakevenAfterTPs
+                dynamicBreakevenAfterTPs,
+                extras?.getAccountConfig
               );
             } catch (orphErr) {
               logger.warn('cTrader orphan position reconcile failed', {

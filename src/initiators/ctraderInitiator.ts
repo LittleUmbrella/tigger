@@ -12,6 +12,7 @@ import { deduplicateTakeProfits } from '../utils/deduplication.js';
 import { normalizeCTraderSymbol } from '../utils/ctraderSymbolUtils.js';
 import { isCtraderGoldSymbol } from '../utils/ctraderGoldSymbol.js';
 import { getCachedCTraderSymbolInfo } from '../utils/ctraderSymbolInfoCache.js';
+import { isTickCloseStrategy } from '../utils/ctraderTpStrategy.js';
 import {
   buildCtraderOrderLabel,
   verifyCtraderEntryOrderLabel,
@@ -33,6 +34,8 @@ import {
   ctraderLotsToApiVolumeSimple,
   resolveCtraderNTradeEntryOrderIds,
 } from '../clients/ctraderClient.js';
+import { registerTickCloseWatch } from '../ctrader/tickClose/tickTpServiceManager.js';
+import { placeTickClosePosition } from '../ctrader/tickClose/ctraderTickClosePlacement.js';
 import { resolveCtraderAccountCredentials } from '../utils/ctraderAccountCredentials.js';
 import dayjs from 'dayjs';
 
@@ -238,6 +241,7 @@ const executeTradeForAccount = async (
 
   /** Channel `useLimitOrderForEntry` (defaults true when omitted): false → MARKET + relative SL/TP; true → limit-at-touch. `order.marketExecution` forces the MARKET path. */
   const useLimitAtTouch = useLimitOrderForEntry !== false && !order.marketExecution;
+  const useTickClose = isTickCloseStrategy(account);
 
   let ctraderClient: CTraderClient | undefined = undefined;
 
@@ -1253,7 +1257,7 @@ const executeTradeForAccount = async (
     /** When using N trades (one per TP), each trade has its own order with SL+TP - no separate TP orders */
     let nTradeData: { tradeIds: number[]; orderIds: string[]; quantities: number[]; tpPrices: number[][] } | undefined;
     if (isSimulation) {
-      if (roundedTPPrices && roundedTPPrices.length > 1 && roundedStopLoss && roundedStopLoss > 0) {
+      if (!useTickClose && roundedTPPrices && roundedTPPrices.length > 1 && roundedStopLoss && roundedStopLoss > 0) {
         const tpQuantities = distributeQuantityAcrossTPs(qty, roundedTPPrices.length, decimalPrecision, CTRADER_TP_SPLIT_OPTIONS);
         const validTPOrders = validateAndRedistributeTPQuantities(
           tpQuantities,
@@ -1315,6 +1319,7 @@ const executeTradeForAccount = async (
         // N-trades path: one trade per TP, each order has SL+TP - works for both limit and market
         // Reuse TP quantity logic: distribute + validate (volumeStep, min/max, redistribution when slices too small)
         if (
+          !useTickClose &&
           roundedTPPrices &&
           roundedTPPrices.length > 1 &&
           roundedStopLoss &&
@@ -2316,147 +2321,181 @@ const executeTradeForAccount = async (
               exchange: 'ctrader'
             });
           } else {
-            // Set SL and best TP on position via modifyPosition (monitor replaces these; idempotent)
-            const tpCount = roundedTPPrices?.length ?? 0;
-            const bestTpOrder = validTPOrders.find(tp => tp.index === tpCount);
-            const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices?.[tpCount - 1];
-            try {
-              const modifyPayload: { positionId: string; stopLoss?: number; takeProfit?: number } = {
-                positionId: positionId!
-              };
-              if (roundedStopLoss && roundedStopLoss > 0) {
-                modifyPayload.stopLoss = roundedStopLoss;
-              }
-              if (bestTpPrice != null && bestTpPrice > 0) {
-                modifyPayload.takeProfit = bestTpPrice;
-              }
-              if (modifyPayload.stopLoss != null || modifyPayload.takeProfit != null) {
-                await ctraderClient.modifyPosition(modifyPayload);
-                logger.info('cTrader position SL and best TP set via modifyPosition', {
+            if (useTickClose && positionIdStr && tradeId && !isSimulation) {
+              const result = await placeTickClosePosition({
+                ctraderClient,
+                tradeId,
+                channel,
+                messageId: String(message.message_id),
+                accountName: accountName || 'default',
+                symbol,
+                positionId: positionIdStr,
+                direction: order.signalType === 'long' ? 'long' : 'short',
+                roundedStopLoss,
+                tpPrices: roundedTPPrices,
+                totalVolumeLots: totalQtyForTPs,
+                volumeStep,
+                minOrderVolume,
+                maxOrderVolume,
+                decimalPrecision
+              });
+              if (result.watch) {
+                registerTickCloseWatch(accountName || 'default', result.watch);
+                logger.info('cTrader tick-close watch registered', {
                   channel,
                   symbol,
                   accountName: accountName || 'default',
-                  stopLoss: modifyPayload.stopLoss,
-                  bestTpPrice: modifyPayload.takeProfit,
+                  tradeId,
+                  positionId: positionIdStr,
+                  exchange: 'ctrader'
+                });
+              }
+            } else {
+              // Set SL and best TP on position via modifyPosition (monitor replaces these; idempotent)
+              const tpCount = roundedTPPrices?.length ?? 0;
+              const bestTpOrder = validTPOrders.find(tp => tp.index === tpCount);
+              const bestTpPrice = bestTpOrder?.price ?? roundedTPPrices?.[tpCount - 1];
+              try {
+                const modifyPayload: { positionId: string; stopLoss?: number; takeProfit?: number } = {
+                  positionId: positionId!
+                };
+                if (roundedStopLoss && roundedStopLoss > 0) {
+                  modifyPayload.stopLoss = roundedStopLoss;
+                }
+                if (bestTpPrice != null && bestTpPrice > 0) {
+                  modifyPayload.takeProfit = bestTpPrice;
+                }
+                if (modifyPayload.stopLoss != null || modifyPayload.takeProfit != null) {
+                  await ctraderClient.modifyPosition(modifyPayload);
+                  logger.info('cTrader position SL and best TP set via modifyPosition', {
+                    channel,
+                    symbol,
+                    accountName: accountName || 'default',
+                    stopLoss: modifyPayload.stopLoss,
+                    bestTpPrice: modifyPayload.takeProfit,
+                    positionId,
+                    tradeId,
+                    exchange: 'ctrader'
+                  });
+                }
+              } catch (error) {
+                logger.warn('Failed to set SL or best TP on position, monitor will retry', {
+                  channel,
+                  symbol,
+                  accountName: accountName || 'default',
                   positionId,
                   tradeId,
-                  exchange: 'ctrader'
-                });
-              }
-            } catch (error) {
-              logger.warn('Failed to set SL or best TP on position, monitor will retry', {
-                channel,
-                symbol,
-                accountName: accountName || 'default',
-                positionId,
-                tradeId,
-                exchange: 'ctrader',
-                ...serializeError(error)
-              });
-            }
-
-            // Place limit orders only for non-best TPs (best TP is on position)
-            // cTrader placeLimitOrder expects volume in lots. totalQtyForTPs and thus tpOrd.quantity
-            // are always in lots (actualPositionQty was converted via /lotSize when used).
-            if (actualPositionQty != null && (lotSize == null || lotSize <= 0)) {
-              logger.warn('Skipping TP placement: lotSize required for API unit conversion', {
-                channel,
-                symbol,
-                accountName: accountName || 'default',
-                lotSize,
-                actualPositionQty,
-                positionId,
-                tradeId,
-                orderId,
-                validTPCount: validTPOrders.length,
-                exchange: 'ctrader'
-              });
-            } else {
-            const volumeLotsForPlaceLimit = (tpOrd: { quantity: number }) => tpOrd.quantity;
-
-            const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
-            
-            for (const tpOrder of validTPOrders) {
-              if (tpOrder.index === tpCount) {
-                // Best TP - already set on position, skip separate order
-                continue;
-              }
-              try {
-                // Determine opposite side for TP orders (use effectivePositionSide - falls back to expected when mismatch)
-                // For a Long position (BUY side), TP is SELL
-                // For a Short position (SELL side), TP is BUY
-                const tpSide = effectivePositionSide === 'BUY' ? 'SELL' : 'BUY';
-                const volumeLots = volumeLotsForPlaceLimit(tpOrder);
-                
-                const tpOrderId = await ctraderClient.placeLimitOrder({
-                  symbol,
-                  volume: volumeLots,
-                  tradeSide: tpSide,
-                  price: tpOrder.price,
-                  positionId: positionIdStr, // Link to position (reduce-only-like guard - order modifies this position, not a new one)
-                  ...(lotSize != null && lotSize > 0 && { volumeApiUnits: ctraderLotsToApiVolumeSimple(volumeLots, lotSize) })
-                });
-                
-                tpOrderIds.push({
-                  index: tpOrder.index,
-                  orderId: tpOrderId,
-                  price: tpOrder.price,
-                  quantity: volumeLots
-                });
-                
-                logger.info('TP order placed', {
-                  channel,
-                  symbol,
-                  accountName: accountName || 'default',
-                  tpIndex: tpOrder.index,
-                  tpOrderId,
-                  tpPrice: tpOrder.price,
-                  tpQuantity: tpOrder.quantity,
-                  tradeId,
-                  positionId: positionIdStr,
-                  exchange: 'ctrader'
-                });
-              } catch (error) {
-                logger.error('Failed to place TP order', {
-                  channel,
-                  symbol,
-                  accountName: accountName || 'default',
-                  tpIndex: tpOrder.index,
-                  tpPrice: tpOrder.price,
-                  tradeId,
-                  positionId: positionIdStr,
                   exchange: 'ctrader',
                   ...serializeError(error)
                 });
-                // Continue placing other TPs even if one fails
               }
-            }
-            
-            // Store TP orders in database and persist position_id so monitor can detect position close
-            if (tradeId) {
-              for (const tpOrder of tpOrderIds) {
-                try {
-                  await db.insertOrder({
-                    trade_id: tradeId,
-                    order_type: 'take_profit',
-                    order_id: tpOrder.orderId,
-                    price: tpOrder.price,
-                    quantity: tpOrder.quantity,
-                    tp_index: tpOrder.index,
-                    status: 'pending'
-                  });
-                } catch (error) {
-                  logger.error('cTrader TP order placed on exchange but failed to save to DB - order may be orphaned', {
-                    tradeId,
-                    accountName: accountName || 'default',
-                    tpOrderId: tpOrder.orderId,
-                    tpIndex: tpOrder.index,
-                    tpPrice: tpOrder.price,
-                    exchange: 'ctrader',
-                    error: error instanceof Error ? error.message : String(error)
-                  });
+
+              // Place limit orders only for non-best TPs (best TP is on position)
+              // cTrader placeLimitOrder expects volume in lots. totalQtyForTPs and thus tpOrd.quantity
+              // are always in lots (actualPositionQty was converted via /lotSize when used).
+              if (actualPositionQty != null && (lotSize == null || lotSize <= 0)) {
+                logger.warn('Skipping TP placement: lotSize required for API unit conversion', {
+                  channel,
+                  symbol,
+                  accountName: accountName || 'default',
+                  lotSize,
+                  actualPositionQty,
+                  positionId,
+                  tradeId,
+                  orderId,
+                  validTPCount: validTPOrders.length,
+                  exchange: 'ctrader'
+                });
+              } else {
+                const volumeLotsForPlaceLimit = (tpOrd: { quantity: number }) => tpOrd.quantity;
+
+                const tpOrderIds: Array<{ index: number; orderId: string; price: number; quantity: number }> = [];
+                
+                for (const tpOrder of validTPOrders) {
+                  if (tpOrder.index === tpCount) {
+                    // Best TP - already set on position, skip separate order
+                    continue;
+                  }
+                  try {
+                    // Determine opposite side for TP orders (use effectivePositionSide - falls back to expected when mismatch)
+                    // For a Long position (BUY side), TP is SELL
+                    // For a Short position (SELL side), TP is BUY
+                    const tpSide = effectivePositionSide === 'BUY' ? 'SELL' : 'BUY';
+                    const volumeLots = volumeLotsForPlaceLimit(tpOrder);
+                    
+                    const tpOrderId = await ctraderClient.placeLimitOrder({
+                      symbol,
+                      volume: volumeLots,
+                      tradeSide: tpSide,
+                      price: tpOrder.price,
+                      positionId: positionIdStr, // Link to position (reduce-only-like guard - order modifies this position, not a new one)
+                      ...(lotSize != null && lotSize > 0 && { volumeApiUnits: ctraderLotsToApiVolumeSimple(volumeLots, lotSize) })
+                    });
+                    
+                    tpOrderIds.push({
+                      index: tpOrder.index,
+                      orderId: tpOrderId,
+                      price: tpOrder.price,
+                      quantity: volumeLots
+                    });
+                    
+                    logger.info('TP order placed', {
+                      channel,
+                      symbol,
+                      accountName: accountName || 'default',
+                      tpIndex: tpOrder.index,
+                      tpOrderId,
+                      tpPrice: tpOrder.price,
+                      tpQuantity: tpOrder.quantity,
+                      tradeId,
+                      positionId: positionIdStr,
+                      exchange: 'ctrader'
+                    });
+                  } catch (error) {
+                    logger.error('Failed to place TP order', {
+                      channel,
+                      symbol,
+                      accountName: accountName || 'default',
+                      tpIndex: tpOrder.index,
+                      tpPrice: tpOrder.price,
+                      tradeId,
+                      positionId: positionIdStr,
+                      exchange: 'ctrader',
+                      ...serializeError(error)
+                    });
+                    // Continue placing other TPs even if one fails
+                  }
+                }
+                
+                // Store TP orders in database and persist position_id so monitor can detect position close
+                if (tradeId) {
+                  for (const tpOrder of tpOrderIds) {
+                    try {
+                      await db.insertOrder({
+                        trade_id: tradeId,
+                        order_type: 'take_profit',
+                        order_id: tpOrder.orderId,
+                        price: tpOrder.price,
+                        quantity: tpOrder.quantity,
+                        tp_index: tpOrder.index,
+                        status: 'pending'
+                      });
+                    } catch (error) {
+                      logger.error('cTrader TP order placed on exchange but failed to save to DB - order may be orphaned', {
+                        tradeId,
+                        accountName: accountName || 'default',
+                        tpOrderId: tpOrder.orderId,
+                        tpIndex: tpOrder.index,
+                        tpPrice: tpOrder.price,
+                        exchange: 'ctrader',
+                        error: error instanceof Error ? error.message : String(error)
+                      });
+                    }
+                  }
                 }
               }
+            }
+            if (tradeId) {
               const labelCheck = await verifyCtraderEntryOrderLabel(
                 ctraderClient,
                 orderId,
@@ -2482,7 +2521,6 @@ const executeTradeForAccount = async (
                   position_id: positionIdStr
                 });
               }
-            }
             }
           }
         }

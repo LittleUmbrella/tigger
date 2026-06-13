@@ -7,7 +7,7 @@ import { startCSVHarvester } from '../harvesters/csvHarvester.js';
 import { parseUnparsedMessages, parseMessage } from '../parsers/signalParser.js';
 import { processUnparsedMessages } from '../initiators/signalInitiator.js';
 import { startTradeMonitor } from '../monitors/tradeMonitor.js';
-import { startCTraderMonitor, CTraderMonitorStartExtras } from '../monitors/ctraderMonitor.js';
+import { startCTraderMonitor, CTraderMonitorStartExtras, checkAndApplyBreakeven } from '../monitors/ctraderMonitor.js';
 import { logger } from '../utils/logger.js';
 import { isTransientInfrastructureError, serializeErrorForLog } from '../utils/errorUtils.js';
 import { createHistoricalPriceProvider, HistoricalPriceProvider } from '../utils/historicalPriceProvider.js';
@@ -21,6 +21,7 @@ import { diffOrderWithTrade } from '../managers/orderDiff.js';
 import dayjs from 'dayjs';
 import { RestClientV5 } from 'bybit-api';
 import { CTraderClient, CTraderClientConfig } from '../clients/ctraderClient.js';
+import { startTickTpServices } from '../ctrader/tickClose/tickTpServiceManager.js';
 import { vipCryptoSignals } from '../parsers/channels/2427485240/vip-future.js';
 import { ronnieCryptoSignals } from '../parsers/channels/3241720654/ronnie-crypto-signals.js';
 import { connect } from '../parsers/channels/2394142145/connect.js';
@@ -305,6 +306,7 @@ export const startTradeOrchestrator = async (
   const parserChannelsProcessed = new Set<string>();
   /** Assigned after live pipeline helpers are defined; harvesters close over this binding. */
   let wakeChannelLive: (channel: string) => void = () => {};
+  let stopTickTpServices: (() => Promise<void>) | undefined;
 
   if (!isSimulation && config.accounts?.length) {
     await verifyAllCtraderAccountsAtStartup(config.accounts);
@@ -326,6 +328,30 @@ export const startTradeOrchestrator = async (
         accountNames: ctraderAccounts.map((a) => a.name),
       });
     }
+  }
+
+  if (!isSimulation) {
+    stopTickTpServices = await startTickTpServices({
+      accounts: config.accounts ?? [],
+      db,
+      getCTraderClient: createCTraderClient,
+      isSimulation,
+      onBreakevenCheck: async (tradeId, filledTpCount) => {
+        const tradeWithMsg = await db.getTradeWithMessage(tradeId);
+        if (!tradeWithMsg) return;
+        const trade = tradeWithMsg;
+        const channelConfig = config.channels.find((c) => c.channel === trade.channel);
+        const monitor = monitorMap.get('ctrader');
+        const breakevenAfterTPs = channelConfig?.breakevenAfterTPs ?? monitor?.breakevenAfterTPs ?? 1;
+        const dynamicBreakevenAfterTPs =
+          channelConfig?.dynamicBreakevenAfterTPs ?? monitor?.dynamicBreakevenAfterTPs ?? false;
+        const client = await createCTraderClient(trade.account_name);
+        await checkAndApplyBreakeven(trade, db, client, breakevenAfterTPs, dynamicBreakevenAfterTPs, {
+          filledTpCountOverride: filledTpCount,
+          getAccountConfig: (name) => (name ? accountMap.get(name) : undefined),
+        });
+      },
+    });
   }
 
   const runInitiatorForChannelConfig = async (channelConfig: ChannelSetConfig): Promise<void> => {
@@ -620,7 +646,8 @@ export const startTradeOrchestrator = async (
             if (secs === 0) return 0;
             if (typeof secs === 'number' && Number.isFinite(secs) && secs > 0) return Math.floor(secs);
             return defaultCtraderLabelAuditSweepSeconds;
-          }
+          },
+          getAccountConfig: (name?: string) => (name ? accountMap.get(name) : undefined),
         };
         stopMonitor = await startCTraderMonitor(
           monitorConfigWithOverride,
@@ -1353,6 +1380,16 @@ export const startTradeOrchestrator = async (
       } catch (error) {
         logger.error('Error stopping monitor', {
           error: serializeErrorForLog(error)
+        });
+      }
+    }
+
+    if (stopTickTpServices) {
+      try {
+        await stopTickTpServices();
+      } catch (error) {
+        logger.error('Error stopping cTrader tick TP services', {
+          error: serializeErrorForLog(error),
         });
       }
     }

@@ -44,6 +44,11 @@ const evaluateBreakevenEligibility = (
   return { siblingsHitTp, effectiveBreakevenAfterTPs };
 };
 
+const evaluateTickCloseBreakevenEligibility = (
+  filledTpCount: number,
+  effectiveBreakevenAfterTPs: number
+): boolean => filledTpCount >= effectiveBreakevenAfterTPs;
+
 describe('cTrader breakeven eligibility (message 14695 pattern)', () => {
   it('counts TP on another account toward BE on open legs', () => {
     const tp1OtherAccount = leg({
@@ -111,5 +116,11 @@ describe('cTrader breakeven eligibility (message 14695 pattern)', () => {
       (s) => s.id !== openLeg.id && ['closed', 'stopped', 'completed'].includes(s.status)
     ).length;
     expect(closedCount).toBeGreaterThanOrEqual(effectiveBreakevenAfterTPs);
+  });
+
+  it('uses filled TP count gate for tick-close strategy', () => {
+    expect(evaluateTickCloseBreakevenEligibility(0, 1)).toBe(false);
+    expect(evaluateTickCloseBreakevenEligibility(1, 2)).toBe(false);
+    expect(evaluateTickCloseBreakevenEligibility(2, 2)).toBe(true);
   });
 });

@@ -289,6 +289,7 @@
     {
       "name": "ctrader_live_5",
       "exchange": "ctrader",
+      "ctraderTpStrategy": "tick-close",
       "demo": false,
       "_comment": "cTrader funded account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials.",
       "envVarNames": {
@@ -303,6 +304,7 @@
     {
       "name": "ctrader_demo_2_100",
       "exchange": "ctrader",
+      "ctraderTpStrategy": "tick-close",
       "demo": false,
       "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
       "envVarNames": {
@@ -317,6 +319,7 @@
     {
       "name": "ctrader_demo_2_25",
       "exchange": "ctrader",
+      "ctraderTpStrategy": "tick-close",
       "demo": false,
       "_comment": "cTrader $25k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
       "envVarNames": {
