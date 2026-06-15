@@ -48,7 +48,7 @@ A comprehensive crypto trading bot written in TypeScript that harvests trading s
 1. Clone the repository
 2. Install dependencies:
    ```bash
-   npm install
+   npm ci
    ```
 
 3. Build TypeScript:
