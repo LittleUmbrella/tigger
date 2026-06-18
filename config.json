@@ -1,597 +1,131 @@
 {
-  "_comment": "This config file is safe to commit to version control. Database connection string comes from DATABASE_URL environment variable.",
+  "_comment": "This config file is safe to commit to version control. Sensitive values (apiId, apiHash, accessHash, botToken, API keys) should use environment variables. apiId can be set via TG_API_ID env var or removed from config.",
   "harvesters": [
     {
       "name": "main_harvester",
-      "channel": "2427485240",
+      "channel": "your_telegram_channel",
+      "platform": "telegram",
       "envVarNames": {
         "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH"
+        "accessHash": "TELEGRAM_ACCESS_HASH"
       },
-      "pollInterval": 4000,
+      "pollInterval": 5000,
       "downloadImages": false,
       "skipOldMessagesOnStartup": true,
       "maxMessageAgeMinutes": 5
     },
     {
-      "name": "ronnie_harvester",
-      "channel": "3272135406",
+      "name": "discord_harvester",
+      "channel": "1234567890123456789",
+      "platform": "discord",
       "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_RONNIE"
+        "botToken": "DISCORD_BOT_TOKEN"
       },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "big_harvester",
-      "channel": "2385521106",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_BIG"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "gold_scalps_harvester",
-      "channel": "1441399338805891174",
-      "platform": "discord-selfbot",
-      "envVarNames": {
-        "userToken": "DISCORD_USER_TOKEN"
-      }
-    },
-    {
-      "name": "gold_scalps_harvester_ic",
-      "channel": "1422142227580194846",
-      "platform": "discord-selfbot",
-      "envVarNames": {
-        "userToken": "DISCORD_USER_TOKEN"
-      }
-    },
-    {
-      "_comment": "`main_harvester` already harvests Telegram 2427485240; discord CMP/DCA channel uses dedicated self-bot harvester (same DISCORD_USER_TOKEN pattern as gold_scalps)",
-      "name": "cmp_dca_signal_harvester",
-      "channel": "1486846570531000412",
-      "platform": "discord-selfbot",
-      "envVarNames": {
-        "userToken": "DISCORD_USER_TOKEN"
-      }
-    },
-    {
-      "name": "star_format_harvester",
-      "channel": "1634731277",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_STAR_FORMAT"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_gold_harvester",
-      "channel": "3077664317",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    }, 
-    {
-      "name": "ctrader_gold_harvester_vip",
-      "channel": "3469900302",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_CTRADER_GOLD_VIP"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "trader_su_harvester",
-      "channel": "7920766559",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_TRADER_SU"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "steven_harvester",
-      "channel": "2120484771",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_STEVEN"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_dgf_harvester",
-      "channel": "2889224950",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_DGF"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "dgfvip_harvester",
-      "channel": "2845421508",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_DGF_VIP"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_ftg_harvester",
-      "channel": "2986529706",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_FTG"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_vgc_harvester",
-      "channel": "3750519389",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_VGC"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_klh_harvester",
-      "channel": "2498976211",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_KLH"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
-    },
-    {
-      "name": "ctrader_vpg_harvester",
-      "channel": "3245475213",
-      "envVarNames": {
-        "apiId": "TG_API_ID",
-        "accessHash": "TG_ACCESS_HASH_VPG"
-      },
-      "pollInterval": 4000,
-      "downloadImages": false,
-      "skipOldMessagesOnStartup": true,
-      "maxMessageAgeMinutes": 5
+      "pollInterval": 5000,
+      "downloadImages": false
     }
   ],
   "parsers": [
     {
-      "name": "vip_crypto_signals",
-      "channel": "2427485240",
-      "entryPriceStrategy": "average"
-    },
-    {
-      "name": "ronnie_crypto_signals",
-      "channel": "3272135406"
-    },
-    {
-      "name": "gold_scalps",
-      "channel": "1441399338805891174"
-    },
-    {
-      "name": "gold_scalps_ic",
-      "channel": "1422142227580194846"
-    },
-    {
-      "name": "cmp_dca_signal",
-      "channel": "1486846570531000412"
-    },
-    {
-      "name": "big",
-      "channel": "2385521106"
-    },
-    {
-      "name": "star_format",
-      "channel": "1634731277"
-    },
-    {
-      "name": "ctrader_gold",
-      "channel": "3077664317"
-    },
-    {
-      "name": "steven",
-      "channel": "2120484771"
-    },
-    {
-      "name": "ctrader_dgf",
-      "channel": "2889224950"
-    },
-    {
-      "name": "dgfvip",
-      "channel": "2845421508"
-    },
-    {
-      "name": "ctrader_ftg",
-      "channel": "2986529706"
-    },
-    {
-      "name": "ctrader_vgc",
-      "channel": "3750519389"
-    },
-    {
-      "name": "ctrader_klh",
-      "channel": "2498976211"
-    },
-    {
-      "name": "ctrader_vpg",
-      "channel": "3245475213"
-    },
-    {
-      "name": "trader_su",
-      "channel": "7920766559"
+      "name": "main_parser",
+      "channel": "your_telegram_channel",
+      "ollama": {
+        "baseUrl": "http://localhost:11434",
+        "model": "llama3.2:1b",
+        "timeout": 30000,
+        "maxRetries": 2,
+        "rateLimit": {
+          "perChannel": 10,
+          "perMinute": 30
+        }
+      }
     }
   ],
   "accounts": [
     {
-      "name": "demo",
+      "name": "main",
       "exchange": "bybit",
-      "demo": true,
-      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
+      "testnet": false,
       "envVarNames": {
-        "apiKey": "BYBIT_DEMO_API_KEY",
-        "apiSecret": "BYBIT_DEMO_API_SECRET"
+        "apiKey": "BYBIT_API_KEY",
+        "apiSecret": "BYBIT_API_SECRET"
       },
-      "minRiskReward": 1.11
+      "_comment_minRiskReward": "optional. Fallback when channel minRiskReward is unset.",
+      "minRiskReward": 2.5
     },
     {
-      "name": "hyrotrader_challenge1",
+      "name": "testnet",
       "exchange": "bybit",
-      "demo": true,
-      "_comment": "Demo Trading: Uses api-demo.bybit.com endpoint. Generate API keys in Demo Trading mode in your Bybit account.",
+      "testnet": true,
       "envVarNames": {
-        "apiKey": "BYBIT_DEMO_API_KEY_HYROTRADER_CHALLENGE1",
-        "apiSecret": "BYBIT_DEMO_API_SECRET_HYROTRADER_CHALLENGE1"
-      },
-      "minRiskReward": 1.11,
-      "propFirms": [{"name": "hyrotrader", "initialBalance": 50000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
-    },
-    {
-      "name": "ctrader_live_5",
-      "exchange": "ctrader",
-      "ctraderTpStrategy": "tick-close",
-      "demo": false,
-      "_comment": "cTrader funded account. Set up OAuth app at https://connect.spotware.com/apps and use environment variables for credentials.",
-      "envVarNames": {
-        "apiKey": "CTRADER_CLIENT_ID",
-        "apiSecret": "CTRADER_CLIENT_SECRET",
-        "accessToken": "CTRADER_ACCESS_TOKEN",
-        "accountId": "CTRADER_ACCOUNT_ID"
-      },
-      "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 5000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
-    },
-    {
-      "name": "ctrader_demo_2_100",
-      "exchange": "ctrader",
-      "ctraderTpStrategy": "tick-close",
-      "demo": false,
-      "_comment": "cTrader $100k variant (CTRADER_ACCOUNT_ID_2_100). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
-      "envVarNames": {
-        "apiKey": "CTRADER_CLIENT_ID",
-        "apiSecret": "CTRADER_CLIENT_SECRET",
-        "accessToken": "CTRADER_ACCESS_TOKEN",
-        "accountId": "CTRADER_ACCOUNT_ID_2_100"
-      },
-      "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 100000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
-    },
-    {
-      "name": "ctrader_demo_2_25",
-      "exchange": "ctrader",
-      "ctraderTpStrategy": "tick-close",
-      "demo": false,
-      "_comment": "cTrader $25k variant (CTRADER_ACCOUNT_ID_2_25). Shares OAuth app credentials with ctrader_live_5; accountId env var differs.",
-      "envVarNames": {
-        "apiKey": "CTRADER_CLIENT_ID",
-        "apiSecret": "CTRADER_CLIENT_SECRET",
-        "accessToken": "CTRADER_ACCESS_TOKEN",
-        "accountId": "CTRADER_ACCOUNT_ID_2_25"
-      },
-      "minRiskReward": 1.11,
-      "propFirms": [{"name": "the5ers", "initialBalance": 25000, "maxDrawdownMode": "static", "maxDrawdownBasis": "initialBalance", "dailyDrawdownMode": "swing"}]
+        "apiKey": "BYBIT_TESTNET_API_KEY",
+        "apiSecret": "BYBIT_TESTNET_API_SECRET"
+      }
     }
   ],
   "initiators": [
     {
       "name": "bybit",
-      "testnet": false,
-      "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
-      "riskPercentage": 1,
-      "accounts": ["hyrotrader_challenge1"]
+      "riskPercentage": 3,
+      "baseLeverage": 20,
+      "accounts": ["main"]
     },
     {
-      "name": "ctrader",
-      "riskPercentage": 1,
+      "name": "bybit_multi",
+      "riskPercentage": 3,
       "baseLeverage": 20,
-      "accounts": ["ctrader_live_5"]
+      "accounts": ["main", "testnet"]
     }
   ],
   "monitors": [
     {
       "type": "bybit",
       "testnet": false,
-      "_comment": "Demo Trading: Set testnet to false to use production API with demo funds",
-      "pollInterval": 4000,
-      "dynamicBreakevenAfterTPs": true
-    },
-    {
-      "type": "ctrader",
-      "pollInterval": 4000,
-      "dynamicBreakevenAfterTPs": true,
-      "ctraderLabelAuditSweepSeconds": 120,
-      "ctraderAuthMaxAgeMinutes": 15,
-      "_comment": "Optional: ctraderSymbolMap {\"XAUUSD\":\"GOLD\"}, ctraderSpotPriceTimeoutMs (default 8000), ctraderSpotPriceMaxRetries (default 3), ctraderAuthMaxAgeMinutes (default 15). useMarketRangeForEntry + maxSkippablePastTPs index the boundary TP for MARKET_RANGE — validate on demo."
+      "pollInterval": 10000,
+      "_comment_entryTimeoutMinutes": "2880 minutes = 2 days",
+      "entryTimeoutMinutes": 2880,
+      "breakevenAfterTPs": 1
     }
   ],
   "channels": [
     {
-      "channel": "1486846570531000412",
-      "harvester": "cmp_dca_signal_harvester",
-      "parser": "cmp_dca_signal",
+      "channel": "your_telegram_channel",
+      "harvester": "main_harvester",
+      "parser": "main_parser",
       "initiator": "bybit",
       "monitor": "bybit",
-      "useLimitOrderForEntry": true,
-      "useLimitOrderForBreakeven": true,
-      "entryTimeoutMinutes": 60,
-      "maxMessageStalenessMinutes": 5,
-      "riskPercentage": 1.4,
+      "breakevenAfterTPs": 1,
       "baseLeverage": 20,
+      "_comment_maxRisk": "optional. Human percent (5 = 5%; 1 = 1%). Caps total worst-case exposure (open positions + new trade) as a share of account balance.",
+      "maxRisk": 5,
+      "_comment_minRiskReward": "optional. Minimum reward-to-risk ratio (reward/risk). E.g. 2 requires at least 2:1. Overrides account-level minRiskReward when set.",
+      "minRiskReward": 2,
       "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "_comment": "Prop firm rules are on the trading account (hyrotrader_challenge1), not the channel"
+        "sl": 0.5,
+        "entry": 0.3,
+        "tp": 0.2
+      }
     },
     {
-      "channel": "3469900302",
-      "harvester": "ctrader_gold_harvester_vip",
-      "parser": "ctrader_gold",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 1,
-      "entryTimeoutMinutes": 3000,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "_comment": "Multi-account channel; prop firm rules (5k / 100k / 25k) live on each cTrader account.",
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true,
-      "allowConcurrentSymbolTrades": true,
-      "minRiskReward": 0.1,
-      "accountFilters": [
-        {
-          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
-          "rules": {}
-        }
-      ]
-    },
-    {
-      "channel": "7920766559",
-      "harvester": "trader_su_harvester",
-      "parser": "trader_su",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": true,
-      "riskPercentage": 1,
-      "entryTimeoutMinutes": 3000,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "_comment": "Trader Su (private chat); trader_su parser — limit at parsed entry, NOW → MARKET_RANGE via useMarketRangeForEntry.",
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true,
-      "allowConcurrentSymbolTrades": true,
-      "minRiskReward": 0.1,
-      "accountFilters": [
-        {
-          "accounts": ["ctrader_live_5", "ctrader_demo_2_100", "ctrader_demo_2_25"],
-          "rules": {}
-        }
-      ]
-    },
-    {
-      "channel": "2120484771",
-      "harvester": "steven_harvester",
-      "parser": "steven",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 0.80,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
-    },
-    {
-      "channel": "2385521106",
-      "harvester": "big_harvester",
-      "parser": "big",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 0.80,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
-    },
-    {
-      "channel": "2845421508",
-      "harvester": "dgfvip_harvester",
-      "parser": "dgfvip",
+      "channel": "1234567890123456789",
+      "harvester": "discord_harvester",
+      "parser": "main_parser",
       "initiator": "bybit",
       "monitor": "bybit",
-      "useLimitOrderForBreakeven": true,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 1,
-      "entryTimeoutMinutes": 244,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "_comment": "Hyrotrader Bybit leg for dgfvip (same Telegram channel as cTrader config above; shares dgfvip_harvester). Gold is cTrader-only.",
-      "pairRules": [
-        {
-          "_comment": "Gold handled by cTrader leg only",
-          "pairs": ["XAUUSD", "XAU/USD", "XAU", "GOLD"],
-          "skip": true
-        }
-      ],
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "accountFilters": [
-        {
-          "accounts": ["hyrotrader_challenge1"],
-          "rules": {}
-        }
-      ]
-    },
-    {
-      "channel": "2498976211",
-      "harvester": "ctrader_klh_harvester",
-      "parser": "ctrader_klh",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "useLimitOrderForEntry": false,
-      "riskPercentage": 0.80,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "tradeTolerance": {
-        "tp": 0.02,
-        "entry": 0.02
-      },
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
-    },
-    {
-      "channel": "1441399338805891174",
-      "harvester": "gold_scalps_harvester",
-      "parser": "gold_scalps",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "riskPercentage": 0.80,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
-    },
-    {
-      "channel": "1422142227580194846",
-      "harvester": "gold_scalps_harvester_ic",
-      "parser": "gold_scalps",
-      "initiator": "ctrader",
-      "monitor": "ctrader",
-      "useLimitOrderForBreakeven": false,
-      "riskPercentage": 0.80,
-      "entryTimeoutMinutes": 10,
-      "baseLeverage": 20,
-      "maxMessageStalenessMinutes": 5,
-      "tradeTolerance": {
-        "tp": 0.02,
-        "sl": 0.02,
-        "entry": 0.02
-      },
-      "slAdjustmentTolerancePercent": 0.03,
-      "maxSkippablePastTPs": 0,
-      "useMarketRangeForEntry": true
+      "breakevenAfterTPs": 1,
+      "baseLeverage": 15,
+      "slAdjustmentTolerancePercent": 10
     }
   ],
-  "orchestrator": {
-    "parserIntervalMs": 4000,
-    "initiatorIntervalMs": 4000
-  },
   "tradingPause": {
-    "_comment": "Comma-delimited values in env vars. Blank or unset env = no pauses for that list.",
+    "_comment": "Optional. Pause new trade initiation (live only; monitors still run). envVarNames point at comma-delimited env vars; blank/unset = no pauses.",
     "envVarNames": {
       "exchanges": "TRADING_PAUSE_EXCHANGES",
       "accounts": "TRADING_PAUSE_ACCOUNTS"
     }
   },
   "database": {
-    "_comment": "Database type: sqlite or postgresql, path is only used for sqlite: 'data/tigger.db'",
-    "type": "postgresql"
+    "type": "sqlite",
+    "path": "data/trading_bot.db"
   }
 }
-
-

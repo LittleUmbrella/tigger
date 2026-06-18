@@ -1,6 +1,6 @@
-# Tigger - Crypto Trading Bot
+# Tigger - Trading Bot
 
-A comprehensive crypto trading bot written in TypeScript that harvests trading signals from Telegram and Discord channels, parses them, initiates trades on exchanges (Bybit), and monitors them automatically.
+A comprehensive trading bot (for crypto and traditional instruments, like gold/xau) written in TypeScript that harvests trading signals from Telegram and Discord channels, parses them, initiates trades on exchanges (Bybit or ctrader-supported brokers), and monitors them automatically.
 
 ## Features
 
